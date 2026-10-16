@@ -12,6 +12,448 @@ use std::rc::Rc;
 pub const LINKER_IDENTITY: &str = "Linker: Omni Builder 1.0.0";
 pub const VERSION_BANNER: &str = "Omni Builder LLD 1.0.0 (compatible with GNU linkers)";
 
+const HELP_TEXT: &str = r#"OVERVIEW: lld
+
+USAGE: ld.lld [options] file...
+
+OPTIONS:
+  -(                      Alias for --start-group
+  -)                      Alias for --end-group
+  --allow-multiple-definition
+                          Allow multiple definitions
+  --allow-shlib-undefined Allow unresolved references in shared libraries (default when linking a shared library)
+  --android-memtag-note   Emit the Android-specific legacy memtag note
+  --apply-dynamic-relocs  Apply link-time values for dynamic relocations
+  --as-needed             Only set DT_NEEDED for shared libraries if used
+  --auxiliary=<value>     Set DT_AUXILIARY field to the specified name
+  --Bdynamic              Link against shared libraries (default)
+  --be8                   write a Big Endian ELF file using BE8 format (AArch32 only)
+  --Bno-symbolic          Don't bind default visibility defined symbols locally for -shared (default)
+  --bp-compression-sort-section=<glob>[=<layout_priority>[=<match_priority>]]
+                          Reorder input sections whose name matches <glob> to improve Lempel-Ziv compression, while letting users split sections into groups, run BP independently per group, and exclude unsuitable sections. layout_priority controls group placement order (default 0). match_priority resolves conflicts when multiple globs match (default: last match wins). May be specified multiple times
+  --bp-compression-sort-startup-functions
+                          When --irpgo-profile is specified, prioritize function similarity for compression in addition to startup time
+  --bp-compression-sort=[none,function,data,both]
+                          Improve Lempel-Ziv compression by grouping similar sections together. Deprecated. Please use --bp-compression-sort-section
+  --bp-startup-sort=[none,function]
+                          Utilize a temporal profile file to reduce page faults during program startup
+  --branch-to-branch      Enable branch-to-branch optimization (default at -O2)
+  --Bshareable            Alias for --shared
+  --Bstatic               Do not link against shared libraries
+  --Bsymbolic-functions   Bind default visibility defined function symbols locally for -shared
+  --Bsymbolic-non-weak-functions
+                          Bind default visibility defined STB_GLOBAL function symbols locally for -shared
+  --Bsymbolic-non-weak    Bind default visibility defined STB_GLOBAL symbols locally for -shared
+  --Bsymbolic             Bind default visibility defined symbols locally for -shared
+  --build-id=[fast,md5,sha1,uuid,0x<hexstring>]
+                          Generate build ID note
+  --build-id              Alias for --build-id=sha1
+  -b <value>              Alias for --format
+  --call-graph-ordering-file=<value>
+                          Layout sections to optimize the given callgraph
+  --call-graph-profile-sort=[none,hfsort,cdsort]
+                          Reorder input sections with call graph profile using the specified algorithm (default: cdsort)
+  --call_shared           Alias for --Bdynamic
+  --check-sections        Check section addresses for overlaps (default)
+  --cmse-implib           Make the output library to be a CMSE secure code import library
+  --color-diagnostics=[auto,always,never]
+                          Use colors in diagnostics (default: auto)
+  --color-diagnostics     Alias for --color-diagnostics=always
+  --compress-debug-sections=[none,zlib,zstd]
+                          Compress DWARF debug sections
+  --compress-sections=<section-glob>={none,zlib,zstd}[:level]
+                          Compress output sections that match the glob and do not have the SHF_ALLOC flag. The sections remain uncompressed if compressed content would be larger. The compression level is <level> (if specified) or a default speed-focused level
+  --cref                  Output cross reference table. If -Map is specified, print to the map file
+  --debug-names           Generate a merged .debug_names section
+  --default-script=<value>
+                          In the absence of --script, read this default linker script
+  --defsym=<symbol>=<value>
+                          Define a symbol alias
+  --demangle              Demangle symbol names (default)
+  --dependency-file=<file>
+                          Write a dependency file
+  --dependent-libraries   Process dependent library specifiers from input files (default)
+  --disable-new-dtags     Disable new dynamic tags
+  --discard-all           Delete all local symbols
+  --discard-locals        Delete temporary local symbols
+  --discard-none          Keep all symbols in the symbol table
+  --dn                    Alias for --Bstatic
+  -dT <value>             Alias for --default-script
+  --dynamic-linker=<value>
+                          Which dynamic linker to use
+  --dynamic-list=<file>   Similar to --export-dynamic-symbol-list. When creating a shared object, this additionally implies -Bsymbolic but does not set DF_SYMBOLIC
+  --dy                    Alias for --Bdynamic
+  --EB                    Select the big-endian format in OUTPUT_FORMAT
+  --eh-frame-hdr          Request creation of .eh_frame_hdr section and PT_GNU_EH_FRAME segment header
+  --EL                    Select the little-endian format in OUTPUT_FORMAT
+  --emit-relocs           Generate relocations in output
+  --enable-new-dtags      Enable new dynamic tags (default)
+  --enable-non-contiguous-regions
+                          Spill input sections to later matching output sections to avoid memory region overflow
+  --end-group             Ignored for compatibility with GNU unless you pass --warn-backrefs
+  --end-lib               End a grouping of objects that should be treated as if they were together in an archive
+  --entry=<entry>         Name of entry point symbol
+  --error-handling-script=<value>
+                          Specify an error handling script
+  --error-limit=<value>   Maximum number of errors to emit before stopping (0 = no limit)
+  --error-unresolved-symbols
+                          Report unresolved symbols as errors
+  --exclude-libs=<value>  Exclude static libraries from automatic export
+  --execute-only          Mark executable sections unreadable
+  --export-dynamic-symbol-list=file
+                          Read a list of dynamic symbol patterns. Apply --export-dynamic-symbol on each pattern
+  --export-dynamic-symbol=glob
+                          (executable) Put matched symbols in the dynamic symbol table. (shared object) References to matched non-local STV_DEFAULT symbols shouldn't be bound to definitions within the shared object. Does not imply -Bsymbolic.
+  --export-dynamic        Put symbols in the dynamic symbol table
+  -E                      Alias for --export-dynamic
+  -e <value>              Alias for --entry
+  --fat-lto-objects       Use the .llvm.lto section, which contains LLVM bitcode, in fat LTO object files to perform LTO.
+  --fatal-warnings        Treat warnings as errors
+  --filter=<value>        Set DT_FILTER field to the specified name
+  --fini=<symbol>         Specify a finalizer function
+  --fix-cortex-a53-843419 Apply fixes for AArch64 Cortex-A53 erratum 843419
+  --fix-cortex-a8         Apply fixes for ARM Cortex-A8 erratum 657417
+  --force-group-allocation
+                          Only meaningful for -r. Section groups are discarded. If two section group members are placed to the same output section, combine their relocations as well
+  --format=[default,elf,binary]
+                          Change the input format of the inputs following this option
+  -F <value>              Alias for --filter
+  -f <value>              Alias for --auxiliary
+  --gc-sections           Enable garbage collection of unused sections
+  --gdb-index             Generate .gdb_index section
+  --gnu-unique            Enable STB_GNU_UNIQUE symbol binding (default)
+  --hash-style=<value>    Specify hash style (sysv, gnu or both)
+  --help                  Print option help
+  -h <value>              Alias for --soname
+  --icf=all               Enable identical code folding
+  --icf=none              Disable identical code folding (default)
+  --icf=safe              Enable safe identical code folding
+  --ignore-data-address-equality
+                          lld can break the address equality of data
+  --ignore-function-address-equality
+                          lld can break the address equality of functions
+  --image-base=<value>    Set the base address
+  --in-implib=<file>      Read an existing CMSE secure code import library and preserve entry function addresses in the resulting new CMSE secure code import library (optional when creating a CMSE secure image)
+  --init=<symbol>         Specify an initializer function
+  --irpgo-profile=<value> Read a temporary profile file for use with --bp-startup-sort=
+  --just-symbols=<value>  Just link symbols
+  --keep-unique=<value>   Do not fold this symbol during ICF
+  --library-path=<value>  Add <dir> to the library search path
+  --library-path <value>  Add <dir> to the library search path
+  --library=<value>       Search for library <libname>
+  --library <value>       Search for library <libname>
+  --load-pass-plugin=<value>
+                          Load passes from plugin library
+  --lto-aa-pipeline=<value>
+                          AA pipeline to run during LTO. Used in conjunction with -lto-newpm-passes
+  --lto-basic-block-address-map
+                          Emit basic block address map for LTO
+  --lto-basic-block-sections=<value>
+                          Enable basic block sections for LTO
+  --lto-CGO<cgopt-level>  Codegen optimization level for LTO
+  --lto-cs-profile-file=<value>
+                          Context sensitive profile file path
+  --lto-cs-profile-generate
+                          Perform context sensitive PGO instrumentation
+  --lto-debug-pass-manager
+                          Debug new pass manager
+  --lto-emit-asm          Emit assembly code
+  --lto-emit-llvm         Emit LLVM-IR bitcode
+  --lto-known-safe-vtables=<value>
+                          When --lto-validate-all-vtables-have-type-infos is enabled, skip validation on these vtables (_ZTV symbols)
+  --lto-newpm-passes=<value>
+                          Passes to run during LTO
+  --lto-O<opt-level>      Optimization level for LTO
+  --lto-partitions=<value>
+                          Number of LTO codegen partitions
+  --lto-pgo-warn-mismatch turn on warnings about profile cfg mismatch (default)
+  --lto-sample-profile=<value>
+                          Sample profile file path
+  --lto-unique-basic-block-section-names
+                          Give unique names to every basic block section for LTO
+  --lto-validate-all-vtables-have-type-infos
+                          Validate that all vtables have type infos for LTO link
+  --lto-whole-program-visibility
+                          Asserts that the LTO link has whole program visibility
+  --lto=[full,thin]       Set LTO backend
+  -L <dir>                Add <dir> to the library search path
+  -l <libname>            Search for library <libname>
+  --Map=<value>           Print a link map to the specified file
+  --merge-exidx-entries   Enable merging .ARM.exidx entries (default)
+  --mllvm=<value>         Additional arguments to forward to LLVM's option processing
+  --mmap-output-file      Mmap the output file for writing (default)
+  -M                      Alias for --print-map
+  -m <value>              Set target emulation
+  --nmagic                Do not page align sections, link against static libraries.
+  --no-allow-multiple-definition
+                          Do not allow multiple definitions (default)
+  --no-allow-shlib-undefined
+                          Do not allow unresolved references in shared libraries (default when linking an executable)
+  --no-apply-dynamic-relocs
+                          Do not apply link-time values for dynamic relocations (default)
+  --no-as-needed          Always set DT_NEEDED for shared libraries (default)
+  --no-branch-to-branch   Disable branch-to-branch optimization (default at -O0 and -O1)
+  --no-check-sections     Do not check section addresses for overlaps
+  --no-color-diagnostics  Alias for --color-diagnostics=never
+  --no-debug-names        Do not generate a merged .debug_names section (default)
+  --no-demangle           Do not demangle symbol names
+  --no-dependent-libraries
+                          Ignore dependent library specifiers from input files
+  --no-dynamic-linker     Inhibit output of .interp section
+  --no-eh-frame-hdr       Do not create .eh_frame_hdr section
+  --no-execute-only       Mark executable sections readable (default)
+  --no-export-dynamic     Do not put symbols in the dynamic symbol table (default)
+  --no-fat-lto-objects    Ignore the .llvm.lto section in relocatable object files (default).
+  --no-fatal-warnings     Do not treat warnings as errors (default)
+  --no-gc-sections        Disable garbage collection of unused sections (default)
+  --no-gdb-index          Do not generate .gdb_index section (default)
+  --no-gnu-unique         Disable STB_GNU_UNIQUE symbol binding
+  --no-lto-basic-block-address-map
+                          Do not emit basic block address map for LTO (default)
+  --no-lto-pgo-warn-mismatch
+                          turn off warnings about profile cfg mismatch
+  --no-lto-unique-basic-block-section-names
+                          Do not give unique names to every basic block section for LTO (default)
+  --no-lto-validate-all-vtables-have-type-infos
+                          Do not validate that all vtables have type infos for LTO link
+  --no-lto-whole-program-visibility
+                          Asserts that the LTO link does not have whole program visibility
+  --no-merge-exidx-entries
+                          Disable merging .ARM.exidx entries
+  --no-mmap-output-file   Do not mmap the output file for writing
+  --no-nmagic             Page align sections (default)
+  --no-omagic             Do not set the text data sections to be writable, page align sections (default)
+  --no-optimize-bb-jumps  Do not remove any direct jumps at the end to the next basic block (default)
+  --no-pcrel-optimize     (PowerPC64) Disable PC-relative optimizations
+  --no-pie                Do not create a position independent executable (default)
+  --no-power10-stubs      Alias for --power10-stubs=no
+  --no-print-gc-sections  Do not list removed unused sections (default)
+  --no-print-icf-sections Do not list identical folded sections (default)
+  --no-relax-gp           Disable global pointer relaxation (default)
+  --no-relax              Disable target-specific relaxations
+  --no-rosegment          Do not put read-only non-executable sections in their own segment
+  --no-toc-optimize       (PowerPC64) Disable TOC related optimizations
+  --no-undefined-version  Report version scripts that refer undefined symbols
+  --no-undefined          Report unresolved symbols even if the linker is creating a shared library
+  --no-use-android-relr-tags
+                          Use SHT_RELR / DT_RELR* tags (default)
+  --no-warn-backrefs      Do not warn about backward symbol references to extract archive members (default)
+  --no-warn-common        Do not warn about duplicate common symbols (default)
+  --no-warn-ifunc-textrel Do not warn about using ifunc symbols with text relocations (default)
+  --no-warn-mismatch      Suppress errors for certain unknown section types
+  --no-warn-symbol-ordering
+                          Do not warn about problems with the symbol ordering file
+  --no-warnings           Suppress warnings and cancel --fatal-warnings
+  --no-whole-archive      Do not force load of all members in a static library (default)
+  --no-xosegment          Do not put execute-only sections in their own segment (default)
+  --noinhibit-exec        Retain the executable output file whenever it is still usable
+  --non_shared            Alias for --Bstatic
+  --nostdlib              Only search directories specified on the command line
+  -N                      Alias for --omagic
+  -n                      Alias for --nmagic
+  --oformat=[elf,binary]  Specify the binary format for the output object file
+  --omagic                Set the text and data sections to be readable and writable, do not page align sections, link against static libraries
+  --opt-remarks-filename <value>
+                          YAML output file for optimization remarks
+  --opt-remarks-format <value>
+                          The format used for serializing remarks (default: YAML)
+  --opt-remarks-hotness-threshold=<value>
+                          Minimum profile count required for an optimization remark to be output. Use 'auto' to apply the threshold from profile summary.
+  --opt-remarks-passes <value>
+                          Regex for the passes that need to be serialized to the output file
+  --opt-remarks-with-hotness
+                          Include hotness information in the optimization remarks file
+  --optimize-bb-jumps     Remove direct jumps at the end to the next basic block
+  --orphan-handling=<value>
+                          Control how orphan sections are handled when linker script used
+  --out-implib=<file>     Output the CMSE secure code import library to <file> (required when creating a CMSE secure image)
+  --output=<value>        Alias for -o
+  --output <value>        Alias for -o
+  -O <value>              Optimize output file size
+  -o <path>               Path to file to write output
+  --pack-dyn-relocs=[none,android,relr,android+relr]
+                          Pack dynamic relocations in the given format
+  --package-metadata=<value>
+                          Emit a percent-encoded string to the .note.package section
+  --pcrel-optimize        (PowerPC64) Enable PC-relative optimizations (default)
+  --pic-executable        Alias for --pie
+  --pic-veneer            Always generate position independent thunks (veneers)
+  --pie                   Create a position independent executable
+  --plugin-opt=-<value>   Specify an LLVM option for compatibility with LLVMgold.so
+  --plugin-opt=cs-profile-generate
+                          Alias for --lto-cs-profile-generate
+  --plugin-opt=cs-profile-path=<value>
+                          Alias for --lto-cs-profile-file
+  --plugin-opt=debug-pass-manager
+                          Alias for --lto-debug-pass-manager
+  --plugin-opt=disable-verify
+                          Alias for --disable-verify
+  --plugin-opt=dwo_dir=<value>
+                          Directory to store .dwo files when LTO and debug fission are used
+  --plugin-opt=emit-asm   Alias for --lto-emit-asm
+  --plugin-opt=emit-llvm  Alias for --lto-emit-llvm
+  --plugin-opt=jobs=<value>
+                          Alias for --thinlto-jobs=
+  --plugin-opt=lto-partitions=<value>
+                          Alias for --lto-partitions
+  --plugin-opt=obj-path=<value>
+                          Alias for --lto-obj-path=
+  --plugin-opt=opt-remarks-filename=<value>
+                          Alias for --opt-remarks-filename
+  --plugin-opt=opt-remarks-format=<value>
+                          Alias for --opt-remarks-format
+  --plugin-opt=opt-remarks-hotness-threshold=<value>
+                          Alias for --opt-remarks-hotness-threshold
+  --plugin-opt=opt-remarks-passes=<value>
+                          Alias for --opt-remarks-passes
+  --plugin-opt=opt-remarks-with-hotness
+                          Alias for --opt-remarks-with-hotness
+  --plugin-opt=O<value>   Alias for --lto-O
+  --plugin-opt=sample-profile=<value>
+                          Alias for --lto-sample-profile
+  --plugin-opt=save-temps Alias for --save-temps
+  --plugin-opt=stats-file=<value>
+                          Filename to write LTO statistics to
+  --plugin-opt=thinlto-emit-imports-files
+                          Alias for --thinlto-emit-imports-files
+  --plugin-opt=thinlto-index-only=<value>
+                          Alias for --thinlto-index-only=
+  --plugin-opt=thinlto-index-only
+                          Alias for --thinlto-index-only
+  --plugin-opt=thinlto-object-suffix-replace=<value>
+                          Alias for --thinlto-object-suffix-replace=
+  --plugin-opt=thinlto-prefix-replace=<value>
+                          Alias for --thinlto-prefix-replace=
+  --plugin-opt=time-trace=<value>
+                          Alias for --time-trace=
+  --plugin=<value>        Ignored for compatibility with GNU linkers
+  --pop-state             Restore the states saved by --push-state
+  --power10-stubs=<mode>  Whether to use Power10 instructions in call stubs for R_PPC64_REL24_NOTOC and TOC/NOTOC interworking (yes (default): use; no: don't use). "auto" is currently the same as "yes"
+  --power10-stubs         Alias for --power10-stubs=auto
+  --print-archive-stats=<value>
+                          Write archive usage statistics to the specified file. Print the numbers of members and extracted members for each archive
+  --print-gc-sections=<file>
+                          List removed unused sections to <file>
+  --print-gc-sections     List removed unused sections
+  --print-icf-sections    List identical folded sections
+  --print-map             Print a link map to the standard output
+  --print-memory-usage    Report target memory usage
+  --print-symbol-order=<value>
+                          Print a symbol order specified by --call-graph-ordering-file into the specified file
+  --push-state            Save the current state of --as-needed, -static and --whole-archive
+  -q                      Alias for --emit-relocs
+  --randomize-section-padding=<value>
+                          Randomly insert padding between input sections and at the start of each segment using given seed
+  --relax-gp              Enable global pointer relaxation
+  --relax                 Enable target-specific relaxations if supported (default)
+  --relocatable           Create relocatable object file
+  --remap-inputs-file=<file>
+                          Each line contains 'from-glob=to-file'. An input file matching <from-glob> is remapped to <to-file>
+  --remap-inputs=<from-glob>=<to-file>
+                          Remap input files matching <from-glob> to <to-file>
+  --reproduce=<value>     Write tar file containing inputs and command to reproduce link
+  --retain-symbols-file=<file>
+                          Retain only the symbols listed in the file
+  --rosegment             Put read-only non-executable sections in their own segment (default)
+  --rpath=<value>         Add a DT_RUNPATH to the output
+  --rsp-quoting=[posix,windows]
+                          Quoting style for response files
+  -R <value>              Alias for --rpath
+  -r                      Alias for --relocatable
+  --save-temps=<value>    Save select intermediate LTO compilation results
+  --save-temps            Save intermediate LTO compilation results
+  --script=<value>        Read linker script
+  --section-start=<address>
+                          Set address of section
+  --shared                Build a shared object
+  --shuffle-sections=<section-glob>=<seed>
+                          Shuffle matched sections using the given seed before mapping them to the output sections. If -1, reverse the section order. If 0, use a random seed
+  --soname=<value>        Set DT_SONAME
+  --sort-section=<value>  Specifies sections sorting rule when linkerscript is used
+  --split-stack-adjust-size=<value>
+                          Specify adjustment to stack size when a split-stack function calls a non-split-stack function
+  --start-group           Ignored for compatibility with GNU unless you pass --warn-backrefs
+  --start-lib             Start a grouping of objects that should be treated as if they were together in an archive
+  --static                Alias for --Bstatic
+  --strip-all             Strip all symbols. Implies --strip-debug
+  --strip-debug           Strip debugging information
+  --symbol-ordering-file=<value>
+                          Layout sections to place symbols in the order specified by symbol ordering file
+  --sysroot=<value>       Set the system root
+  -S                      Alias for --strip-debug
+  -s                      Alias for --strip-all
+  --target1-abs           Interpret R_ARM_TARGET1 as R_ARM_ABS32 (default)
+  --target1-rel           Interpret R_ARM_TARGET1 as R_ARM_REL32
+  --target2=<type>        Interpret R_ARM_TARGET2 as <type>, where <type> is one of rel, abs, or got-rel
+  --Tbss=<value>          Same as --section-start with .bss as the sectionname
+  --Tdata=<value>         Same as --section-start with .data as the sectionname
+  --thinlto-cache-dir=<value>
+                          Path to ThinLTO cached object file directory
+  --thinlto-cache-policy=<value>
+                          Pruning policy for the ThinLTO cache
+  --thinlto-distributor-arg=<value>
+                          Arguments to pass to the ThinLTO distributor
+  --thinlto-distributor=<value>
+                          Distributor to use for ThinLTO backend compilations. If specified, ThinLTO backend compilations will be distributed
+  --thinlto-jobs=<value>  Number of ThinLTO jobs. Default to --threads=
+  --thinlto-remote-compiler-arg=<value>
+                          Compiler arguments for the ThinLTO distributor to pass for ThinLTO backend compilations
+  --thinlto-remote-compiler-prepend-arg=<value>
+                          Compiler prepend arguments for the ThinLTO distributor to pass for ThinLTO backend compilations
+  --thinlto-remote-compiler=<value>
+                          Compiler for the ThinLTO distributor to invoke for ThinLTO backend compilations
+  --thinlto-single-module=<value>
+                          Specify a single module to compile in ThinLTO mode, for debugging only
+  --threads=<value>       Number of threads. '1' disables multi-threading. By default all available hardware threads are used
+  --time-trace-granularity=<value>
+                          Minimum time granularity (in microseconds) traced by time profiler
+  --time-trace=<file>     Record time trace to <file>
+  --time-trace            Record time trace to file next to output
+  --toc-optimize          (PowerPC64) Enable TOC related optimizations (default)
+  --trace-symbol=<value>  Trace references to symbols
+  --trace                 Print the names of the input files
+  --Ttext=<value>         Same as --section-start with .text as the sectionname
+  -T <value>              Alias for --script
+  -t                      Alias for --trace
+  --undefined-glob=<pattern>
+                          Force undefined symbol during linking
+  --undefined-version     Allow unused version in version script (disabled by default)
+  --undefined=<symbol>    Force undefined symbol during linking
+  --unique                Creates a separate output section for every orphan input section
+  --unresolved-symbols=<value>
+                          Determine how to handle unresolved symbols
+  --use-android-relr-tags Use SHT_ANDROID_RELR / DT_ANDROID_RELR* tags instead of SHT_RELR / DT_RELR*
+  -u <value>              Alias for --undefined
+  --verbose-bp-section-orderer
+                          Print information on balanced partitioning
+  --verbose               Verbose mode
+  --version-script=<value>
+                          Read a version script
+  --version               Display the version number and exit
+  --vs-diagnostics        Format diagnostics for Visual Studio compatibility
+  -V                      Alias for -v
+  -v                      Display the version number
+  --warn-backrefs-exclude=<glob>
+                          Glob describing an archive (or an object file within --start-lib) which should be ignored for --warn-backrefs.
+  --warn-backrefs         Warn about backward symbol references to extract archive members
+  --warn-common           Warn about duplicate common symbols
+  --warn-ifunc-textrel    Warn about using ifunc symbols with text relocations
+  --warn-symbol-ordering  Warn about problems with the symbol ordering file (default)
+  --warn-unresolved-symbols
+                          Report unresolved symbols as warnings
+  --whole-archive         Force load of all members in a static library
+  --why-extract=<value>   Print to a file about why archive members are extracted
+  --why-live=<glob>       Report a chain of references preventing garbage collection for each symbol matching <glob>
+  --wrap=<symbol>         Redirect symbol references to __wrap_symbol and __real_symbol references to symbol
+  -w                      Alias for --no-warnings
+  --xosegment             Put execute-only sections in their own segment
+  -X                      Alias for --discard-locals
+  -x                      Alias for --discard-all
+  -y <value>              Alias for --trace-symbol
+  -z <option>             Linker option extensions
+
+ld.lld: supported targets: elf"#;
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum OutputKind {
     Executable,
@@ -139,6 +581,8 @@ pub struct Options {
     pub gcs_report_dynamic: Option<u8>,
     pub pauth_report: u8,
     pub pending_errors: Vec<Diagnostic>,
+    pub unknown_arguments: Vec<Diagnostic>,
+    pub pending_warnings: Vec<Diagnostic>,
     pub pic_veneer: bool,
     pub shuffle_sections: Vec<(String, u32)>,
     pub exclude_libraries: Vec<String>,
@@ -148,6 +592,7 @@ pub struct Options {
     pub unique: bool,
     pub gnu_unique: bool,
     pub force_group_allocation: bool,
+    pub dynamic_debug_relocatable: bool,
     pub gnu_stack: bool,
     pub mark_plt: bool,
     pub large_read_only_after_bss: bool,
@@ -197,6 +642,7 @@ pub struct Options {
     pub visual_studio_diagnostics: bool,
     pub retain_symbols_file: Option<String>,
     pub print_version: bool,
+    pub print_help: bool,
     pub verbose_version: bool,
     pub byte_invariant_big_endian: bool,
     pub demangle: bool,
@@ -329,6 +775,8 @@ impl Default for Options {
             gcs_report_dynamic: None,
             pauth_report: 0,
             pending_errors: Vec::new(),
+            unknown_arguments: Vec::new(),
+            pending_warnings: Vec::new(),
             pic_veneer: false,
             shuffle_sections: Vec::new(),
             exclude_libraries: Vec::new(),
@@ -338,6 +786,7 @@ impl Default for Options {
             unique: false,
             gnu_unique: true,
             force_group_allocation: false,
+            dynamic_debug_relocatable: false,
             gnu_stack: true,
             mark_plt: false,
             large_read_only_after_bss: false,
@@ -387,6 +836,7 @@ impl Default for Options {
             visual_studio_diagnostics: false,
             retain_symbols_file: None,
             print_version: false,
+            print_help: false,
             verbose_version: false,
             byte_invariant_big_endian: false,
             demangle: true,
@@ -475,6 +925,8 @@ pub fn remark(code: &str, message: &str) -> Diagnostic {
     diagnostic.severity = Severity::Info;
     diagnostic
 }
+
+const SUGGESTION: &str = "', did you mean '";
 
 fn unknown_option(option: &str) -> Diagnostic {
     problem("EI202", "The linker does not recognize this option.")
@@ -1056,9 +1508,12 @@ fn normalize_dashes(argument: &str) -> String {
 }
 
 pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
-    let normalized = normalize_elf_arguments(arguments)?;
+    let (normalized, unknown) = normalize_elf_arguments_reporting(arguments)?;
     let arguments = &normalized[..];
-    let mut options = Options::default();
+    let mut options = Options {
+        unknown_arguments: unknown,
+        ..Options::default()
+    };
     let mut cursor = ArgumentCursor { arguments, at: 0 };
     let mut pie: Option<bool> = None;
     let mut shared = false;
@@ -1431,6 +1886,15 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             continue;
         }
         match argument {
+            _ if argument.starts_with("--color-diagnostics=") => {
+                let value = &argument["--color-diagnostics=".len()..];
+                if !matches!(value, "always" | "never" | "auto") {
+                    options.pending_errors.push(
+                        invalid_value("--color-diagnostics", value)
+                            .with_context(format!("Cause: unknown option: {argument}")),
+                    );
+                }
+            }
             "--shared" | "-shared" | "-Bshareable" | "--Bshareable" => shared = true,
             "--pie" | "-pie" | "--pic-executable" => pie = Some(true),
             "--no-pie" | "-no-pie" | "--no-pic-executable" => pie = Some(false),
@@ -1478,6 +1942,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--check-sections" => options.check_sections = true,
             "--no-check-sections" => options.check_sections = false,
             "--print-map" => options.map_file = Some("-".to_string()),
+            "--help" | "-help" => options.print_help = true,
             "--version" => options.print_version = true,
             "--no-call-graph-profile-sort" => options.call_graph_sort = CallGraphSort::None,
             "--warn-symbol-ordering" => options.warn_symbol_ordering = true,
@@ -1902,10 +2367,30 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
         return Err(invalid_value("-z", "force-ibt")
             .with_context("Cause: -z force-ibt may not be used with -z retpolineplt".to_string()));
     }
-    if relocatable && !options.section_header {
-        return Err(invalid_value("-z", "nosectionheader").with_context(
-            "Cause: -r and -z nosectionheader may not be used together".to_string(),
-        ));
+    if pie == Some(true) && shared {
+        options.pending_errors.push(
+            invalid_value("-shared", "-pie")
+                .with_context("Cause: -shared and -pie may not be used together".to_string()),
+        );
+    }
+    if relocatable {
+        let conflicts = [
+            (shared, "-shared"),
+            (options.gdb_index, "--gdb-index"),
+            (options.folding != IdenticalCodeFolding::None, "--icf"),
+            (pie == Some(true), "-pie"),
+            (options.export_dynamic, "--export-dynamic"),
+            (options.debug_names, "--debug-names"),
+            (!options.section_header, "-z nosectionheader"),
+        ];
+        for (present, name) in conflicts {
+            if present {
+                options.pending_errors.push(
+                    invalid_value("-r", name)
+                        .with_context(format!("Cause: -r and {name} may not be used together")),
+                );
+            }
+        }
     }
     if relocatable {
         options.strip = Strip::None;
@@ -1934,9 +2419,6 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                     .with_context(format!("Cause: unknown --pack-dyn-relocs format: {other}")))
             }
         }
-    }
-    if relocatable && (shared || pie == Some(true)) {
-        return Err(invalid_value("-r", if shared { "-shared" } else { "-pie" }));
     }
     Ok(options)
 }
@@ -1971,6 +2453,7 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
     match keyword {
         "relro" => options.relocation_read_only = true,
         "norelro" => options.relocation_read_only = false,
+        "hazardplt" => {}
         "now" => options.bind_now = true,
         "retpolineplt" => options.retpoline_plt = true,
         "ifunc-noplt" => options.ifunc_noplt = true,
@@ -2100,8 +2583,19 @@ fn apply_z_keyword(options: &mut Options, keyword: &str) -> Result<(), Diagnosti
                     invalid_value("-z", keyword)
                         .with_context(format!("Cause: invalid common-page-size: {value}"))
                 })?);
+            } else if matches!(keyword, "max-page-size" | "common-page-size" | "stack-size") {
+                return Err(invalid_value("-z", keyword)
+                    .with_context(format!("Cause: invalid {keyword}: ")));
             } else if !apply_target_keyword(options, keyword)? {
-                return Err(not_supported(&format!("-z {keyword}")));
+                options.pending_warnings.push(
+                    caution(
+                        "EI247",
+                        "The linker ignores an option it does not recognize.",
+                    )
+                    .with_context(format!("Option: -z {keyword}"))
+                    .with_context(format!("Cause: unknown -z value '{keyword}'")),
+                );
+                return Ok(());
             }
         }
     }
@@ -2322,6 +2816,15 @@ const SECURE_SPECIAL_PREFIX: &str = "__acle_se_";
 
 const SECURE_GATEWAY_SIZE: u64 = 8;
 
+const DYNAMIC_DEBUG_TYPE: u32 = 0x6fff_4c10;
+
+const DYNAMIC_DEBUG_NAME: &str = ".debug_llvm_dyndbg";
+
+const DYNAMIC_DEBUG_FAILED: &str = "failed to create relocatable dynamic debug object";
+
+const DYNAMIC_DEBUG_FOLDING: &str =
+    "ICF disabled because it is incompatible with dynamic debugging";
+
 const ERRATUM_SECTION: &str = ", section ";
 
 const SECURE_ENTRY_MISSING: &str = ", but no associated entry function definition ";
@@ -2408,6 +2911,7 @@ pub struct SymbolData {
     pub header_relative: bool,
     pub folded: bool,
     pub tagged: bool,
+    pub dynamic_debug_reference: bool,
 }
 
 impl SymbolData {
@@ -2451,6 +2955,7 @@ impl SymbolData {
             header_relative: false,
             folded: false,
             tagged: false,
+            dynamic_debug_reference: false,
         }
     }
 
@@ -2747,6 +3252,7 @@ pub struct InputFile {
     pub binary: bool,
     pub required_symbols: Vec<SymbolIndex>,
     pub just_symbols: bool,
+    pub dynamic_debug: Option<Vec<u8>>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3562,6 +4068,8 @@ pub struct Context<'s> {
     pub erratum_patches: BTreeSet<SectionIndex>,
     erratum_patch_addresses: BTreeMap<SectionIndex, u64>,
     secure_import_library: BTreeMap<String, (u64, u64)>,
+    has_dynamic_debug: bool,
+    dynamic_debug_output: Option<Vec<u8>>,
     secure_entries: Vec<(SymbolIndex, SymbolIndex)>,
     secure_veneers: Vec<SecureGatewayVeneer>,
     secure_new_entries: u64,
@@ -3621,6 +4129,7 @@ pub struct Context<'s> {
     pub pending_debug_warnings: std::cell::RefCell<Vec<String>>,
     pub identity: String,
     pub extra_outputs: Vec<(String, Vec<u8>)>,
+    pub read_log: Option<&'s std::cell::RefCell<Vec<String>>>,
     pub retained_symbols: Option<BTreeSet<String>>,
     pub section_order: BTreeMap<SectionIndex, i64>,
     pub call_graph_profile: Vec<(SectionIndex, SectionIndex, u64)>,
@@ -3716,6 +4225,8 @@ impl<'s> Context<'s> {
             erratum_patches: BTreeSet::new(),
             erratum_patch_addresses: BTreeMap::new(),
             secure_import_library: BTreeMap::new(),
+            has_dynamic_debug: false,
+            dynamic_debug_output: None,
             secure_entries: Vec::new(),
             secure_veneers: Vec::new(),
             secure_new_entries: 0,
@@ -3788,6 +4299,7 @@ impl<'s> Context<'s> {
             pending_debug_warnings: std::cell::RefCell::new(Vec::new()),
             identity: LINKER_IDENTITY.to_string(),
             extra_outputs: Vec::new(),
+            read_log: None,
             retained_symbols: None,
             section_order: BTreeMap::new(),
             call_graph_profile: Vec::new(),
@@ -4423,6 +4935,199 @@ fn is_cortex_a53_sequence(first: u32, second: u32, last: u32) -> bool {
 type ErratumMap = BTreeMap<SectionIndex, (Option<SymbolIndex>, Vec<SymbolIndex>)>;
 
 impl<'s> Context<'s> {
+    fn read_dynamic_debug_symbols(&mut self, index: FileIndex) {
+        let found = self.files[index]
+            .elf
+            .sections
+            .iter()
+            .find(|section| {
+                section.kind == DYNAMIC_DEBUG_TYPE && section.name == DYNAMIC_DEBUG_NAME
+            })
+            .map(|section| (section.flags, section.data.clone()));
+        let Some((flags, data)) = found else {
+            return;
+        };
+        let outer = self.files[index].elf.encoding();
+        let data = if flags & section_flag::COMPRESSED != 0 {
+            decompressed_debug(outer, &data).unwrap_or_default()
+        } else {
+            data
+        };
+        self.files[index].dynamic_debug = Some(data.clone());
+        self.has_dynamic_debug = true;
+        let display = self.file_name(Some(index));
+        let inner = match ElfFile::parse(&data) {
+            Ok(inner) => inner,
+            Err(diagnostic) => {
+                self.error(diagnostic.with_context(format!("File: {display}")));
+                return;
+            }
+        };
+        if inner.encoding() != outer {
+            self.error(
+                problem(
+                    "EI209",
+                    "The input targets a different machine than the output.",
+                )
+                .with_context(format!("File: {display}"))
+                .with_context(format!(
+                    "Cause: {display}: {DYNAMIC_DEBUG_NAME} contains an incompatible ELF type"
+                )),
+            );
+            return;
+        }
+        let Some(table) = inner.symbol_table() else {
+            return;
+        };
+        let first_global = inner.sections[table].info as usize;
+        let Ok(symbols) = inner.symbols(table) else {
+            return;
+        };
+        let mut used = vec![false; symbols.len()];
+        for (position, section) in inner.sections.iter().enumerate() {
+            if section.kind != section_type::RELOCATIONS
+                && section.kind != section_type::RELOCATIONS_WITH_ADDENDS
+            {
+                continue;
+            }
+            let allocated = inner
+                .sections
+                .get(section.info as usize)
+                .is_some_and(|target| target.flags & section_flag::ALLOCATE != 0);
+            if !allocated {
+                continue;
+            }
+            for relocation in inner.relocations(position).unwrap_or_default() {
+                let symbol = relocation.symbol as usize;
+                if symbol >= first_global && symbol < used.len() {
+                    used[symbol] = true;
+                }
+            }
+        }
+        for position in first_global.max(1)..symbols.len() {
+            let symbol = &symbols[position];
+            if !symbol.is_undefined() {
+                continue;
+            }
+            let id = self.insert(&symbol.name);
+            self.resolve_undefined(id, index, symbol.binding, symbol.other, symbol.kind, 0);
+            self.symbols[id].used_in_regular_object = true;
+            self.symbols[id].referenced = true;
+            if used[position] {
+                self.symbols[id].dynamic_debug_reference = true;
+                if self.traced_symbols.contains(&id) {
+                    let name = &symbol.name;
+                    self.messages
+                        .push(format!("{display}: dynamic debugging reference to {name}"));
+                }
+            }
+        }
+    }
+
+    fn link_dynamic_debug(&mut self) {
+        let mut inputs: Vec<(String, Vec<u8>)> = Vec::new();
+        for file in self.object_files.clone() {
+            if let Some(data) = self.files[file].dynamic_debug.clone() {
+                inputs.push((self.files[file].name.clone(), data));
+            }
+        }
+        let mut arguments = vec![
+            "-r".to_string(),
+            "-o".to_string(),
+            "-".to_string(),
+            format!("-O{}", self.options.optimize),
+        ];
+        if !self.is_relocatable() || self.options.force_group_allocation {
+            arguments.push("--force-group-allocation".to_string());
+        }
+        arguments.extend(inputs.iter().map(|(name, _)| name.clone()));
+        let source = |path: &str| -> Option<Vec<u8>> {
+            inputs
+                .iter()
+                .find(|(name, _)| name == path)
+                .map(|(_, data)| data.clone())
+        };
+        let mut outcome = None;
+        let mut collected = Vec::new();
+        let mut inner_failed = true;
+        if let Ok(mut options) = parse_command_line(&arguments) {
+            options.dynamic_debug_relocatable = !self.is_relocatable();
+            let mut inner = Context::new(options, &source);
+            inner.identity = self.identity.clone();
+            outcome = inner.run();
+            inner_failed = inner.failed();
+            collected = std::mem::take(&mut inner.diagnostics);
+        }
+        self.flush_debug_warnings();
+        self.diagnostics.extend(collected);
+        match outcome {
+            Some(bytes) if !inner_failed => self.dynamic_debug_output = Some(bytes),
+            _ => self.error(
+                problem("EI200", "The object file could not be read.")
+                    .with_context(format!("Section: {DYNAMIC_DEBUG_NAME}"))
+                    .with_context(format!("Cause: {DYNAMIC_DEBUG_FAILED}")),
+            ),
+        }
+    }
+
+    fn add_dynamic_debug_section(&mut self, name: &str, kind: u32, alignment: u64, data: Vec<u8>) {
+        let mut section = InputSection::synthetic(name, kind, 0, alignment, Synthetic::Comment);
+        section.synthetic = None;
+        section.size = data.len() as u64;
+        section.data = data;
+        let index = self.sections.len();
+        self.sections.push(section);
+        self.input_order.push(index);
+    }
+
+    fn dynamic_debug_carrier(&mut self, file: Option<FileIndex>) -> SectionIndex {
+        let mut section = InputSection::synthetic(
+            DYNAMIC_DEBUG_NAME,
+            DYNAMIC_DEBUG_TYPE,
+            0,
+            8,
+            Synthetic::Comment,
+        );
+        section.synthetic = None;
+        section.file = file;
+        section.live = false;
+        let index = self.sections.len();
+        self.sections.push(section);
+        index
+    }
+
+    fn scan_dynamic_debug_references(&mut self, undefined: &mut Vec<UndefinedReference>) {
+        let mut carriers: BTreeMap<Option<FileIndex>, SectionIndex> = BTreeMap::new();
+        for id in self.global_symbols() {
+            if !self.symbols[id].dynamic_debug_reference {
+                continue;
+            }
+            if self.symbols[id].is_undefined() {
+                let owner = self.symbols[id].file.filter(|file| {
+                    *file < self.files.len() && self.files[*file].dynamic_debug.is_some()
+                });
+                let carrier = match carriers.get(&owner) {
+                    Some(carrier) => *carrier,
+                    None => {
+                        let carrier = self.dynamic_debug_carrier(owner);
+                        carriers.insert(owner, carrier);
+                        carrier
+                    }
+                };
+                self.maybe_report_undefined(id, carrier, 0, undefined);
+                continue;
+            }
+            let symbol = &self.symbols[id];
+            if symbol.is_shared() && symbol.used_in_regular_object && symbol.defined_in_shared {
+                if symbol.kind == symbol_type::FUNCTION {
+                    self.symbols[id].needs |= needs::PLT;
+                } else if symbol.kind == symbol_type::OBJECT {
+                    self.symbols[id].needs |= needs::GOT;
+                }
+            }
+        }
+    }
+
     fn secure_implib(&self) -> bool {
         self.target.architecture == Architecture::Arm && self.target_option("--cmse-implib")
     }
@@ -7286,7 +7991,6 @@ impl<'s> Context<'s> {
                         invalid_value("-m", &emulation)
                             .with_context(format!("Cause: unknown emulation: {emulation}")),
                     );
-                    return;
                 }
             }
         }
@@ -8027,6 +8731,7 @@ impl<'s> Context<'s> {
             binary: false,
             required_symbols: Vec::new(),
             just_symbols: self.loading_just_symbols,
+            dynamic_debug: None,
         });
         if is_shared {
             self.parse_shared(index);
@@ -8285,6 +8990,7 @@ impl<'s> Context<'s> {
             self.symbols[id].referenced = true;
         }
         self.files[index].elf_symbols = symbols;
+        self.read_dynamic_debug_symbols(index);
     }
 
     fn parse_shared(&mut self, index: FileIndex) {
@@ -9250,6 +9956,10 @@ impl<'s> Context<'s> {
                 && self.target.architecture == Architecture::Aarch64
                 && !self.can_have_memtag_globals()
             {
+                self.files[index].discarded[position] = true;
+                continue;
+            }
+            if header.kind == DYNAMIC_DEBUG_TYPE {
                 self.files[index].discarded[position] = true;
                 continue;
             }
@@ -10981,6 +11691,18 @@ impl<'s> Context<'s> {
                 Synthetic::StringTable,
             );
         }
+        if let Some(data) = self.dynamic_debug_output.clone() {
+            self.add_dynamic_debug_section(DYNAMIC_DEBUG_NAME, DYNAMIC_DEBUG_TYPE, 8, data);
+            if !relocatable {
+                let mut note = Vec::new();
+                encoding.put_u32(&mut note, 5);
+                encoding.put_u32(&mut note, 4);
+                encoding.put_u32(&mut note, 4);
+                note.extend_from_slice(b"LLVM\0\0\0\0");
+                encoding.put_u32(&mut note, 0);
+                self.add_dynamic_debug_section(".note.llvm.dyndbg", section_type::NOTE, 4, note);
+            }
+        }
     }
 
     pub fn create_comment_section(&mut self) {
@@ -12322,6 +13044,14 @@ impl<'s> Context<'s> {
         self.auxiliary_output(path, text);
     }
 
+    fn write_dependency_file(&mut self) {
+        let (Some(path), Some(log)) = (self.options.dependency_file.clone(), self.read_log) else {
+            return;
+        };
+        let text = dependency_file_text(&self.options.output, &log.borrow());
+        self.auxiliary_output(path, text);
+    }
+
     fn auxiliary_output(&mut self, path: String, text: String) {
         if path == "-" {
             self.messages.push(text.trim_end_matches('\n').to_string());
@@ -13368,7 +14098,7 @@ impl<'s> Context<'s> {
             if warning {
                 self.warn(diagnostic);
             } else {
-                self.error(diagnostic);
+                self.error_always(diagnostic);
             }
         }
     }
@@ -15765,6 +16495,11 @@ impl<'s> Context<'s> {
         let mut queue: Vec<SectionIndex> = Vec::new();
         let mut named: BTreeMap<String, Vec<SectionIndex>> = BTreeMap::new();
         for id in self.global_symbols() {
+            if self.symbols[id].dynamic_debug_reference {
+                self.mark_symbol_live(id, "dynamic debugging", &mut queue);
+                self.symbols[id].used = true;
+                continue;
+            }
             if self.symbols[id].exported {
                 self.mark_symbol_live(id, "externally visible symbol", &mut queue);
             }
@@ -23448,10 +24183,20 @@ impl<'s> Context<'s> {
             self.options.relocation_read_only = false;
         }
         self.copy_relocation_sections = self.is_relocatable() || self.options.emit_relocations;
-        for diagnostic in std::mem::take(&mut self.options.pending_errors) {
+        for diagnostic in std::mem::take(&mut self.options.unknown_arguments) {
+            self.error_always(diagnostic);
+        }
+        for diagnostic in std::mem::take(&mut self.options.pending_warnings) {
+            self.warn(diagnostic);
+        }
+        let pending = std::mem::take(&mut self.options.pending_errors);
+        let stops = pending
+            .iter()
+            .any(|diagnostic| diagnostic.severity.is_blocking());
+        for diagnostic in pending {
             self.error(diagnostic);
         }
-        if self.failed() {
+        if stops && self.failed() {
             return None;
         }
         self.read_compression_options();
@@ -23514,6 +24259,14 @@ impl<'s> Context<'s> {
             return None;
         }
         self.import_secure_symbols();
+        if self.has_dynamic_debug && self.options.folding != IdenticalCodeFolding::None {
+            self.warn(
+                caution("EI287", "An option has no effect in this link.")
+                    .with_context("Option: --icf".to_string())
+                    .with_context(format!("Cause: {DYNAMIC_DEBUG_FOLDING}")),
+            );
+            self.options.folding = IdenticalCodeFolding::None;
+        }
         self.apply_retpoline_sizes();
         if let Some(rela) = self.options.explicit_addends {
             self.target.uses_addends = rela;
@@ -23619,6 +24372,7 @@ impl<'s> Context<'s> {
         self.declare_script_symbols();
         self.exclude_libraries();
         let relocatable = self.is_relocatable();
+        self.write_dependency_file();
         self.read_security_notes();
         self.apply_feature_plt_sizes();
         if !relocatable {
@@ -23706,6 +24460,12 @@ impl<'s> Context<'s> {
         if self.can_have_memtag_globals() {
             self.create_tagged_symbols();
         }
+        if self.has_dynamic_debug {
+            self.link_dynamic_debug();
+            if self.failed() {
+                return None;
+            }
+        }
         self.create_synthetic_sections();
         self.combine_exception_indexes();
         if let Some(synthetic) = self.synthetic_section(".eh_frame") {
@@ -23792,7 +24552,10 @@ impl<'s> Context<'s> {
         self.demote_symbols_and_compute_preemptible();
         self.process_script_symbol_assignments();
         if !relocatable {
-            let undefined = self.scan_relocations();
+            let mut undefined = self.scan_relocations();
+            if self.has_dynamic_debug {
+                self.scan_dynamic_debug_references(&mut undefined);
+            }
             self.report_undefined(undefined);
             if self
                 .options
@@ -24819,13 +25582,8 @@ pub fn link_elf_in(
     for file in &early {
         recording(file);
     }
-    let mut outcome = link_elf_plain(arguments, &recording, identity);
-    if let Some(path) = dependency.filter(|_| outcome.succeeded()) {
-        outcome.outputs.push((
-            path,
-            dependency_file_text(&parsed.output, &reads.borrow()).into_bytes(),
-        ));
-    }
+    let log = dependency.as_ref().map(|_| &reads);
+    let mut outcome = link_elf_plain_logged(arguments, &recording, identity, log);
     let Some(mut tape) = tape.into_inner() else {
         return outcome;
     };
@@ -24915,6 +25673,15 @@ fn link_elf_plain(
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
     identity: &str,
 ) -> LinkOutcome {
+    link_elf_plain_logged(arguments, source, identity, None)
+}
+
+fn link_elf_plain_logged(
+    arguments: &[String],
+    source: &dyn Fn(&str) -> Option<Vec<u8>>,
+    identity: &str,
+    read_log: Option<&std::cell::RefCell<Vec<String>>>,
+) -> LinkOutcome {
     if let Some(root) = parse_command_line(arguments)
         .ok()
         .and_then(|options| options.chroot)
@@ -24926,15 +25693,16 @@ fn link_elf_plain(
                 source(path)
             }
         };
-        return link_elf_rooted(arguments, &rooted, identity);
+        return link_elf_rooted(arguments, &rooted, identity, read_log);
     }
-    link_elf_rooted(arguments, source, identity)
+    link_elf_rooted(arguments, source, identity, read_log)
 }
 
 fn link_elf_rooted(
     arguments: &[String],
     source: &dyn Fn(&str) -> Option<Vec<u8>>,
     identity: &str,
+    read_log: Option<&std::cell::RefCell<Vec<String>>>,
 ) -> LinkOutcome {
     let options = match parse_command_line(arguments) {
         Ok(options) => options,
@@ -24947,20 +25715,38 @@ fn link_elf_rooted(
         }
     };
     let mut messages = Vec::new();
+    if options.print_help {
+        return LinkOutcome {
+            outputs: Vec::new(),
+            diagnostics: options.unknown_arguments.clone(),
+            messages: vec![HELP_TEXT.to_string()],
+        };
+    }
     if options.print_version || options.verbose_version {
         messages.push(VERSION_BANNER.to_string());
     }
     let no_inputs = options.inputs.is_empty();
     if options.print_version || (options.verbose_version && no_inputs) {
+        let mut warnings = options.pending_warnings.clone();
+        for diagnostic in &mut warnings {
+            diagnostic.severity = if options.fatal_warnings {
+                Severity::Error
+            } else {
+                Severity::Warning
+            };
+        }
+        let mut diagnostics = options.unknown_arguments.clone();
+        diagnostics.extend(warnings);
         return LinkOutcome {
             outputs: Vec::new(),
-            diagnostics: Vec::new(),
+            diagnostics,
             messages,
         };
     }
     let mut context = Context::new(options, source);
     context.messages = messages;
     context.identity = identity.to_string();
+    context.read_log = read_log;
     let bytes = context.run();
     if bytes.is_some() && !context.failed() {
         context.write_secure_import_library();
@@ -24994,8 +25780,27 @@ fn link_elf_rooted(
             );
         }
     }
+    let auxiliary: BTreeSet<String> = [
+        context.options.dependency_file.clone(),
+        context.options.print_archive_stats.clone(),
+        context.options.why_extract.clone(),
+        context.options.map_file.clone(),
+    ]
+    .into_iter()
+    .flatten()
+    .collect();
+    let mut outputs: Vec<(String, Vec<u8>)> = Vec::new();
+    for (path, bytes) in std::mem::take(&mut context.extra_outputs) {
+        if auxiliary.contains(&path) {
+            if let Some(existing) = outputs.iter_mut().find(|(known, _)| *known == path) {
+                existing.1.extend(bytes);
+                continue;
+            }
+        }
+        outputs.push((path, bytes));
+    }
     let mut outcome = LinkOutcome {
-        outputs: std::mem::take(&mut context.extra_outputs),
+        outputs,
         diagnostics,
         messages: context.messages,
     };
@@ -43698,7 +44503,7 @@ impl<'s> Context<'s> {
                     .relocation_section_name(section)
                     .unwrap_or_else(|| name.clone());
             }
-            if self.is_relocatable() {
+            if self.is_relocatable() && !self.options.dynamic_debug_relocatable {
                 return name.clone();
             }
         }
@@ -47977,6 +48782,73 @@ pub fn match_elf_option(
 }
 
 pub fn normalize_elf_arguments(arguments: &[String]) -> Result<Vec<String>, Diagnostic> {
+    let (normalized, mut unknown) = normalize_elf_arguments_reporting(arguments)?;
+    if unknown.is_empty() {
+        Ok(normalized)
+    } else {
+        Err(unknown.remove(0))
+    }
+}
+
+fn edit_distance(left: &str, right: &str) -> usize {
+    let left: Vec<char> = left.chars().collect();
+    let right: Vec<char> = right.chars().collect();
+    let mut row: Vec<usize> = (0..=right.len()).collect();
+    for (position, character) in left.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = position + 1;
+        for column in 1..=right.len() {
+            let above = row[column];
+            row[column] = if *character == right[column - 1] {
+                previous
+            } else {
+                1 + previous.min(above).min(row[column - 1])
+            };
+            previous = above;
+        }
+    }
+    row[right.len()]
+}
+
+fn nearest_elf_option(argument: &str) -> Option<String> {
+    let mut best = usize::MAX;
+    let mut nearest = String::new();
+    for option in ELF_OPTIONS {
+        if option.name.len() < 4 {
+            continue;
+        }
+        let last = option.name.chars().last().unwrap_or(' ');
+        let delimited = last == '=' || last == ':';
+        let (mut normalized, remainder) = if delimited {
+            match argument.split_once(last) {
+                Some((head, tail)) => (head.to_string(), tail.to_string()),
+                None => (argument.to_string(), String::new()),
+            }
+        } else {
+            (argument.to_string(), String::new())
+        };
+        if delimited && argument.contains(last) {
+            normalized.push(last);
+        }
+        for prefix in option.prefixes {
+            let candidate = format!("{prefix}{}", option.name);
+            let mut distance = edit_distance(&candidate, &normalized);
+            if remainder.is_empty() && delimited {
+                distance += 1;
+            }
+            if distance < best {
+                best = distance;
+                nearest = format!("{candidate}{remainder}");
+            }
+        }
+    }
+    (best <= 1).then_some(nearest)
+}
+
+pub fn normalize_elf_arguments_reporting(
+    arguments: &[String],
+) -> Result<(Vec<String>, Vec<Diagnostic>), Diagnostic> {
+    let mut unknown = Vec::new();
     let mut normalized = Vec::new();
     let mut index = 0usize;
     while index < arguments.len() {
@@ -47987,7 +48859,16 @@ pub fn normalize_elf_arguments(arguments: &[String]) -> Result<Vec<String>, Diag
             continue;
         }
         match match_elf_option(arguments, &mut index)? {
-            None => return Err(unknown_option(argument)),
+            None => {
+                let mut diagnostic = unknown_option(argument);
+                if let Some(nearest) = nearest_elf_option(argument) {
+                    diagnostic = diagnostic.with_context(format!(
+                        "Cause: unknown argument '{argument}{SUGGESTION}{nearest}'"
+                    ));
+                }
+                unknown.push(diagnostic);
+                index += 1;
+            }
             Some(matched) => {
                 if matched.canonical.len() == 1 || matched.canonical == "dT" {
                     normalized.push(format!("-{}", matched.canonical));
@@ -48003,7 +48884,7 @@ pub fn normalize_elf_arguments(arguments: &[String]) -> Result<Vec<String>, Diag
             }
         }
     }
-    Ok(normalized)
+    Ok((normalized, unknown))
 }
 
 impl<'s> Context<'s> {

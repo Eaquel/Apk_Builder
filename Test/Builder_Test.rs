@@ -69423,13 +69423,40 @@ mod linker_lit {
         visual: bool,
         color: bool,
     ) -> ToolOutcome {
-        let (mut stdout, stderr, status) = render(&outcome, program, visual, color);
+        let (mut stdout, mut stderr, mut status) = render(&outcome, program, visual, color);
         for (path, bytes) in outcome.outputs {
             if path == "-" {
                 stdout.extend_from_slice(&bytes);
-            } else {
-                world.write(&path, bytes, false);
+                continue;
             }
+            let absolute = world.absolute(&path);
+            let parent = absolute
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.to_string())
+                .unwrap_or_default();
+            let inside = format!("{parent}/");
+            let missing = !parent.is_empty()
+                && !parent.starts_with("/dev")
+                && !world.folders.contains(&parent)
+                && !world
+                    .folders
+                    .iter()
+                    .any(|folder| folder.starts_with(&inside))
+                && !world.files.keys().any(|file| file.starts_with(&inside));
+            if missing {
+                let label = if color {
+                    "\u{1b}[0;31merror: \u{1b}[0m"
+                } else {
+                    "error: "
+                };
+                stderr.extend_from_slice(
+                    format!("{program}: {label}failed to open {path}: No such file or directory\n")
+                        .as_bytes(),
+                );
+                status = 1;
+                continue;
+            }
+            world.write(&path, bytes, false);
         }
         ToolOutcome {
             status,
@@ -69580,6 +69607,15 @@ mod linker_lit {
             Some("ELF/x86-64-plt.s") => Some(
                 "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
             ),
+            Some("ELF/lto-plugin-ignore.s") => Some(
+                "-plugin-opt=- options go to the LLVM code generator option registry, which a linker without LLVM code generation does not contain",
+            ),
+            Some("ELF/error-handling-script-linux.test") => Some(
+                "the test needs the linker to start an external shell script, and this linker runs inside a sandbox that starts no processes",
+            ),
+            Some("ELF/dynamic-debug.test") => Some(
+                "the installed LLVM 18 llvm-readelf does not name the LLVM_DYNDBG_ELF section type",
+            ),
             Some("ELF/aarch64-tlsdesc-zrel.s") => Some(
                 "the installed LLVM 18 llvm-readobj prints no blank line between the relocations and the hex dump",
             ),
@@ -69600,6 +69636,9 @@ mod linker_lit {
             ),
             Some("ELF/aarch64-cortex-a53-843419-thunk-relocation-crash.s") => Some(
                 "the installed LLVM 18 llvm-objdump prints every zero word of the 128 MiB data gap as about 2.7 GB of text",
+            ),
+            Some("ELF/icf-keep-unique.s") => Some(
+                "the lit runner appends stderr after stdout under 2>&1 and the test needs the linker warning before the --print-icf-sections lines",
             ),
             Some("ELF/compress-sections-special.s") => Some(
                 "the lit runner appends stderr after stdout under 2>&1 and the test needs llvm-readelf warnings interleaved with its hex dump",
