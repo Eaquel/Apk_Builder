@@ -8,6 +8,8 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI007", "The program called a function the host does not provide."),
     ("EI008", "The program used more stack than it was allowed to."),
     ("EI101", "The TableGen source could not be read."),
+    ("EI102", "The instruction tables could not be built."),
+    ("EI103", "The instruction table could not be read."),
     ("EI200", "The object file could not be read."),
     ("EI201", "The archive could not be read."),
     ("EI202", "The linker does not recognize this option."),

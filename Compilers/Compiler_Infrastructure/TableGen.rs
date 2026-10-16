@@ -9632,3 +9632,1366 @@ pub fn read_records<'a>(
         succeeded,
     }
 }
+
+pub const TABLE_FORMAT_VERSION: u32 = 1;
+
+pub const TABLE_MAGIC: &[u8; 8] = b"OMNITBL\0";
+
+pub const CANONICAL_HEADER: &str = "omni-tablegen-canonical 1";
+
+pub const MANIFEST_HEADER: &str = "omni-tables-manifest 1";
+
+const ROOT_CLASSES: &[&str] = &[
+    "AsmOperandClass",
+    "AsmParser",
+    "AsmParserVariant",
+    "AsmWriter",
+    "GenericTable",
+    "HwMode",
+    "InstAlias",
+    "InstrInfo",
+    "Instruction",
+    "Operand",
+    "Predicate",
+    "Processor",
+    "ProcessorAlias",
+    "RegAltNameIndex",
+    "Register",
+    "RegisterClass",
+    "RegisterOperand",
+    "SubRegIndex",
+    "SubtargetFeature",
+    "Target",
+];
+
+const EXCLUDED_FIELDS: &[&str] = &["Itinerary", "Pattern", "ProcItin", "SchedModel", "SchedRW"];
+
+#[derive(Clone, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum TableValue {
+    Unset,
+    Bit(bool),
+    Integer(i64),
+    String(String),
+    Code(String),
+    Bits(Vec<TableValue>),
+    List(Vec<TableValue>),
+    Dag {
+        operator: Box<TableValue>,
+        name: Option<String>,
+        arguments: Vec<(TableValue, Option<String>)>,
+    },
+    Record(String),
+    Variable(String),
+    VariableBit {
+        variable: String,
+        bit: u32,
+    },
+    Expression(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableField {
+    pub name: String,
+    pub field_type: String,
+    pub value: TableValue,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TableRecord {
+    pub name: String,
+    pub classes: Vec<String>,
+    pub fields: Vec<TableField>,
+}
+
+impl TableRecord {
+    pub fn field(&self, name: &str) -> Option<&TableValue> {
+        self.fields
+            .iter()
+            .find(|field| field.name == name)
+            .map(|field| &field.value)
+    }
+
+    pub fn is_a(&self, class: &str) -> bool {
+        self.classes.iter().any(|held| held == class)
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Table {
+    pub architecture: String,
+    pub target: String,
+    pub selection: String,
+    pub records: Vec<TableRecord>,
+}
+
+impl Table {
+    pub fn record(&self, name: &str) -> Option<&TableRecord> {
+        self.records
+            .binary_search_by(|record| record.name.as_str().cmp(name))
+            .ok()
+            .map(|at| &self.records[at])
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Selection {
+    Everything,
+    FeatureSets {
+        processor: Option<&'static str>,
+        alternatives: &'static [&'static [&'static str]],
+    },
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct Architecture {
+    pub name: &'static str,
+    pub target: &'static str,
+    pub selection: Selection,
+    pub description: &'static str,
+}
+
+pub const ARCHITECTURES: &[Architecture] = &[
+    Architecture {
+        name: "X86",
+        target: "X86",
+        selection: Selection::FeatureSets {
+            processor: None,
+            alternatives: &[&["Is32Bit"], &["Is16Bit"]],
+        },
+        description: "x86 records whose assembler predicates hold in 32-bit or 16-bit mode",
+    },
+    Architecture {
+        name: "X86_64",
+        target: "X86",
+        selection: Selection::FeatureSets {
+            processor: None,
+            alternatives: &[&["Is64Bit"]],
+        },
+        description: "x86 records whose assembler predicates hold in 64-bit mode",
+    },
+    Architecture {
+        name: "Armv7",
+        target: "ARM",
+        selection: Selection::FeatureSets {
+            processor: Some("cortex-a15"),
+            alternatives: &[&[], &["ModeThumb"]],
+        },
+        description: "ARM records whose assembler predicates hold for ARMv7-A with every v7 extension (the cortex-a15 feature closure) in A32 or Thumb-2 state",
+    },
+    Architecture {
+        name: "Armv8",
+        target: "AArch64",
+        selection: Selection::Everything,
+        description: "every AArch64 record, each with the predicates that gate it",
+    },
+];
+
+pub const TARGETS: &[&str] = &["X86", "ARM", "AArch64"];
+
+fn collect_record_names(value: &TableValue, found: &mut Vec<String>) {
+    match value {
+        TableValue::Record(name) => found.push(name.clone()),
+        TableValue::Bits(items) | TableValue::List(items) => {
+            for item in items {
+                collect_record_names(item, found);
+            }
+        }
+        TableValue::Dag {
+            operator,
+            arguments,
+            ..
+        } => {
+            collect_record_names(operator, found);
+            for (argument, _) in arguments {
+                collect_record_names(argument, found);
+            }
+        }
+        _ => {}
+    }
+}
+
+impl RecordKeeper {
+    pub fn table_value(&self, value: Value) -> TableValue {
+        match self.node(value) {
+            Node::Unset => TableValue::Unset,
+            Node::Bit(bit) => TableValue::Bit(*bit),
+            Node::Integer(integer) => TableValue::Integer(*integer),
+            Node::String { text, code } => {
+                if *code {
+                    TableValue::Code(self.text(*text).to_string())
+                } else {
+                    TableValue::String(self.text(*text).to_string())
+                }
+            }
+            Node::Bits(bits) => {
+                TableValue::Bits(bits.iter().map(|bit| self.table_value(*bit)).collect())
+            }
+            Node::List { elements, .. } => TableValue::List(
+                elements
+                    .iter()
+                    .map(|element| self.table_value(*element))
+                    .collect(),
+            ),
+            Node::Dag {
+                operator,
+                name,
+                arguments,
+                names,
+            } => TableValue::Dag {
+                operator: Box::new(self.table_value(*operator)),
+                name: name.map(|name| self.unquoted(name)),
+                arguments: arguments
+                    .iter()
+                    .zip(names.iter())
+                    .map(|(argument, name)| {
+                        (
+                            self.table_value(*argument),
+                            name.map(|name| self.unquoted(name)),
+                        )
+                    })
+                    .collect(),
+            },
+            Node::Definition(record) => TableValue::Record(self.record_name_text(*record)),
+            Node::Variable { name, .. } => TableValue::Variable(self.unquoted(*name)),
+            Node::VariableBit { variable, bit } => match self.node(*variable) {
+                Node::Variable { name, .. } => TableValue::VariableBit {
+                    variable: self.unquoted(*name),
+                    bit: *bit,
+                },
+                _ => TableValue::Expression(self.text_of(value)),
+            },
+            _ => TableValue::Expression(self.text_of(value)),
+        }
+    }
+
+    pub fn table_record(&self, index: RecordIndex) -> TableRecord {
+        let record = self.record(index);
+        let classes = self
+            .superclass_list(index)
+            .iter()
+            .map(|class| self.record_name_text(*class))
+            .collect();
+        let mut fields = Vec::new();
+        for field in &record.fields {
+            if record.is_template_argument(field.name) {
+                continue;
+            }
+            let name = self.unquoted(field.name);
+            if EXCLUDED_FIELDS.contains(&name.as_str()) {
+                continue;
+            }
+            fields.push(TableField {
+                name,
+                field_type: self.print_type_of_field(field),
+                value: self.table_value(field.value),
+            });
+        }
+        TableRecord {
+            name: self.record_name_text(index),
+            classes,
+            fields,
+        }
+    }
+
+    pub fn canonical_table(&self, target: &str) -> Table {
+        let mut root_classes: BTreeSet<String> =
+            ROOT_CLASSES.iter().map(|name| name.to_string()).collect();
+        let mut converted: BTreeMap<String, TableRecord> = BTreeMap::new();
+        for (name, index) in &self.definitions {
+            converted.insert(name.clone(), self.table_record(*index));
+        }
+        for record in converted.values() {
+            if record.is_a("GenericTable") {
+                if let Some(TableValue::String(class)) = record.field("FilterClass") {
+                    root_classes.insert(class.clone());
+                }
+            }
+        }
+        let mut stack: Vec<String> = converted
+            .values()
+            .filter(|record| {
+                record
+                    .classes
+                    .iter()
+                    .any(|class| root_classes.contains(class))
+            })
+            .map(|record| record.name.clone())
+            .collect();
+        stack.reverse();
+        let mut chosen: BTreeSet<String> = BTreeSet::new();
+        while let Some(name) = stack.pop() {
+            if chosen.contains(&name) {
+                continue;
+            }
+            let Some(record) = converted.get(&name) else {
+                continue;
+            };
+            chosen.insert(name);
+            let mut referenced = Vec::new();
+            for field in &record.fields {
+                collect_record_names(&field.value, &mut referenced);
+            }
+            for found in referenced.into_iter().rev() {
+                if !chosen.contains(&found) {
+                    stack.push(found);
+                }
+            }
+        }
+        let records = chosen
+            .iter()
+            .filter_map(|name| converted.remove(name))
+            .collect();
+        Table {
+            architecture: target.to_string(),
+            target: target.to_string(),
+            selection: "every record an assembler, a disassembler or an encoder reads, and every record they name".to_string(),
+            records,
+        }
+    }
+}
+
+fn escape_text(text: &str, out: &mut String) {
+    for character in text.chars() {
+        match character {
+            '\\' => out.push_str("\\\\"),
+            '"' => out.push_str("\\\""),
+            '\n' => out.push_str("\\n"),
+            '\t' => out.push_str("\\t"),
+            other => out.push(other),
+        }
+    }
+}
+
+fn write_table_value(value: &TableValue, out: &mut String) {
+    match value {
+        TableValue::Unset => out.push('?'),
+        TableValue::Bit(bit) => out.push(if *bit { '1' } else { '0' }),
+        TableValue::Integer(integer) => out.push_str(&integer.to_string()),
+        TableValue::String(text) => {
+            out.push('"');
+            escape_text(text, out);
+            out.push('"');
+        }
+        TableValue::Code(text) => {
+            out.push_str("[{");
+            out.push_str(text);
+            out.push_str("}]");
+        }
+        TableValue::Bits(bits) => {
+            out.push_str("{ ");
+            for (index, bit) in bits.iter().rev().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                write_table_value(bit, out);
+            }
+            out.push_str(" }");
+        }
+        TableValue::List(items) => {
+            out.push('[');
+            for (index, item) in items.iter().enumerate() {
+                if index > 0 {
+                    out.push_str(", ");
+                }
+                write_table_value(item, out);
+            }
+            out.push(']');
+        }
+        TableValue::Dag {
+            operator,
+            name,
+            arguments,
+        } => {
+            out.push('(');
+            write_table_value(operator, out);
+            if let Some(name) = name {
+                out.push_str(":$");
+                out.push_str(name);
+            }
+            for (index, (argument, argument_name)) in arguments.iter().enumerate() {
+                out.push_str(if index == 0 { " " } else { ", " });
+                write_table_value(argument, out);
+                if let Some(argument_name) = argument_name {
+                    out.push_str(":$");
+                    out.push_str(argument_name);
+                }
+            }
+            out.push(')');
+        }
+        TableValue::Record(name) | TableValue::Variable(name) => out.push_str(name),
+        TableValue::VariableBit { variable, bit } => {
+            out.push_str(variable);
+            out.push('{');
+            out.push_str(&bit.to_string());
+            out.push('}');
+        }
+        TableValue::Expression(text) => {
+            out.push('`');
+            out.push_str(text);
+            out.push('`');
+        }
+    }
+}
+
+pub fn canonical_text(table: &Table) -> String {
+    let mut out = String::new();
+    out.push_str(CANONICAL_HEADER);
+    out.push('\n');
+    out.push_str(&format!("architecture {}\n", table.architecture));
+    out.push_str(&format!("target {}\n", table.target));
+    out.push_str("selection \"");
+    escape_text(&table.selection, &mut out);
+    out.push_str("\"\n");
+    out.push_str(&format!("records {}\n", table.records.len()));
+    for record in &table.records {
+        out.push_str("def ");
+        out.push_str(&record.name);
+        out.push_str(" {");
+        if !record.classes.is_empty() {
+            out.push_str("\t//");
+            for class in &record.classes {
+                out.push(' ');
+                out.push_str(class);
+            }
+        }
+        out.push('\n');
+        for field in &record.fields {
+            out.push_str("  ");
+            out.push_str(&field.field_type);
+            out.push(' ');
+            out.push_str(&field.name);
+            out.push_str(" = ");
+            write_table_value(&field.value, &mut out);
+            out.push_str(";\n");
+        }
+        out.push_str("}\n");
+    }
+    out
+}
+
+fn feature_closure(table: &Table, start: &[String]) -> BTreeSet<String> {
+    let mut found = BTreeSet::new();
+    let mut stack: Vec<String> = start.to_vec();
+    while let Some(name) = stack.pop() {
+        if !found.insert(name.clone()) {
+            continue;
+        }
+        if let Some(record) = table.record(&name) {
+            if let Some(TableValue::List(implied)) = record.field("Implies") {
+                for item in implied {
+                    if let TableValue::Record(implied) = item {
+                        stack.push(implied.clone());
+                    }
+                }
+            }
+        }
+    }
+    found
+}
+
+fn condition_holds(condition: &TableValue, features: &BTreeSet<String>) -> bool {
+    match condition {
+        TableValue::Record(feature) => features.contains(feature),
+        TableValue::Dag {
+            operator,
+            arguments,
+            ..
+        } => {
+            let TableValue::Record(operator) = operator.as_ref() else {
+                return true;
+            };
+            match operator.as_str() {
+                "all_of" => arguments
+                    .iter()
+                    .all(|(argument, _)| condition_holds(argument, features)),
+                "any_of" => arguments
+                    .iter()
+                    .any(|(argument, _)| condition_holds(argument, features)),
+                "not" => !arguments
+                    .iter()
+                    .all(|(argument, _)| condition_holds(argument, features)),
+                _ => true,
+            }
+        }
+        _ => true,
+    }
+}
+
+fn predicates_hold(table: &Table, record: &TableRecord, features: &BTreeSet<String>) -> bool {
+    let Some(TableValue::List(predicates)) = record.field("Predicates") else {
+        return true;
+    };
+    predicates.iter().all(|predicate| {
+        let TableValue::Record(name) = predicate else {
+            return true;
+        };
+        match table
+            .record(name)
+            .and_then(|held| held.field("AssemblerCondDag"))
+        {
+            Some(condition @ TableValue::Dag { .. }) => condition_holds(condition, features),
+            _ => true,
+        }
+    })
+}
+
+pub fn select_architecture(canonical: &Table, architecture: &Architecture) -> Table {
+    let records = match architecture.selection {
+        Selection::Everything => canonical.records.clone(),
+        Selection::FeatureSets {
+            processor,
+            alternatives,
+        } => {
+            let mut base: Vec<String> = Vec::new();
+            if let Some(processor) = processor {
+                for record in &canonical.records {
+                    if record.is_a("Processor")
+                        && record.field("Name") == Some(&TableValue::String(processor.to_string()))
+                    {
+                        if let Some(TableValue::List(features)) = record.field("Features") {
+                            for feature in features {
+                                if let TableValue::Record(feature) = feature {
+                                    base.push(feature.clone());
+                                }
+                            }
+                        }
+                    }
+                }
+            }
+            let sets: Vec<BTreeSet<String>> = alternatives
+                .iter()
+                .map(|extra| {
+                    let mut start = base.clone();
+                    start.extend(extra.iter().map(|feature| feature.to_string()));
+                    feature_closure(canonical, &start)
+                })
+                .collect();
+            canonical
+                .records
+                .iter()
+                .filter(|record| {
+                    sets.iter()
+                        .any(|features| predicates_hold(canonical, record, features))
+                })
+                .cloned()
+                .collect()
+        }
+    };
+    Table {
+        architecture: architecture.name.to_string(),
+        target: architecture.target.to_string(),
+        selection: architecture.description.to_string(),
+        records,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+#[repr(u8)]
+enum ValueTag {
+    Unset = 0,
+    False = 1,
+    True = 2,
+    Integer = 3,
+    String = 4,
+    Code = 5,
+    Bits = 6,
+    List = 7,
+    Dag = 8,
+    Record = 9,
+    Variable = 10,
+    VariableBit = 11,
+    Expression = 12,
+    ConstantBits = 13,
+}
+
+impl ValueTag {
+    const ALL: [ValueTag; 14] = [
+        ValueTag::Unset,
+        ValueTag::False,
+        ValueTag::True,
+        ValueTag::Integer,
+        ValueTag::String,
+        ValueTag::Code,
+        ValueTag::Bits,
+        ValueTag::List,
+        ValueTag::Dag,
+        ValueTag::Record,
+        ValueTag::Variable,
+        ValueTag::VariableBit,
+        ValueTag::Expression,
+        ValueTag::ConstantBits,
+    ];
+}
+
+fn put_number(out: &mut Vec<u8>, mut number: u64) {
+    loop {
+        let low = (number & 0x7f) as u8;
+        number >>= 7;
+        if number == 0 {
+            out.push(low);
+            return;
+        }
+        out.push(low | 0x80);
+    }
+}
+
+fn put_signed(out: &mut Vec<u8>, number: i64) {
+    put_number(out, ((number << 1) ^ (number >> 63)) as u64);
+}
+
+#[derive(Default)]
+struct TableEncoder {
+    strings: Vec<String>,
+    string_ids: BTreeMap<String, u64>,
+    values: Vec<Vec<u64>>,
+    value_ids: BTreeMap<Vec<u64>, u64>,
+    shapes: Vec<Vec<u64>>,
+    shape_ids: BTreeMap<Vec<u64>, u64>,
+    class_lists: Vec<Vec<u64>>,
+    class_list_ids: BTreeMap<Vec<u64>, u64>,
+}
+
+impl TableEncoder {
+    fn string(&mut self, text: &str) -> u64 {
+        if let Some(found) = self.string_ids.get(text) {
+            return *found;
+        }
+        let made = self.strings.len() as u64;
+        self.strings.push(text.to_string());
+        self.string_ids.insert(text.to_string(), made);
+        made
+    }
+
+    fn optional_string(&mut self, text: &Option<String>) -> u64 {
+        match text {
+            Some(text) => self.string(text) + 1,
+            None => 0,
+        }
+    }
+
+    fn value(&mut self, value: &TableValue) -> u64 {
+        let key: Vec<u64> = match value {
+            TableValue::Unset => vec![ValueTag::Unset as u64],
+            TableValue::Bit(false) => vec![ValueTag::False as u64],
+            TableValue::Bit(true) => vec![ValueTag::True as u64],
+            TableValue::Integer(integer) => vec![ValueTag::Integer as u64, *integer as u64],
+            TableValue::String(text) => vec![ValueTag::String as u64, self.string(text)],
+            TableValue::Code(text) => vec![ValueTag::Code as u64, self.string(text)],
+            TableValue::Bits(items)
+                if items.iter().all(|item| matches!(item, TableValue::Bit(_))) =>
+            {
+                let mut key = vec![ValueTag::ConstantBits as u64, items.len() as u64];
+                let mut packed = vec![0u8; items.len().div_ceil(8)];
+                for (index, item) in items.iter().enumerate() {
+                    if *item == TableValue::Bit(true) {
+                        packed[index / 8] |= 1 << (index % 8);
+                    }
+                }
+                key.extend(packed.iter().map(|byte| *byte as u64));
+                key
+            }
+            TableValue::Bits(items) | TableValue::List(items) => {
+                let tag = if matches!(value, TableValue::Bits(_)) {
+                    ValueTag::Bits
+                } else {
+                    ValueTag::List
+                };
+                let mut key = vec![tag as u64, items.len() as u64];
+                for item in items {
+                    key.push(self.value(item));
+                }
+                key
+            }
+            TableValue::Dag {
+                operator,
+                name,
+                arguments,
+            } => {
+                let mut key = vec![ValueTag::Dag as u64, self.value(operator)];
+                key.push(self.optional_string(name));
+                key.push(arguments.len() as u64);
+                for (argument, argument_name) in arguments {
+                    key.push(self.value(argument));
+                    key.push(self.optional_string(argument_name));
+                }
+                key
+            }
+            TableValue::Record(name) => vec![ValueTag::Record as u64, self.string(name)],
+            TableValue::Variable(name) => vec![ValueTag::Variable as u64, self.string(name)],
+            TableValue::VariableBit { variable, bit } => vec![
+                ValueTag::VariableBit as u64,
+                self.string(variable),
+                *bit as u64,
+            ],
+            TableValue::Expression(text) => vec![ValueTag::Expression as u64, self.string(text)],
+        };
+        if let Some(found) = self.value_ids.get(&key) {
+            return *found;
+        }
+        let made = self.values.len() as u64;
+        self.values.push(key.clone());
+        self.value_ids.insert(key, made);
+        made
+    }
+
+    fn class_list(&mut self, record: &TableRecord) -> u64 {
+        let key: Vec<u64> = record
+            .classes
+            .iter()
+            .map(|class| self.string(class))
+            .collect();
+        if let Some(found) = self.class_list_ids.get(&key) {
+            return *found;
+        }
+        let made = self.class_lists.len() as u64;
+        self.class_lists.push(key.clone());
+        self.class_list_ids.insert(key, made);
+        made
+    }
+
+    fn shape(&mut self, record: &TableRecord) -> u64 {
+        let mut key = Vec::with_capacity(record.fields.len() * 2);
+        for field in &record.fields {
+            key.push(self.string(&field.name));
+            key.push(self.string(&field.field_type));
+        }
+        if let Some(found) = self.shape_ids.get(&key) {
+            return *found;
+        }
+        let made = self.shapes.len() as u64;
+        self.shapes.push(key.clone());
+        self.shape_ids.insert(key, made);
+        made
+    }
+}
+
+pub fn write_table(table: &Table) -> Vec<u8> {
+    let mut encoder = TableEncoder::default();
+    let header = [
+        encoder.string(&table.architecture),
+        encoder.string(&table.target),
+        encoder.string(&table.selection),
+    ];
+    let mut records: Vec<(u64, u64, u64, Vec<u64>)> = Vec::with_capacity(table.records.len());
+    for record in &table.records {
+        let name = encoder.string(&record.name);
+        let classes = encoder.class_list(record);
+        let shape = encoder.shape(record);
+        let values = record
+            .fields
+            .iter()
+            .map(|field| encoder.value(&field.value))
+            .collect();
+        records.push((name, classes, shape, values));
+    }
+    let mut tallies: Vec<Vec<BTreeMap<u64, u64>>> = encoder
+        .shapes
+        .iter()
+        .map(|shape| vec![BTreeMap::new(); shape.len() / 2])
+        .collect();
+    for (_, _, shape, values) in &records {
+        for (slot, value) in values.iter().enumerate() {
+            *tallies[*shape as usize][slot].entry(*value).or_insert(0) += 1;
+        }
+    }
+    let defaults: Vec<Vec<u64>> = tallies
+        .iter()
+        .map(|slots| {
+            slots
+                .iter()
+                .map(|counts| {
+                    let mut best = (0u64, 0u64);
+                    for (value, count) in counts {
+                        if *count > best.1 {
+                            best = (*value, *count);
+                        }
+                    }
+                    best.0
+                })
+                .collect()
+        })
+        .collect();
+    let mut out = Vec::new();
+    out.extend_from_slice(TABLE_MAGIC);
+    out.extend_from_slice(&TABLE_FORMAT_VERSION.to_le_bytes());
+    put_number(&mut out, encoder.strings.len() as u64);
+    for text in &encoder.strings {
+        put_number(&mut out, text.len() as u64);
+        out.extend_from_slice(text.as_bytes());
+    }
+    for id in header {
+        put_number(&mut out, id);
+    }
+    put_number(&mut out, encoder.values.len() as u64);
+    for key in &encoder.values {
+        out.push(key[0] as u8);
+        if key[0] == ValueTag::Integer as u64 {
+            put_signed(&mut out, key[1] as i64);
+            continue;
+        }
+        if key[0] == ValueTag::ConstantBits as u64 {
+            put_number(&mut out, key[1]);
+            out.extend(key[2..].iter().map(|byte| *byte as u8));
+            continue;
+        }
+        for item in &key[1..] {
+            put_number(&mut out, *item);
+        }
+    }
+    put_number(&mut out, encoder.class_lists.len() as u64);
+    for list in &encoder.class_lists {
+        put_number(&mut out, list.len() as u64);
+        for item in list {
+            put_number(&mut out, *item);
+        }
+    }
+    put_number(&mut out, encoder.shapes.len() as u64);
+    for (shape, slots) in encoder.shapes.iter().zip(defaults.iter()) {
+        put_number(&mut out, (shape.len() / 2) as u64);
+        for (pair, default) in shape.chunks(2).zip(slots.iter()) {
+            put_number(&mut out, pair[0]);
+            put_number(&mut out, pair[1]);
+            put_number(&mut out, *default);
+        }
+    }
+    put_number(&mut out, records.len() as u64);
+    for (name, classes, shape, values) in &records {
+        put_number(&mut out, *name);
+        put_number(&mut out, *classes);
+        put_number(&mut out, *shape);
+        let slots = &defaults[*shape as usize];
+        let mut mask = vec![0u8; values.len().div_ceil(8)];
+        for (slot, value) in values.iter().enumerate() {
+            if *value != slots[slot] {
+                mask[slot / 8] |= 1 << (slot % 8);
+            }
+        }
+        out.extend_from_slice(&mask);
+        for (slot, value) in values.iter().enumerate() {
+            if *value != slots[slot] {
+                put_number(&mut out, *value);
+            }
+        }
+    }
+    out
+}
+
+struct TableDecoder<'b> {
+    bytes: &'b [u8],
+    at: usize,
+}
+
+type Decoded<T> = Result<T, (usize, &'static str)>;
+
+impl TableDecoder<'_> {
+    fn byte(&mut self) -> Decoded<u8> {
+        let found = *self
+            .bytes
+            .get(self.at)
+            .ok_or((self.at, "the table ends early"))?;
+        self.at += 1;
+        Ok(found)
+    }
+
+    fn number(&mut self) -> Decoded<u64> {
+        let start = self.at;
+        let mut value: u64 = 0;
+        let mut shift = 0u32;
+        loop {
+            let byte = self.byte()?;
+            if shift >= 64 || (shift == 63 && (byte & 0x7f) > 1) {
+                return Err((start, "a number is too long"));
+            }
+            value |= ((byte & 0x7f) as u64) << shift;
+            if byte & 0x80 == 0 {
+                return Ok(value);
+            }
+            shift += 7;
+        }
+    }
+
+    fn signed(&mut self) -> Decoded<i64> {
+        let raw = self.number()?;
+        Ok(((raw >> 1) as i64) ^ -((raw & 1) as i64))
+    }
+
+    fn count(&mut self, limit: usize) -> Decoded<usize> {
+        let start = self.at;
+        let count = self.number()?;
+        if count > limit as u64 {
+            return Err((start, "a count is larger than the table"));
+        }
+        Ok(count as usize)
+    }
+
+    fn index(&mut self, below: usize, reason: &'static str) -> Decoded<usize> {
+        let start = self.at;
+        let found = self.number()?;
+        if found >= below as u64 {
+            return Err((start, reason));
+        }
+        Ok(found as usize)
+    }
+
+    fn optional(&mut self, strings: &[String]) -> Decoded<Option<String>> {
+        let start = self.at;
+        let found = self.number()?;
+        if found == 0 {
+            return Ok(None);
+        }
+        strings
+            .get((found - 1) as usize)
+            .cloned()
+            .map(Some)
+            .ok_or((start, "a string index is out of range"))
+    }
+}
+
+pub fn read_table(bytes: &[u8]) -> Result<Table, Diagnostic> {
+    decode_table(bytes).map_err(|(offset, reason)| {
+        fail("EI103", "The instruction table could not be read.")
+            .with_context(format!("Offset: {offset}"))
+            .with_context(format!("Reason: {reason}"))
+    })
+}
+
+fn decode_table(bytes: &[u8]) -> Decoded<Table> {
+    if bytes.len() < 12 || &bytes[..8] != TABLE_MAGIC {
+        return Err((0, "the table does not start with its magic number"));
+    }
+    let version = u32::from_le_bytes([bytes[8], bytes[9], bytes[10], bytes[11]]);
+    if version != TABLE_FORMAT_VERSION {
+        return Err((8, "the table format version is not one this reader knows"));
+    }
+    let mut decoder = TableDecoder { bytes, at: 12 };
+    let limit = bytes.len();
+    let string_count = decoder.count(limit)?;
+    let mut strings = Vec::with_capacity(string_count);
+    for _ in 0..string_count {
+        let length = decoder.count(limit)?;
+        let start = decoder.at;
+        let end = start
+            .checked_add(length)
+            .filter(|end| *end <= bytes.len())
+            .ok_or((start, "a string runs past the end of the table"))?;
+        let text = std::str::from_utf8(&bytes[start..end])
+            .map_err(|_| (start, "a string is not UTF-8"))?;
+        strings.push(text.to_string());
+        decoder.at = end;
+    }
+    let mut header = Vec::new();
+    for _ in 0..3 {
+        let at = decoder.index(strings.len(), "a string index is out of range")?;
+        header.push(strings[at].clone());
+    }
+    let value_count = decoder.count(limit)?;
+    let mut values: Vec<TableValue> = Vec::with_capacity(value_count);
+    for _ in 0..value_count {
+        let start = decoder.at;
+        let tag = decoder.byte()?;
+        let tag = *ValueTag::ALL
+            .get(tag as usize)
+            .ok_or((start, "a value has an unknown kind"))?;
+        let known = values.len();
+        let made = match tag {
+            ValueTag::Unset => TableValue::Unset,
+            ValueTag::False => TableValue::Bit(false),
+            ValueTag::True => TableValue::Bit(true),
+            ValueTag::Integer => TableValue::Integer(decoder.signed()?),
+            ValueTag::String
+            | ValueTag::Code
+            | ValueTag::Record
+            | ValueTag::Variable
+            | ValueTag::Expression => {
+                let at = decoder.index(strings.len(), "a string index is out of range")?;
+                let text = strings[at].clone();
+                match tag {
+                    ValueTag::String => TableValue::String(text),
+                    ValueTag::Code => TableValue::Code(text),
+                    ValueTag::Record => TableValue::Record(text),
+                    ValueTag::Variable => TableValue::Variable(text),
+                    _ => TableValue::Expression(text),
+                }
+            }
+            ValueTag::Bits | ValueTag::List => {
+                let count = decoder.count(limit)?;
+                let mut items = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let at = decoder.index(known, "a value names a value after it")?;
+                    items.push(values[at].clone());
+                }
+                if tag == ValueTag::Bits {
+                    TableValue::Bits(items)
+                } else {
+                    TableValue::List(items)
+                }
+            }
+            ValueTag::Dag => {
+                let operator = decoder.index(known, "a value names a value after it")?;
+                let name = decoder.optional(&strings)?;
+                let count = decoder.count(limit)?;
+                let mut arguments = Vec::with_capacity(count);
+                for _ in 0..count {
+                    let at = decoder.index(known, "a value names a value after it")?;
+                    let argument_name = decoder.optional(&strings)?;
+                    arguments.push((values[at].clone(), argument_name));
+                }
+                TableValue::Dag {
+                    operator: Box::new(values[operator].clone()),
+                    name,
+                    arguments,
+                }
+            }
+            ValueTag::ConstantBits => {
+                let width = decoder.count(limit.saturating_mul(8))?;
+                let start = decoder.at;
+                let end = start
+                    .checked_add(width.div_ceil(8))
+                    .filter(|end| *end <= bytes.len())
+                    .ok_or((start, "a bit pattern runs past the end of the table"))?;
+                let packed = &bytes[start..end];
+                decoder.at = end;
+                TableValue::Bits(
+                    (0..width)
+                        .map(|index| TableValue::Bit(packed[index / 8] & (1 << (index % 8)) != 0))
+                        .collect(),
+                )
+            }
+            ValueTag::VariableBit => {
+                let at = decoder.index(strings.len(), "a string index is out of range")?;
+                let bit_at = decoder.at;
+                let bit = decoder.number()?;
+                if bit > u32::MAX as u64 {
+                    return Err((bit_at, "a bit number is too large"));
+                }
+                TableValue::VariableBit {
+                    variable: strings[at].clone(),
+                    bit: bit as u32,
+                }
+            }
+        };
+        values.push(made);
+    }
+    let class_list_count = decoder.count(limit)?;
+    let mut class_lists: Vec<Vec<String>> = Vec::with_capacity(class_list_count);
+    for _ in 0..class_list_count {
+        let count = decoder.count(limit)?;
+        let mut classes = Vec::with_capacity(count);
+        for _ in 0..count {
+            let at = decoder.index(strings.len(), "a string index is out of range")?;
+            classes.push(strings[at].clone());
+        }
+        class_lists.push(classes);
+    }
+    let shape_count = decoder.count(limit)?;
+    let mut shapes: Vec<Vec<(String, String, usize)>> = Vec::with_capacity(shape_count);
+    for _ in 0..shape_count {
+        let count = decoder.count(limit)?;
+        let mut shape = Vec::with_capacity(count);
+        for _ in 0..count {
+            let name = decoder.index(strings.len(), "a string index is out of range")?;
+            let field_type = decoder.index(strings.len(), "a string index is out of range")?;
+            let default = decoder.index(values.len(), "a value index is out of range")?;
+            shape.push((strings[name].clone(), strings[field_type].clone(), default));
+        }
+        shapes.push(shape);
+    }
+    let record_count = decoder.count(limit)?;
+    let mut records = Vec::with_capacity(record_count);
+    for _ in 0..record_count {
+        let name_at = decoder.index(strings.len(), "a string index is out of range")?;
+        let classes = decoder.index(class_lists.len(), "a class list index is out of range")?;
+        let shape = decoder.index(shapes.len(), "a shape index is out of range")?;
+        let slots = &shapes[shape];
+        let mask_start = decoder.at;
+        let mask_end = mask_start
+            .checked_add(slots.len().div_ceil(8))
+            .filter(|end| *end <= bytes.len())
+            .ok_or((mask_start, "a field mask runs past the end of the table"))?;
+        let mask = &bytes[mask_start..mask_end];
+        decoder.at = mask_end;
+        let mut fields = Vec::with_capacity(slots.len());
+        for (slot, (name, field_type, default)) in slots.iter().enumerate() {
+            let at = if mask[slot / 8] & (1 << (slot % 8)) != 0 {
+                decoder.index(values.len(), "a value index is out of range")?
+            } else {
+                *default
+            };
+            fields.push(TableField {
+                name: name.clone(),
+                field_type: field_type.clone(),
+                value: values[at].clone(),
+            });
+        }
+        records.push(TableRecord {
+            name: strings[name_at].clone(),
+            classes: class_lists[classes].clone(),
+            fields,
+        });
+    }
+    if decoder.at != bytes.len() {
+        return Err((decoder.at, "bytes follow the last record"));
+    }
+    let mut header = header.into_iter();
+    Ok(Table {
+        architecture: header.next().unwrap_or_default(),
+        target: header.next().unwrap_or_default(),
+        selection: header.next().unwrap_or_default(),
+        records,
+    })
+}
+
+const SHA256_ROUND_CONSTANTS: [u32; 64] = [
+    0x428a2f98, 0x71374491, 0xb5c0fbcf, 0xe9b5dba5, 0x3956c25b, 0x59f111f1, 0x923f82a4, 0xab1c5ed5,
+    0xd807aa98, 0x12835b01, 0x243185be, 0x550c7dc3, 0x72be5d74, 0x80deb1fe, 0x9bdc06a7, 0xc19bf174,
+    0xe49b69c1, 0xefbe4786, 0x0fc19dc6, 0x240ca1cc, 0x2de92c6f, 0x4a7484aa, 0x5cb0a9dc, 0x76f988da,
+    0x983e5152, 0xa831c66d, 0xb00327c8, 0xbf597fc7, 0xc6e00bf3, 0xd5a79147, 0x06ca6351, 0x14292967,
+    0x27b70a85, 0x2e1b2138, 0x4d2c6dfc, 0x53380d13, 0x650a7354, 0x766a0abb, 0x81c2c92e, 0x92722c85,
+    0xa2bfe8a1, 0xa81a664b, 0xc24b8b70, 0xc76c51a3, 0xd192e819, 0xd6990624, 0xf40e3585, 0x106aa070,
+    0x19a4c116, 0x1e376c08, 0x2748774c, 0x34b0bcb5, 0x391c0cb3, 0x4ed8aa4a, 0x5b9cca4f, 0x682e6ff3,
+    0x748f82ee, 0x78a5636f, 0x84c87814, 0x8cc70208, 0x90befffa, 0xa4506ceb, 0xbef9a3f7, 0xc67178f2,
+];
+
+const SHA256_INITIAL_STATE: [u32; 8] = [
+    0x6a09e667, 0xbb67ae85, 0x3c6ef372, 0xa54ff53a, 0x510e527f, 0x9b05688c, 0x1f83d9ab, 0x5be0cd19,
+];
+
+fn sha256_block(state: &mut [u32; 8], block: &[u8]) {
+    let mut schedule = [0u32; 64];
+    for (index, word) in schedule.iter_mut().take(16).enumerate() {
+        *word = u32::from_be_bytes([
+            block[index * 4],
+            block[index * 4 + 1],
+            block[index * 4 + 2],
+            block[index * 4 + 3],
+        ]);
+    }
+    for index in 16..64 {
+        let earlier = schedule[index - 15];
+        let recent = schedule[index - 2];
+        let small_zero = earlier.rotate_right(7) ^ earlier.rotate_right(18) ^ (earlier >> 3);
+        let small_one = recent.rotate_right(17) ^ recent.rotate_right(19) ^ (recent >> 10);
+        schedule[index] = schedule[index - 16]
+            .wrapping_add(small_zero)
+            .wrapping_add(schedule[index - 7])
+            .wrapping_add(small_one);
+    }
+    let [mut a, mut b, mut c, mut d, mut e, mut f, mut g, mut h] = *state;
+    for index in 0..64 {
+        let big_one = e.rotate_right(6) ^ e.rotate_right(11) ^ e.rotate_right(25);
+        let choose = (e & f) ^ (!e & g);
+        let first = h
+            .wrapping_add(big_one)
+            .wrapping_add(choose)
+            .wrapping_add(SHA256_ROUND_CONSTANTS[index])
+            .wrapping_add(schedule[index]);
+        let big_zero = a.rotate_right(2) ^ a.rotate_right(13) ^ a.rotate_right(22);
+        let majority = (a & b) ^ (a & c) ^ (b & c);
+        let second = big_zero.wrapping_add(majority);
+        h = g;
+        g = f;
+        f = e;
+        e = d.wrapping_add(first);
+        d = c;
+        c = b;
+        b = a;
+        a = first.wrapping_add(second);
+    }
+    for (held, added) in state.iter_mut().zip([a, b, c, d, e, f, g, h]) {
+        *held = held.wrapping_add(added);
+    }
+}
+
+pub fn sha256(bytes: &[u8]) -> [u8; 32] {
+    let mut state = SHA256_INITIAL_STATE;
+    let mut chunks = bytes.chunks_exact(64);
+    for block in &mut chunks {
+        sha256_block(&mut state, block);
+    }
+    let rest = chunks.remainder();
+    let mut tail = Vec::with_capacity(128);
+    tail.extend_from_slice(rest);
+    tail.push(0x80);
+    while tail.len() % 64 != 56 {
+        tail.push(0);
+    }
+    tail.extend_from_slice(&((bytes.len() as u64).wrapping_mul(8)).to_be_bytes());
+    for block in tail.chunks_exact(64) {
+        sha256_block(&mut state, block);
+    }
+    let mut digest = [0u8; 32];
+    for (index, word) in state.iter().enumerate() {
+        digest[index * 4..index * 4 + 4].copy_from_slice(&word.to_be_bytes());
+    }
+    digest
+}
+
+pub fn sha256_hex(bytes: &[u8]) -> String {
+    sha256(bytes)
+        .iter()
+        .map(|byte| format!("{byte:02x}"))
+        .collect()
+}
+
+pub struct TargetReading {
+    pub target: String,
+    pub sources: BTreeSet<String>,
+    pub canonical: Table,
+    pub canonical_text: String,
+}
+
+pub struct Generation {
+    pub sources: BTreeMap<String, String>,
+    pub canonical: BTreeMap<String, String>,
+    pub tables: BTreeMap<String, Vec<u8>>,
+    pub manifest: String,
+}
+
+pub fn table_file_name(architecture: &str) -> String {
+    format!("{architecture}.bin")
+}
+
+pub fn target_main(target: &str) -> String {
+    format!("lib/Target/{target}/{target}.td")
+}
+
+pub fn target_include_directories(target: &str) -> Vec<String> {
+    vec!["include".to_string(), format!("lib/Target/{target}")]
+}
+
+pub fn read_target(
+    files: &BTreeMap<String, String>,
+    target: &str,
+) -> Result<TargetReading, Diagnostic> {
+    let main = target_main(target);
+    let reading = read_records(
+        files,
+        &main,
+        &target_include_directories(target),
+        &[],
+        false,
+    );
+    if !reading.succeeded {
+        let mut diagnostic = fail("EI102", "The instruction tables could not be built.")
+            .with_context(format!("Target: {target}"));
+        for line in reading.diagnostic().context {
+            diagnostic = diagnostic.with_context(line);
+        }
+        return Err(diagnostic);
+    }
+    let canonical = reading.keeper.canonical_table(target);
+    let canonical_text = canonical_text(&canonical);
+    let mut sources = reading.dependencies.clone();
+    sources.insert(main);
+    Ok(TargetReading {
+        target: target.to_string(),
+        sources,
+        canonical,
+        canonical_text,
+    })
+}
+
+fn run_jobs<T: Send>(count: usize, threads: usize, work: &(dyn Fn(usize) -> T + Sync)) -> Vec<T> {
+    let threads = threads.clamp(1, count.max(1));
+    let next = std::sync::atomic::AtomicUsize::new(0);
+    let results: std::sync::Mutex<BTreeMap<usize, T>> = std::sync::Mutex::new(BTreeMap::new());
+    if threads == 1 {
+        return (0..count).map(work).collect();
+    }
+    std::thread::scope(|scope| {
+        for _ in 0..threads {
+            let spawned = std::thread::Builder::new()
+                .stack_size(256 << 20)
+                .spawn_scoped(scope, || loop {
+                    let index = next.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+                    if index >= count {
+                        break;
+                    }
+                    let made = work(index);
+                    if let Ok(mut held) = results.lock() {
+                        held.insert(index, made);
+                    }
+                });
+            if spawned.is_err() {
+                break;
+            }
+        }
+    });
+    let mut held = results.into_inner().unwrap_or_default();
+    (0..count).filter_map(|index| held.remove(&index)).collect()
+}
+
+pub fn render_manifest(
+    generation_sources: &BTreeMap<String, String>,
+    canonical: &BTreeMap<String, String>,
+    tables: &BTreeMap<String, Vec<u8>>,
+) -> String {
+    let mut out = String::new();
+    out.push_str(MANIFEST_HEADER);
+    out.push('\n');
+    out.push_str(&format!("tablegen {TABLEGEN_VERSION}\n"));
+    out.push_str(&format!("table-format {TABLE_FORMAT_VERSION}\n"));
+    for (path, digest) in generation_sources {
+        out.push_str(&format!("source {path} {digest}\n"));
+    }
+    for (target, text) in canonical {
+        out.push_str(&format!(
+            "canonical {target} {} {}\n",
+            sha256_hex(text.as_bytes()),
+            text.len()
+        ));
+    }
+    for (file, bytes) in tables {
+        out.push_str(&format!(
+            "table {file} {} {}\n",
+            sha256_hex(bytes),
+            bytes.len()
+        ));
+    }
+    out
+}
+
+pub fn generate_tables(
+    files: &BTreeMap<String, String>,
+    threads: usize,
+) -> Result<Generation, Diagnostic> {
+    let readings = run_jobs(TARGETS.len(), threads, &|index| {
+        read_target(files, TARGETS[index])
+    });
+    let mut by_target = BTreeMap::new();
+    for reading in readings {
+        let reading = reading?;
+        by_target.insert(reading.target.clone(), reading);
+    }
+    let made = run_jobs(ARCHITECTURES.len(), threads, &|index| {
+        let architecture = &ARCHITECTURES[index];
+        let canonical = by_target
+            .get(architecture.target)
+            .map(|reading| &reading.canonical);
+        canonical.map(|canonical| {
+            let selected = select_architecture(canonical, architecture);
+            (table_file_name(architecture.name), write_table(&selected))
+        })
+    });
+    let mut tables = BTreeMap::new();
+    for (file, bytes) in made.into_iter().flatten() {
+        tables.insert(file, bytes);
+    }
+    let mut sources = BTreeMap::new();
+    let mut canonical = BTreeMap::new();
+    for (target, reading) in &by_target {
+        for path in &reading.sources {
+            if let Some(text) = files.get(path) {
+                sources.insert(path.clone(), sha256_hex(text.as_bytes()));
+            }
+        }
+        canonical.insert(target.clone(), reading.canonical_text.clone());
+    }
+    let manifest = render_manifest(&sources, &canonical, &tables);
+    Ok(Generation {
+        sources,
+        canonical,
+        tables,
+        manifest,
+    })
+}
