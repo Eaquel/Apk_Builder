@@ -92,6 +92,7 @@ pub mod segment_type {
     pub const GNU_STACK: u32 = 0x6474_e551;
     pub const GNU_RELRO: u32 = 0x6474_e552;
     pub const GNU_PROPERTY: u32 = 0x6474_e553;
+    pub const OPENBSD_MUTABLE: u32 = 0x65a3_dbe5;
     pub const OPENBSD_RANDOMIZE: u32 = 0x65a3_dbe6;
     pub const OPENBSD_WRITE_XOR_EXECUTE_NEEDED: u32 = 0x65a3_dbe7;
     pub const OPENBSD_NO_BRANCH_TARGET: u32 = 0x65a3_dbe8;
@@ -529,9 +530,14 @@ pub struct Symbol {
     pub kind: u8,
     pub other: u8,
     pub section: u32,
+    pub extended: bool,
 }
 
 impl Symbol {
+    pub fn is_reserved(&self) -> bool {
+        !self.extended && self.section >= section_index::RESERVED_LOW
+    }
+
     pub fn info(&self) -> u8 {
         (self.binding << 4) | (self.kind & 0xf)
     }
@@ -545,11 +551,11 @@ impl Symbol {
     }
 
     pub fn is_common(&self) -> bool {
-        self.section == section_index::COMMON
+        !self.extended && self.section == section_index::COMMON
     }
 
     pub fn is_absolute(&self) -> bool {
-        self.section == section_index::ABSOLUTE
+        !self.extended && self.section == section_index::ABSOLUTE
     }
 }
 
@@ -610,6 +616,8 @@ pub struct ElfFile {
     pub program_headers: Vec<ProgramHeader>,
 }
 
+const BUT_GOT: &str = ", but got ";
+
 fn unreadable(offset: u64, reason: &str) -> Diagnostic {
     fail("EI200", "The object file could not be read.")
         .with_context(format!("Offset: {offset}"))
@@ -645,6 +653,15 @@ pub fn string_at(table: &[u8], offset: u32) -> Option<String> {
 }
 
 pub fn read_header(bytes: &[u8]) -> Result<Header, Diagnostic> {
+    if !is_elf(bytes) {
+        return Err(unreadable(0, "not an ELF file"));
+    }
+    if !matches!(bytes.get(5), Some(1) | Some(2)) {
+        return Err(unreadable(0, "corrupted ELF file: invalid data encoding"));
+    }
+    if !matches!(bytes.get(4), Some(1) | Some(2)) {
+        return Err(unreadable(0, "corrupted ELF file: invalid file class"));
+    }
     let encoding = identify(bytes).ok_or_else(|| unreadable(0, "not an ELF file"))?;
     if bytes.len() < encoding.header_size() {
         return Err(unreadable(0, "the file header is truncated"));
@@ -734,7 +751,15 @@ impl ElfFile {
                         .checked_add(section.size)
                         .filter(|stop| *stop <= bytes.len() as u64)
                         .ok_or_else(|| {
-                            unreadable(section.offset, "a section runs past the end of the file")
+                            unreadable(
+                                section.offset,
+                                &format!(
+                                    "section [index {index}] has a sh_offset (0x{:x}) + sh_size (0x{:x}) that is greater than the file size (0x{:x})",
+                                    section.offset,
+                                    section.size,
+                                    bytes.len()
+                                ),
+                            )
                         })?;
                     section.data = bytes[start..stop as usize].to_vec();
                 }
@@ -864,7 +889,27 @@ impl ElfFile {
         else {
             return Ok(Vec::new());
         };
-        Ok(decode_dynamic(self.encoding(), &self.sections[index].data))
+        let section = &self.sections[index];
+        let entry_size = (self.encoding().word_size() * 2) as u64;
+        if section.entry_size != entry_size {
+            return Err(unreadable(
+                section.offset,
+                &format!(
+                    "section [index {index}] has invalid sh_entsize: expected {entry_size}{BUT_GOT}{}",
+                    section.entry_size
+                ),
+            ));
+        }
+        if !section.size.is_multiple_of(entry_size) {
+            return Err(unreadable(
+                section.offset,
+                &format!(
+                    "section [index {index}] has an invalid sh_size ({}) which is not a multiple of its sh_entsize ({entry_size})",
+                    section.size
+                ),
+            ));
+        }
+        Ok(decode_dynamic(self.encoding(), &section.data))
     }
 
     pub fn needed_libraries(&self) -> Result<Vec<String>, Diagnostic> {
@@ -876,12 +921,19 @@ impl ElfFile {
             return Ok(Vec::new());
         };
         let strings = &self.sections[self.sections[index].link as usize].data;
-        Ok(self
-            .dynamic_entries()?
-            .iter()
-            .filter(|entry| entry.tag == dynamic_tag::NEEDED)
-            .filter_map(|entry| string_at(strings, entry.value as u32))
-            .collect())
+        let mut names = Vec::new();
+        for entry in self.dynamic_entries()? {
+            if entry.tag != dynamic_tag::NEEDED {
+                continue;
+            }
+            let name = string_at(strings, entry.value as u32)
+                .filter(|_| entry.value < strings.len() as u64)
+                .ok_or_else(|| {
+                    unreadable(self.sections[index].offset, "invalid DT_NEEDED entry")
+                })?;
+            names.push(name);
+        }
+        Ok(names)
     }
 
     pub fn shared_object_name(&self) -> Result<Option<String>, Diagnostic> {
@@ -893,11 +945,17 @@ impl ElfFile {
             return Ok(None);
         };
         let strings = &self.sections[self.sections[index].link as usize].data;
-        Ok(self
+        let Some(entry) = self
             .dynamic_entries()?
-            .iter()
+            .into_iter()
             .find(|entry| entry.tag == dynamic_tag::SHARED_OBJECT_NAME)
-            .and_then(|entry| string_at(strings, entry.value as u32)))
+        else {
+            return Ok(None);
+        };
+        string_at(strings, entry.value as u32)
+            .filter(|_| entry.value < strings.len() as u64)
+            .map(Some)
+            .ok_or_else(|| unreadable(self.sections[index].offset, "invalid DT_SONAME entry"))
     }
 
     pub fn notes(&self, index: usize) -> Result<Vec<Note>, Diagnostic> {
@@ -945,6 +1003,43 @@ impl ElfFile {
         let strings = &self.sections[section.link as usize].data;
         decode_version_needs(self.encoding(), &section.data, strings)
             .map_err(|reason| unreadable(section.offset, reason))
+    }
+
+    pub fn version_need_problem(&self) -> Option<&'static str> {
+        let index = self
+            .sections_of_kind(section_type::GNU_VERSION_NEEDS)
+            .first()
+            .copied()?;
+        let section = &self.sections[index];
+        let encoding = self.encoding();
+        let data = &section.data;
+        let strings = self
+            .dynamic_symbol_table()
+            .and_then(|table| self.sections.get(self.sections[table].link as usize))
+            .map_or(0, |strings| strings.data.len() as u64);
+        let mut at = 0usize;
+        for _ in 0..section.info {
+            if at.checked_add(16).is_none_or(|end| end > data.len()) {
+                return Some("has an invalid Verneed");
+            }
+            let count = encoding.read_u16(data, at + 2).unwrap_or(0);
+            let auxiliary = encoding.read_u32(data, at + 8).unwrap_or(0) as usize;
+            let next = encoding.read_u32(data, at + 12).unwrap_or(0) as usize;
+            let mut cursor = at.saturating_add(auxiliary);
+            for _ in 0..count {
+                if cursor.checked_add(16).is_none_or(|end| end > data.len()) {
+                    return Some("has an invalid Vernaux");
+                }
+                let name = encoding.read_u32(data, cursor + 8).unwrap_or(0);
+                if u64::from(name) >= strings {
+                    return Some("has a Vernaux with an invalid vna_name");
+                }
+                cursor = cursor
+                    .saturating_add(encoding.read_u32(data, cursor + 12).unwrap_or(0) as usize);
+            }
+            at = at.saturating_add(next);
+        }
+        None
     }
 
     pub fn assign_object_layout(&mut self) {
@@ -1269,13 +1364,13 @@ pub fn decode_symbols(
             )
         };
         let mut section = u32::from(section);
-        if section == section_index::EXTENDED {
+        let is_extended = section == section_index::EXTENDED;
+        if is_extended {
             section = extended
                 .and_then(|table| encoding.read_u32(table, index * 4))
                 .ok_or((at, "an extended section index is missing"))?;
         }
-        let name = string_at(strings, name_offset)
-            .ok_or((at, "a symbol name lies outside the string table"))?;
+        let name = string_at(strings, name_offset).ok_or((at, "invalid symbol name offset"))?;
         symbols.push(Symbol {
             name,
             name_offset,
@@ -1285,6 +1380,7 @@ pub fn decode_symbols(
             kind: info & 0xf,
             other,
             section,
+            extended: is_extended,
         });
     }
     Ok(symbols)
@@ -1802,4 +1898,1251 @@ pub fn segment_permissions(flags: u64) -> u32 {
         permissions |= segment_flag::EXECUTE;
     }
     permissions
+}
+
+struct InflateBits<'a> {
+    data: &'a [u8],
+    at: usize,
+    buffer: u64,
+    count: u32,
+}
+
+impl InflateBits<'_> {
+    fn need(&mut self, bits: u32) -> Result<(), &'static str> {
+        while self.count < bits {
+            let byte = *self.data.get(self.at).ok_or("Z_DATA_ERROR")?;
+            self.at += 1;
+            self.buffer |= u64::from(byte) << self.count;
+            self.count += 8;
+        }
+        Ok(())
+    }
+
+    fn take(&mut self, bits: u32) -> Result<u32, &'static str> {
+        if bits == 0 {
+            return Ok(0);
+        }
+        self.need(bits)?;
+        let value = (self.buffer & ((1u64 << bits) - 1)) as u32;
+        self.buffer >>= bits;
+        self.count -= bits;
+        Ok(value)
+    }
+
+    fn align(&mut self) {
+        let drop = self.count % 8;
+        self.buffer >>= drop;
+        self.count -= drop;
+    }
+}
+
+struct HuffmanTable {
+    counts: [u16; 16],
+    symbols: Vec<u16>,
+}
+
+impl HuffmanTable {
+    fn build(lengths: &[u8]) -> Result<HuffmanTable, &'static str> {
+        let mut counts = [0u16; 16];
+        for length in lengths {
+            counts[usize::from(*length)] += 1;
+        }
+        counts[0] = 0;
+        let mut left = 1i32;
+        for count in counts.iter().skip(1) {
+            left <<= 1;
+            left -= i32::from(*count);
+            if left < 0 {
+                return Err("Z_DATA_ERROR");
+            }
+        }
+        let mut offsets = [0u16; 16];
+        for length in 1..15 {
+            offsets[length + 1] = offsets[length] + counts[length];
+        }
+        let mut symbols = vec![0u16; lengths.len()];
+        for (symbol, length) in lengths.iter().enumerate() {
+            if *length != 0 {
+                symbols[usize::from(offsets[usize::from(*length)])] = symbol as u16;
+                offsets[usize::from(*length)] += 1;
+            }
+        }
+        Ok(HuffmanTable { counts, symbols })
+    }
+
+    fn decode(&self, bits: &mut InflateBits) -> Result<u16, &'static str> {
+        let mut code = 0i32;
+        let mut first = 0i32;
+        let mut index = 0i32;
+        for length in 1..16 {
+            code |= bits.take(1)? as i32;
+            let count = i32::from(self.counts[length]);
+            if code - count < first {
+                return self
+                    .symbols
+                    .get((index + (code - first)) as usize)
+                    .copied()
+                    .ok_or("Z_DATA_ERROR");
+            }
+            index += count;
+            first += count;
+            first <<= 1;
+            code <<= 1;
+        }
+        Err("Z_DATA_ERROR")
+    }
+}
+
+const LENGTH_BASES: [u16; 29] = [
+    3, 4, 5, 6, 7, 8, 9, 10, 11, 13, 15, 17, 19, 23, 27, 31, 35, 43, 51, 59, 67, 83, 99, 115, 131,
+    163, 195, 227, 258,
+];
+const LENGTH_EXTRA: [u8; 29] = [
+    0, 0, 0, 0, 0, 0, 0, 0, 1, 1, 1, 1, 2, 2, 2, 2, 3, 3, 3, 3, 4, 4, 4, 4, 5, 5, 5, 5, 0,
+];
+const DISTANCE_BASES: [u16; 30] = [
+    1, 2, 3, 4, 5, 7, 9, 13, 17, 25, 33, 49, 65, 97, 129, 193, 257, 385, 513, 769, 1025, 1537,
+    2049, 3073, 4097, 6145, 8193, 12289, 16385, 24577,
+];
+const DISTANCE_EXTRA: [u8; 30] = [
+    0, 0, 0, 0, 1, 1, 2, 2, 3, 3, 4, 4, 5, 5, 6, 6, 7, 7, 8, 8, 9, 9, 10, 10, 11, 11, 12, 12, 13,
+    13,
+];
+const CODE_LENGTH_ORDER: [usize; 19] = [
+    16, 17, 18, 0, 8, 7, 9, 6, 10, 5, 11, 4, 12, 3, 13, 2, 14, 1, 15,
+];
+
+fn inflate_block(
+    bits: &mut InflateBits,
+    out: &mut Vec<u8>,
+    literals: &HuffmanTable,
+    distances: &HuffmanTable,
+    limit: usize,
+) -> Result<(), &'static str> {
+    loop {
+        let symbol = literals.decode(bits)?;
+        if symbol < 256 {
+            if out.len() >= limit {
+                return Err("Z_BUF_ERROR");
+            }
+            out.push(symbol as u8);
+            continue;
+        }
+        if symbol == 256 {
+            return Ok(());
+        }
+        let index = usize::from(symbol - 257);
+        if index >= LENGTH_BASES.len() {
+            return Err("Z_DATA_ERROR");
+        }
+        let length =
+            usize::from(LENGTH_BASES[index]) + bits.take(u32::from(LENGTH_EXTRA[index]))? as usize;
+        let code = usize::from(distances.decode(bits)?);
+        if code >= DISTANCE_BASES.len() {
+            return Err("Z_DATA_ERROR");
+        }
+        let distance = usize::from(DISTANCE_BASES[code])
+            + bits.take(u32::from(DISTANCE_EXTRA[code]))? as usize;
+        if distance > out.len() {
+            return Err("Z_DATA_ERROR");
+        }
+        if out.len() + length > limit {
+            return Err("Z_BUF_ERROR");
+        }
+        let start = out.len() - distance;
+        for offset in 0..length {
+            let byte = out[start + offset];
+            out.push(byte);
+        }
+    }
+}
+
+pub fn inflate_zlib(data: &[u8], limit: usize) -> Result<Vec<u8>, &'static str> {
+    if data.len() < 2 {
+        return Err("Z_BUF_ERROR");
+    }
+    let method = data[0];
+    if method & 0x0f != 8
+        || (u16::from(data[0]) << 8 | u16::from(data[1])) % 31 != 0
+        || data[1] & 0x20 != 0
+    {
+        return Err("Z_DATA_ERROR");
+    }
+    let mut bits = InflateBits {
+        data,
+        at: 2,
+        buffer: 0,
+        count: 0,
+    };
+    let mut out: Vec<u8> = Vec::with_capacity(limit.min(1 << 26));
+    loop {
+        let last = bits.take(1)?;
+        match bits.take(2)? {
+            0 => {
+                bits.align();
+                let length = bits.take(16)?;
+                let complement = bits.take(16)?;
+                if length != !complement & 0xffff {
+                    return Err("Z_DATA_ERROR");
+                }
+                for _ in 0..length {
+                    if out.len() >= limit {
+                        return Err("Z_BUF_ERROR");
+                    }
+                    out.push(bits.take(8)? as u8);
+                }
+            }
+            1 => {
+                let mut lengths = [0u8; 288];
+                for (symbol, length) in lengths.iter_mut().enumerate() {
+                    *length = match symbol {
+                        0..=143 => 8,
+                        144..=255 => 9,
+                        256..=279 => 7,
+                        _ => 8,
+                    };
+                }
+                let literals = HuffmanTable::build(&lengths)?;
+                let distances = HuffmanTable::build(&[5u8; 30])?;
+                inflate_block(&mut bits, &mut out, &literals, &distances, limit)?;
+            }
+            2 => {
+                let literal_count = bits.take(5)? as usize + 257;
+                let distance_count = bits.take(5)? as usize + 1;
+                let code_count = bits.take(4)? as usize + 4;
+                let mut code_lengths = [0u8; 19];
+                for position in CODE_LENGTH_ORDER.iter().take(code_count) {
+                    code_lengths[*position] = bits.take(3)? as u8;
+                }
+                let codes = HuffmanTable::build(&code_lengths)?;
+                let mut lengths: Vec<u8> = Vec::with_capacity(literal_count + distance_count);
+                while lengths.len() < literal_count + distance_count {
+                    let symbol = codes.decode(&mut bits)?;
+                    match symbol {
+                        0..=15 => lengths.push(symbol as u8),
+                        16 => {
+                            let previous = *lengths.last().ok_or("Z_DATA_ERROR")?;
+                            let count = 3 + bits.take(2)? as usize;
+                            lengths.extend(std::iter::repeat_n(previous, count));
+                        }
+                        17 => {
+                            let count = 3 + bits.take(3)? as usize;
+                            lengths.extend(std::iter::repeat_n(0, count));
+                        }
+                        _ => {
+                            let count = 11 + bits.take(7)? as usize;
+                            lengths.extend(std::iter::repeat_n(0, count));
+                        }
+                    }
+                }
+                if lengths.len() != literal_count + distance_count || lengths[256] == 0 {
+                    return Err("Z_DATA_ERROR");
+                }
+                let literals = HuffmanTable::build(&lengths[..literal_count])?;
+                let distances = HuffmanTable::build(&lengths[literal_count..])?;
+                inflate_block(&mut bits, &mut out, &literals, &distances, limit)?;
+            }
+            _ => return Err("Z_DATA_ERROR"),
+        }
+        if last == 1 {
+            break;
+        }
+    }
+    bits.align();
+    if let (Ok(high), Ok(low)) = (bits.take(16), bits.take(16)) {
+        let stored = ((high & 0xff) << 24) | ((high >> 8) << 16) | ((low & 0xff) << 8) | (low >> 8);
+        let mut first = 1u32;
+        let mut second = 0u32;
+        for byte in &out {
+            first = (first + u32::from(*byte)) % 65521;
+            second = (second + first) % 65521;
+        }
+        if stored != (second << 16) | first {
+            return Err("Z_DATA_ERROR");
+        }
+    }
+    Ok(out)
+}
+
+pub fn adler_checksum(data: &[u8]) -> u32 {
+    let mut first = 1u32;
+    let mut second = 0u32;
+    for chunk in data.chunks(5552) {
+        for byte in chunk {
+            first += u32::from(*byte);
+            second += first;
+        }
+        first %= 65521;
+        second %= 65521;
+    }
+    (second << 16) | first
+}
+
+const DEFLATE_WINDOW: usize = 32768;
+const DEFLATE_WINDOW_MASK: usize = DEFLATE_WINDOW - 1;
+const DEFLATE_HASH_MASK: usize = 32767;
+const DEFLATE_MINIMUM_MATCH: usize = 3;
+const DEFLATE_MAXIMUM_MATCH: usize = 258;
+const DEFLATE_MINIMUM_LOOKAHEAD: usize = DEFLATE_MAXIMUM_MATCH + DEFLATE_MINIMUM_MATCH + 1;
+const DEFLATE_MAXIMUM_DISTANCE: usize = DEFLATE_WINDOW - DEFLATE_MINIMUM_LOOKAHEAD;
+const DEFLATE_SYMBOL_END: usize = (16384 - 1) * 3;
+const DEFLATE_TOO_FAR: usize = 4096;
+const DEFLATE_LITERAL_CODES: usize = 286;
+const DEFLATE_DISTANCE_CODES: usize = 30;
+const DEFLATE_BIT_LENGTH_CODES: usize = 19;
+const DEFLATE_HEAP_SIZE: usize = 2 * DEFLATE_LITERAL_CODES + 1;
+const DEFLATE_BIT_LENGTH_EXTRA: [u8; 19] =
+    [0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 2, 3, 7];
+const DEFLATE_LEVELS: [(usize, usize, usize, usize); 10] = [
+    (0, 0, 0, 0),
+    (4, 4, 8, 4),
+    (4, 5, 16, 8),
+    (4, 6, 32, 32),
+    (4, 4, 16, 16),
+    (8, 16, 32, 32),
+    (8, 16, 128, 128),
+    (8, 32, 128, 256),
+    (32, 128, 258, 1024),
+    (32, 258, 258, 4096),
+];
+
+struct DeflateTree {
+    frequency: Vec<u16>,
+    length: Vec<u16>,
+    maximum_code: i32,
+}
+
+impl DeflateTree {
+    fn new(size: usize) -> DeflateTree {
+        DeflateTree {
+            frequency: vec![0; size],
+            length: vec![0; size],
+            maximum_code: 0,
+        }
+    }
+}
+
+#[derive(Clone, Copy)]
+enum DeflateTreeKind {
+    Literal,
+    Distance,
+    BitLength,
+}
+
+struct Deflater<'a> {
+    input: &'a [u8],
+    input_position: usize,
+    window: Vec<u8>,
+    previous: Vec<u16>,
+    head: Vec<u16>,
+    hash: usize,
+    start: usize,
+    block_start: isize,
+    lookahead: usize,
+    insert: usize,
+    match_length: usize,
+    match_start: usize,
+    previous_length: usize,
+    previous_match: usize,
+    match_available: bool,
+    high_water: usize,
+    good_match: usize,
+    lazy_match: usize,
+    nice_match: usize,
+    chain_length: usize,
+    symbols: Vec<u8>,
+    trees: [DeflateTree; 3],
+    heap: Vec<usize>,
+    heap_length: usize,
+    heap_maximum: usize,
+    depth: Vec<u8>,
+    bit_counts: [u16; 16],
+    optimal_length: u64,
+    static_length: u64,
+    output: Vec<u8>,
+    bit_buffer: u32,
+    bit_valid: u32,
+    length_codes: [u8; 256],
+    distance_codes: [u8; 512],
+    length_bases: [u16; 29],
+    distance_bases: [u16; 30],
+    static_literal_codes: [u16; 288],
+    static_literal_lengths: [u16; 288],
+}
+
+fn reverse_bits(mut code: u32, mut length: u32) -> u16 {
+    let mut result = 0u32;
+    loop {
+        result |= code & 1;
+        code >>= 1;
+        result <<= 1;
+        length -= 1;
+        if length == 0 {
+            break;
+        }
+    }
+    (result >> 1) as u16
+}
+
+fn generate_codes(codes: &mut [u16], lengths: &[u16], maximum_code: usize, counts: &[u16; 16]) {
+    let mut next = [0u16; 16];
+    let mut code = 0u32;
+    for bits in 1..16 {
+        code = (code + u32::from(counts[bits - 1])) << 1;
+        next[bits] = code as u16;
+    }
+    for symbol in 0..=maximum_code {
+        let length = usize::from(lengths[symbol]);
+        if length == 0 {
+            continue;
+        }
+        codes[symbol] = reverse_bits(u32::from(next[length]), length as u32);
+        next[length] = next[length].wrapping_add(1);
+    }
+}
+
+impl<'a> Deflater<'a> {
+    fn new(input: &'a [u8], level: usize) -> Deflater<'a> {
+        let (good_match, lazy_match, nice_match, chain_length) = DEFLATE_LEVELS[level];
+        let mut length_codes = [0u8; 256];
+        let mut length_bases = [0u16; 29];
+        let mut length = 0usize;
+        for code in 0..28 {
+            length_bases[code] = length as u16;
+            for _ in 0..(1usize << LENGTH_EXTRA[code]) {
+                length_codes[length] = code as u8;
+                length += 1;
+            }
+        }
+        length_codes[255] = 28;
+        let mut distance_codes = [0u8; 512];
+        let mut distance_bases = [0u16; 30];
+        let mut distance = 0usize;
+        for code in 0..16 {
+            distance_bases[code] = distance as u16;
+            for _ in 0..(1usize << DISTANCE_EXTRA[code]) {
+                distance_codes[distance] = code as u8;
+                distance += 1;
+            }
+        }
+        distance >>= 7;
+        for code in 16..30 {
+            distance_bases[code] = (distance << 7) as u16;
+            for _ in 0..(1usize << (DISTANCE_EXTRA[code] - 7)) {
+                distance_codes[256 + distance] = code as u8;
+                distance += 1;
+            }
+        }
+        let mut static_literal_lengths = [0u16; 288];
+        let mut counts = [0u16; 16];
+        for (symbol, slot) in static_literal_lengths.iter_mut().enumerate() {
+            *slot = match symbol {
+                0..=143 => 8,
+                144..=255 => 9,
+                256..=279 => 7,
+                _ => 8,
+            };
+            counts[usize::from(*slot)] += 1;
+        }
+        let mut static_literal_codes = [0u16; 288];
+        generate_codes(
+            &mut static_literal_codes,
+            &static_literal_lengths,
+            287,
+            &counts,
+        );
+        let mut deflater = Deflater {
+            input,
+            input_position: 0,
+            window: vec![0; 2 * DEFLATE_WINDOW],
+            previous: vec![0; DEFLATE_WINDOW],
+            head: vec![0; DEFLATE_HASH_MASK + 1],
+            hash: 0,
+            start: 0,
+            block_start: 0,
+            lookahead: 0,
+            insert: 0,
+            match_length: DEFLATE_MINIMUM_MATCH - 1,
+            match_start: 0,
+            previous_length: DEFLATE_MINIMUM_MATCH - 1,
+            previous_match: 0,
+            match_available: false,
+            high_water: 0,
+            good_match,
+            lazy_match,
+            nice_match,
+            chain_length,
+            symbols: Vec::with_capacity(DEFLATE_SYMBOL_END),
+            trees: [
+                DeflateTree::new(DEFLATE_HEAP_SIZE),
+                DeflateTree::new(2 * DEFLATE_DISTANCE_CODES + 1),
+                DeflateTree::new(2 * DEFLATE_BIT_LENGTH_CODES + 1),
+            ],
+            heap: vec![0; DEFLATE_HEAP_SIZE],
+            heap_length: 0,
+            heap_maximum: 0,
+            depth: vec![0; DEFLATE_HEAP_SIZE],
+            bit_counts: [0; 16],
+            optimal_length: 0,
+            static_length: 0,
+            output: Vec::new(),
+            bit_buffer: 0,
+            bit_valid: 0,
+            length_codes,
+            distance_codes,
+            length_bases,
+            distance_bases,
+            static_literal_codes,
+            static_literal_lengths,
+        };
+        deflater.initialize_block();
+        deflater
+    }
+
+    fn initialize_block(&mut self) {
+        let sizes = [
+            DEFLATE_LITERAL_CODES,
+            DEFLATE_DISTANCE_CODES,
+            DEFLATE_BIT_LENGTH_CODES,
+        ];
+        for (tree, size) in self.trees.iter_mut().zip(sizes) {
+            tree.frequency[..size].fill(0);
+        }
+        self.trees[0].frequency[256] = 1;
+        self.optimal_length = 0;
+        self.static_length = 0;
+        self.symbols.clear();
+    }
+
+    fn update_hash(&mut self, byte: u8) {
+        self.hash = ((self.hash << 5) ^ usize::from(byte)) & DEFLATE_HASH_MASK;
+    }
+
+    fn insert_string(&mut self, position: usize) -> usize {
+        self.update_hash(self.window[position + DEFLATE_MINIMUM_MATCH - 1]);
+        let head = self.head[self.hash];
+        self.previous[position & DEFLATE_WINDOW_MASK] = head;
+        self.head[self.hash] = position as u16;
+        usize::from(head)
+    }
+
+    fn slide_hash(&mut self) {
+        for entry in self.head.iter_mut().chain(self.previous.iter_mut()) {
+            let value = usize::from(*entry);
+            *entry = if value >= DEFLATE_WINDOW {
+                (value - DEFLATE_WINDOW) as u16
+            } else {
+                0
+            };
+        }
+    }
+
+    fn fill_window(&mut self) {
+        let window_size = 2 * DEFLATE_WINDOW;
+        loop {
+            let mut more = window_size - self.lookahead - self.start;
+            if self.start >= DEFLATE_WINDOW + DEFLATE_MAXIMUM_DISTANCE {
+                self.window
+                    .copy_within(DEFLATE_WINDOW..DEFLATE_WINDOW + DEFLATE_WINDOW - more, 0);
+                self.match_start = self.match_start.wrapping_sub(DEFLATE_WINDOW);
+                self.start -= DEFLATE_WINDOW;
+                self.block_start -= DEFLATE_WINDOW as isize;
+                if self.insert > self.start {
+                    self.insert = self.start;
+                }
+                self.slide_hash();
+                more += DEFLATE_WINDOW;
+            }
+            let remaining = self.input.len() - self.input_position;
+            if remaining == 0 {
+                break;
+            }
+            let count = remaining.min(more);
+            let at = self.start + self.lookahead;
+            self.window[at..at + count]
+                .copy_from_slice(&self.input[self.input_position..self.input_position + count]);
+            self.input_position += count;
+            self.lookahead += count;
+            if self.lookahead + self.insert >= DEFLATE_MINIMUM_MATCH {
+                let mut position = self.start - self.insert;
+                self.hash = usize::from(self.window[position]);
+                self.update_hash(self.window[position + 1]);
+                while self.insert != 0 {
+                    self.update_hash(self.window[position + DEFLATE_MINIMUM_MATCH - 1]);
+                    self.previous[position & DEFLATE_WINDOW_MASK] = self.head[self.hash];
+                    self.head[self.hash] = position as u16;
+                    position += 1;
+                    self.insert -= 1;
+                    if self.lookahead + self.insert < DEFLATE_MINIMUM_MATCH {
+                        break;
+                    }
+                }
+            }
+            if !(self.lookahead < DEFLATE_MINIMUM_LOOKAHEAD
+                && self.input_position < self.input.len())
+            {
+                break;
+            }
+        }
+        if self.high_water < window_size {
+            let current = self.start + self.lookahead;
+            if self.high_water < current {
+                let initial = (window_size - current).min(DEFLATE_MAXIMUM_MATCH);
+                self.window[current..current + initial].fill(0);
+                self.high_water = current + initial;
+            } else if self.high_water < current + DEFLATE_MAXIMUM_MATCH {
+                let initial = (current + DEFLATE_MAXIMUM_MATCH - self.high_water)
+                    .min(window_size - self.high_water);
+                self.window[self.high_water..self.high_water + initial].fill(0);
+                self.high_water += initial;
+            }
+        }
+    }
+
+    fn longest_match(&mut self, mut current: usize) -> usize {
+        let mut chain = self.chain_length;
+        let scan = self.start;
+        let mut best = self.previous_length;
+        let mut nice = self.nice_match;
+        let limit = self.start.saturating_sub(DEFLATE_MAXIMUM_DISTANCE);
+        let end = scan + DEFLATE_MAXIMUM_MATCH;
+        let mut end_previous = self.window[scan + best - 1];
+        let mut end_byte = self.window[scan + best];
+        if self.previous_length >= self.good_match {
+            chain >>= 2;
+        }
+        if nice > self.lookahead {
+            nice = self.lookahead;
+        }
+        loop {
+            let candidate = current;
+            if self.window[candidate + best] == end_byte
+                && self.window[candidate + best - 1] == end_previous
+                && self.window[candidate] == self.window[scan]
+                && self.window[candidate + 1] == self.window[scan + 1]
+            {
+                let mut offset = 2usize;
+                let length = loop {
+                    let mut mismatch = false;
+                    for _ in 0..8 {
+                        offset += 1;
+                        if self.window[scan + offset] != self.window[candidate + offset] {
+                            mismatch = true;
+                            break;
+                        }
+                    }
+                    if mismatch || scan + offset >= end {
+                        break offset;
+                    }
+                };
+                if length > best {
+                    self.match_start = candidate;
+                    best = length;
+                    if length >= nice {
+                        break;
+                    }
+                    end_previous = self.window[scan + best - 1];
+                    end_byte = self.window[scan + best];
+                }
+            }
+            current = usize::from(self.previous[current & DEFLATE_WINDOW_MASK]);
+            if current <= limit {
+                break;
+            }
+            chain -= 1;
+            if chain == 0 {
+                break;
+            }
+        }
+        best.min(self.lookahead)
+    }
+
+    fn tally(&mut self, distance: usize, length_or_literal: usize) -> bool {
+        self.symbols.push(distance as u8);
+        self.symbols.push((distance >> 8) as u8);
+        self.symbols.push(length_or_literal as u8);
+        if distance == 0 {
+            self.trees[0].frequency[length_or_literal] += 1;
+        } else {
+            let code = usize::from(self.length_codes[length_or_literal]);
+            self.trees[0].frequency[code + 257] += 1;
+            let code = self.distance_code(distance - 1);
+            self.trees[1].frequency[code] += 1;
+        }
+        self.symbols.len() == DEFLATE_SYMBOL_END
+    }
+
+    fn distance_code(&self, distance: usize) -> usize {
+        if distance < 256 {
+            usize::from(self.distance_codes[distance])
+        } else {
+            usize::from(self.distance_codes[256 + (distance >> 7)])
+        }
+    }
+
+    fn flush_block(&mut self, last: bool) {
+        let stored = if self.block_start >= 0 {
+            Some(self.block_start as usize)
+        } else {
+            None
+        };
+        let length = (self.start as isize - self.block_start) as usize;
+        self.finish_block(stored, length, last);
+        self.block_start = self.start as isize;
+    }
+
+    fn deflate_fast(&mut self, finish: bool) {
+        loop {
+            if self.lookahead < DEFLATE_MINIMUM_LOOKAHEAD {
+                self.fill_window();
+                if self.lookahead == 0 {
+                    break;
+                }
+            }
+            let mut head = 0usize;
+            if self.lookahead >= DEFLATE_MINIMUM_MATCH {
+                head = self.insert_string(self.start);
+            }
+            if head != 0 && self.start - head <= DEFLATE_MAXIMUM_DISTANCE {
+                self.match_length = self.longest_match(head);
+            }
+            let flush;
+            if self.match_length >= DEFLATE_MINIMUM_MATCH {
+                flush = self.tally(
+                    self.start - self.match_start,
+                    self.match_length - DEFLATE_MINIMUM_MATCH,
+                );
+                self.lookahead -= self.match_length;
+                if self.match_length <= self.lazy_match && self.lookahead >= DEFLATE_MINIMUM_MATCH {
+                    self.match_length -= 1;
+                    loop {
+                        self.start += 1;
+                        self.insert_string(self.start);
+                        self.match_length -= 1;
+                        if self.match_length == 0 {
+                            break;
+                        }
+                    }
+                    self.start += 1;
+                } else {
+                    self.start += self.match_length;
+                    self.match_length = 0;
+                    self.hash = usize::from(self.window[self.start]);
+                    self.update_hash(self.window[self.start + 1]);
+                }
+            } else {
+                flush = self.tally(0, usize::from(self.window[self.start]));
+                self.lookahead -= 1;
+                self.start += 1;
+            }
+            if flush {
+                self.flush_block(false);
+            }
+        }
+        self.insert = self.start.min(DEFLATE_MINIMUM_MATCH - 1);
+        if finish {
+            self.flush_block(true);
+        } else if !self.symbols.is_empty() {
+            self.flush_block(false);
+        }
+    }
+
+    fn deflate_slow(&mut self, finish: bool) {
+        loop {
+            if self.lookahead < DEFLATE_MINIMUM_LOOKAHEAD {
+                self.fill_window();
+                if self.lookahead == 0 {
+                    break;
+                }
+            }
+            let mut head = 0usize;
+            if self.lookahead >= DEFLATE_MINIMUM_MATCH {
+                head = self.insert_string(self.start);
+            }
+            self.previous_length = self.match_length;
+            self.previous_match = self.match_start;
+            self.match_length = DEFLATE_MINIMUM_MATCH - 1;
+            if head != 0
+                && self.previous_length < self.lazy_match
+                && self.start - head <= DEFLATE_MAXIMUM_DISTANCE
+            {
+                self.match_length = self.longest_match(head);
+                if self.match_length == DEFLATE_MINIMUM_MATCH
+                    && self.start - self.match_start > DEFLATE_TOO_FAR
+                {
+                    self.match_length = DEFLATE_MINIMUM_MATCH - 1;
+                }
+            }
+            if self.previous_length >= DEFLATE_MINIMUM_MATCH
+                && self.match_length <= self.previous_length
+            {
+                let maximum_insert = self.start + self.lookahead - DEFLATE_MINIMUM_MATCH;
+                let flush = self.tally(
+                    self.start - 1 - self.previous_match,
+                    self.previous_length - DEFLATE_MINIMUM_MATCH,
+                );
+                self.lookahead -= self.previous_length - 1;
+                self.previous_length -= 2;
+                loop {
+                    self.start += 1;
+                    if self.start <= maximum_insert {
+                        self.insert_string(self.start);
+                    }
+                    self.previous_length -= 1;
+                    if self.previous_length == 0 {
+                        break;
+                    }
+                }
+                self.match_available = false;
+                self.match_length = DEFLATE_MINIMUM_MATCH - 1;
+                self.start += 1;
+                if flush {
+                    self.flush_block(false);
+                }
+            } else if self.match_available {
+                let flush = self.tally(0, usize::from(self.window[self.start - 1]));
+                if flush {
+                    self.flush_block(false);
+                }
+                self.start += 1;
+                self.lookahead -= 1;
+            } else {
+                self.match_available = true;
+                self.start += 1;
+                self.lookahead -= 1;
+            }
+        }
+        if self.match_available {
+            self.tally(0, usize::from(self.window[self.start - 1]));
+            self.match_available = false;
+        }
+        self.insert = self.start.min(DEFLATE_MINIMUM_MATCH - 1);
+        if finish {
+            self.flush_block(true);
+        } else if !self.symbols.is_empty() {
+            self.flush_block(false);
+        }
+    }
+
+    fn send_bits(&mut self, value: u32, length: u32) {
+        if self.bit_valid > 16 - length {
+            self.bit_buffer = (self.bit_buffer | (value << self.bit_valid)) & 0xffff;
+            self.output.push(self.bit_buffer as u8);
+            self.output.push((self.bit_buffer >> 8) as u8);
+            self.bit_buffer = (value & 0xffff) >> (16 - self.bit_valid);
+            self.bit_valid = self.bit_valid + length - 16;
+        } else {
+            self.bit_buffer = (self.bit_buffer | (value << self.bit_valid)) & 0xffff;
+            self.bit_valid += length;
+        }
+    }
+
+    fn send_code(&mut self, kind: usize, symbol: usize) {
+        let code = u32::from(self.trees[kind].frequency[symbol]);
+        let length = u32::from(self.trees[kind].length[symbol]);
+        self.send_bits(code, length);
+    }
+
+    fn window_up(&mut self) {
+        if self.bit_valid > 8 {
+            self.output.push(self.bit_buffer as u8);
+            self.output.push((self.bit_buffer >> 8) as u8);
+        } else if self.bit_valid > 0 {
+            self.output.push(self.bit_buffer as u8);
+        }
+        self.bit_buffer = 0;
+        self.bit_valid = 0;
+    }
+
+    fn stored_block(&mut self, stored: Option<usize>, length: usize, last: bool) {
+        self.send_bits(u32::from(last), 3);
+        self.window_up();
+        self.output.push(length as u8);
+        self.output.push((length >> 8) as u8);
+        self.output.push(!length as u8);
+        self.output.push((!length >> 8) as u8);
+        if let Some(at) = stored {
+            self.output.extend_from_slice(&self.window[at..at + length]);
+        }
+    }
+
+    fn smaller(&self, kind: usize, first: usize, second: usize) -> bool {
+        let tree = &self.trees[kind];
+        tree.frequency[first] < tree.frequency[second]
+            || (tree.frequency[first] == tree.frequency[second]
+                && self.depth[first] <= self.depth[second])
+    }
+
+    fn sift_down(&mut self, kind: usize, mut node: usize) {
+        let value = self.heap[node];
+        let mut child = node << 1;
+        while child <= self.heap_length {
+            if child < self.heap_length
+                && self.smaller(kind, self.heap[child + 1], self.heap[child])
+            {
+                child += 1;
+            }
+            if self.smaller(kind, value, self.heap[child]) {
+                break;
+            }
+            self.heap[node] = self.heap[child];
+            node = child;
+            child <<= 1;
+        }
+        self.heap[node] = value;
+    }
+
+    fn tree_parameters(kind: DeflateTreeKind) -> (usize, usize, usize, &'static [u8]) {
+        match kind {
+            DeflateTreeKind::Literal => (DEFLATE_LITERAL_CODES, 257, 15, &LENGTH_EXTRA),
+            DeflateTreeKind::Distance => (DEFLATE_DISTANCE_CODES, 0, 15, &DISTANCE_EXTRA),
+            DeflateTreeKind::BitLength => {
+                (DEFLATE_BIT_LENGTH_CODES, 0, 7, &DEFLATE_BIT_LENGTH_EXTRA)
+            }
+        }
+    }
+
+    fn static_tree_length(&self, kind: DeflateTreeKind, symbol: usize) -> Option<u64> {
+        match kind {
+            DeflateTreeKind::Literal => Some(u64::from(self.static_literal_lengths[symbol])),
+            DeflateTreeKind::Distance => Some(5),
+            DeflateTreeKind::BitLength => None,
+        }
+    }
+
+    fn generate_bit_lengths(&mut self, kind: DeflateTreeKind) {
+        let index = kind as usize;
+        let (_, base, maximum_length, extra) = Deflater::tree_parameters(kind);
+        let maximum_code = self.trees[index].maximum_code;
+        let mut overflow = 0i32;
+        self.bit_counts = [0; 16];
+        let root = self.heap[self.heap_maximum];
+        self.trees[index].length[root] = 0;
+        let mut position = self.heap_maximum + 1;
+        while position < DEFLATE_HEAP_SIZE {
+            let node = self.heap[position];
+            position += 1;
+            let parent = usize::from(self.trees[index].length[node]);
+            let mut bits = usize::from(self.trees[index].length[parent]) + 1;
+            if bits > maximum_length {
+                bits = maximum_length;
+                overflow += 1;
+            }
+            self.trees[index].length[node] = bits as u16;
+            if node as i32 > maximum_code {
+                continue;
+            }
+            self.bit_counts[bits] += 1;
+            let extra_bits = if node >= base {
+                u64::from(extra[node - base])
+            } else {
+                0
+            };
+            let frequency = u64::from(self.trees[index].frequency[node]);
+            self.optimal_length = self
+                .optimal_length
+                .wrapping_add(frequency * (bits as u64 + extra_bits));
+            if let Some(length) = self.static_tree_length(kind, node) {
+                self.static_length = self
+                    .static_length
+                    .wrapping_add(frequency * (length + extra_bits));
+            }
+        }
+        if overflow == 0 {
+            return;
+        }
+        loop {
+            let mut bits = maximum_length - 1;
+            while self.bit_counts[bits] == 0 {
+                bits -= 1;
+            }
+            self.bit_counts[bits] -= 1;
+            self.bit_counts[bits + 1] += 2;
+            self.bit_counts[maximum_length] -= 1;
+            overflow -= 2;
+            if overflow <= 0 {
+                break;
+            }
+        }
+        let mut position = DEFLATE_HEAP_SIZE;
+        for bits in (1..=maximum_length).rev() {
+            let mut count = self.bit_counts[bits];
+            while count != 0 {
+                position -= 1;
+                let node = self.heap[position];
+                if node as i32 > maximum_code {
+                    continue;
+                }
+                let current = u64::from(self.trees[index].length[node]);
+                if current != bits as u64 {
+                    let frequency = u64::from(self.trees[index].frequency[node]);
+                    self.optimal_length = self
+                        .optimal_length
+                        .wrapping_add((bits as u64).wrapping_sub(current).wrapping_mul(frequency));
+                    self.trees[index].length[node] = bits as u16;
+                }
+                count -= 1;
+            }
+        }
+    }
+
+    fn build_tree(&mut self, kind: DeflateTreeKind) {
+        let index = kind as usize;
+        let (elements, _, _, _) = Deflater::tree_parameters(kind);
+        self.heap_length = 0;
+        self.heap_maximum = DEFLATE_HEAP_SIZE;
+        let mut maximum_code = -1i32;
+        for symbol in 0..elements {
+            if self.trees[index].frequency[symbol] != 0 {
+                self.heap_length += 1;
+                self.heap[self.heap_length] = symbol;
+                maximum_code = symbol as i32;
+                self.depth[symbol] = 0;
+            } else {
+                self.trees[index].length[symbol] = 0;
+            }
+        }
+        while self.heap_length < 2 {
+            let node = if maximum_code < 2 {
+                maximum_code += 1;
+                maximum_code as usize
+            } else {
+                0
+            };
+            self.heap_length += 1;
+            self.heap[self.heap_length] = node;
+            self.trees[index].frequency[node] = 1;
+            self.depth[node] = 0;
+            self.optimal_length = self.optimal_length.wrapping_sub(1);
+            if let Some(length) = self.static_tree_length(kind, node) {
+                self.static_length = self.static_length.wrapping_sub(length);
+            }
+        }
+        self.trees[index].maximum_code = maximum_code;
+        for node in (1..=self.heap_length / 2).rev() {
+            self.sift_down(index, node);
+        }
+        let mut next = elements;
+        loop {
+            let least = self.heap[1];
+            self.heap[1] = self.heap[self.heap_length];
+            self.heap_length -= 1;
+            self.sift_down(index, 1);
+            let second = self.heap[1];
+            self.heap_maximum -= 1;
+            self.heap[self.heap_maximum] = least;
+            self.heap_maximum -= 1;
+            self.heap[self.heap_maximum] = second;
+            let tree = &mut self.trees[index];
+            tree.frequency[next] = tree.frequency[least].wrapping_add(tree.frequency[second]);
+            self.depth[next] = self.depth[least].max(self.depth[second]).wrapping_add(1);
+            tree.length[least] = next as u16;
+            tree.length[second] = next as u16;
+            self.heap[1] = next;
+            next += 1;
+            self.sift_down(index, 1);
+            if self.heap_length < 2 {
+                break;
+            }
+        }
+        self.heap_maximum -= 1;
+        self.heap[self.heap_maximum] = self.heap[1];
+        self.generate_bit_lengths(kind);
+        let counts = self.bit_counts;
+        let tree = &mut self.trees[index];
+        generate_codes(
+            &mut tree.frequency,
+            &tree.length,
+            maximum_code as usize,
+            &counts,
+        );
+    }
+
+    fn scan_tree(&mut self, index: usize) {
+        let maximum_code = self.trees[index].maximum_code as usize;
+        let mut previous = u16::MAX as i32 + 1;
+        let mut next = self.trees[index].length[0];
+        let mut count = 0usize;
+        let (mut maximum_count, mut minimum_count) = if next == 0 { (138, 3) } else { (7, 4) };
+        self.trees[index].length[maximum_code + 1] = 0xffff;
+        for symbol in 0..=maximum_code {
+            let current = next;
+            next = self.trees[index].length[symbol + 1];
+            count += 1;
+            if count < maximum_count && current == next {
+                continue;
+            } else if count < minimum_count {
+                self.trees[2].frequency[usize::from(current)] += count as u16;
+            } else if current != 0 {
+                if i32::from(current) != previous {
+                    self.trees[2].frequency[usize::from(current)] += 1;
+                }
+                self.trees[2].frequency[16] += 1;
+            } else if count <= 10 {
+                self.trees[2].frequency[17] += 1;
+            } else {
+                self.trees[2].frequency[18] += 1;
+            }
+            count = 0;
+            previous = i32::from(current);
+            (maximum_count, minimum_count) = if next == 0 {
+                (138, 3)
+            } else if current == next {
+                (6, 3)
+            } else {
+                (7, 4)
+            };
+        }
+    }
+
+    fn send_tree(&mut self, index: usize, maximum_code: usize) {
+        let mut previous = u16::MAX as i32 + 1;
+        let mut next = self.trees[index].length[0];
+        let mut count = 0usize;
+        let (mut maximum_count, mut minimum_count) = if next == 0 { (138, 3) } else { (7, 4) };
+        for symbol in 0..=maximum_code {
+            let current = next;
+            next = self.trees[index].length[symbol + 1];
+            count += 1;
+            if count < maximum_count && current == next {
+                continue;
+            } else if count < minimum_count {
+                while count != 0 {
+                    self.send_code(2, usize::from(current));
+                    count -= 1;
+                }
+            } else if current != 0 {
+                if i32::from(current) != previous {
+                    self.send_code(2, usize::from(current));
+                    count -= 1;
+                }
+                self.send_code(2, 16);
+                self.send_bits(count as u32 - 3, 2);
+            } else if count <= 10 {
+                self.send_code(2, 17);
+                self.send_bits(count as u32 - 3, 3);
+            } else {
+                self.send_code(2, 18);
+                self.send_bits(count as u32 - 11, 7);
+            }
+            count = 0;
+            previous = i32::from(current);
+            (maximum_count, minimum_count) = if next == 0 {
+                (138, 3)
+            } else if current == next {
+                (6, 3)
+            } else {
+                (7, 4)
+            };
+        }
+    }
+
+    fn build_bit_length_tree(&mut self) -> usize {
+        self.scan_tree(0);
+        self.scan_tree(1);
+        self.build_tree(DeflateTreeKind::BitLength);
+        let mut maximum_index = DEFLATE_BIT_LENGTH_CODES - 1;
+        while maximum_index >= 3 {
+            if self.trees[2].length[CODE_LENGTH_ORDER[maximum_index]] != 0 {
+                break;
+            }
+            maximum_index -= 1;
+        }
+        self.optimal_length = self
+            .optimal_length
+            .wrapping_add(3 * (maximum_index as u64 + 1) + 5 + 5 + 4);
+        maximum_index
+    }
+
+    fn compress_block(&mut self, dynamic: bool) {
+        let symbols = std::mem::take(&mut self.symbols);
+        for entry in symbols.chunks_exact(3) {
+            let mut distance = usize::from(entry[0]) | usize::from(entry[1]) << 8;
+            let value = usize::from(entry[2]);
+            if distance == 0 {
+                self.send_literal(dynamic, value);
+                continue;
+            }
+            let code = usize::from(self.length_codes[value]);
+            self.send_literal(dynamic, code + 257);
+            let extra = u32::from(LENGTH_EXTRA[code]);
+            if extra != 0 {
+                self.send_bits((value - usize::from(self.length_bases[code])) as u32, extra);
+            }
+            distance -= 1;
+            let code = self.distance_code(distance);
+            if dynamic {
+                self.send_code(1, code);
+            } else {
+                self.send_bits(u32::from(reverse_bits(code as u32, 5)), 5);
+            }
+            let extra = u32::from(DISTANCE_EXTRA[code]);
+            if extra != 0 {
+                self.send_bits(
+                    (distance - usize::from(self.distance_bases[code])) as u32,
+                    extra,
+                );
+            }
+        }
+        self.symbols = symbols;
+        self.send_literal(dynamic, 256);
+    }
+
+    fn send_literal(&mut self, dynamic: bool, symbol: usize) {
+        if dynamic {
+            self.send_code(0, symbol);
+        } else {
+            let code = u32::from(self.static_literal_codes[symbol]);
+            let length = u32::from(self.static_literal_lengths[symbol]);
+            self.send_bits(code, length);
+        }
+    }
+
+    fn finish_block(&mut self, stored: Option<usize>, length: usize, last: bool) {
+        self.build_tree(DeflateTreeKind::Literal);
+        self.build_tree(DeflateTreeKind::Distance);
+        let maximum_index = self.build_bit_length_tree();
+        let mut optimal_bytes = (self.optimal_length.wrapping_add(3 + 7)) >> 3;
+        let static_bytes = (self.static_length.wrapping_add(3 + 7)) >> 3;
+        if static_bytes <= optimal_bytes {
+            optimal_bytes = static_bytes;
+        }
+        if length as u64 + 4 <= optimal_bytes && stored.is_some() {
+            self.stored_block(stored, length, last);
+        } else if static_bytes == optimal_bytes {
+            self.send_bits(2 + u32::from(last), 3);
+            self.compress_block(false);
+        } else {
+            self.send_bits(4 + u32::from(last), 3);
+            let literal_codes = self.trees[0].maximum_code as u32 + 1;
+            let distance_codes = self.trees[1].maximum_code as u32 + 1;
+            self.send_bits(literal_codes - 257, 5);
+            self.send_bits(distance_codes - 1, 5);
+            self.send_bits(maximum_index as u32 + 1 - 4, 4);
+            for order in CODE_LENGTH_ORDER.iter().take(maximum_index + 1) {
+                let length = u32::from(self.trees[2].length[*order]);
+                self.send_bits(length, 3);
+            }
+            self.send_tree(0, literal_codes as usize - 1);
+            self.send_tree(1, distance_codes as usize - 1);
+            self.compress_block(true);
+        }
+        self.initialize_block();
+        if last {
+            self.window_up();
+        }
+    }
+}
+
+pub fn deflate_raw(data: &[u8], level: usize, finish: bool) -> Vec<u8> {
+    let mut deflater = Deflater::new(data, level.clamp(1, 9));
+    if level.clamp(1, 9) <= 3 {
+        deflater.deflate_fast(finish);
+    } else {
+        deflater.deflate_slow(finish);
+    }
+    if !finish {
+        deflater.stored_block(None, 0, false);
+    }
+    deflater.output
 }

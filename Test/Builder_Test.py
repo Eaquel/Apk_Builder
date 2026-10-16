@@ -43,6 +43,7 @@ REFERENCE_SUITES = ["bundles", "filecheck", "tablegen-lit"]
 ORACLE_SUITES = ["regex-oracle", "tablegen-oracle"]
 SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
 KOTLIN_SUITES = ["kotlin-omni"]
+LINKER_SUITES = ["lld-elf", "lld-coff"]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -889,11 +890,12 @@ def bundles_present() -> bool:
     done = run(["git", "ls-tree", "HEAD", "--", "New"], check=False)
     return done.returncode == 0 and "New" in done.stdout
 
-def run_suites(names: list[str], threads: int | None = None) -> dict[str, dict]:
+def run_suites(names: list[str], threads: int | None = None,
+               module: str = "reference_checks") -> dict[str, dict]:
     """Every named suite, run once, read back from the lines it prints."""
     env = {"APK_BUILDER_SUITE_THREADS": str(threads)} if threads else {}
     tests = [
-        f"tests::{SUITE_HOMES.get(name, 'reference_checks')}::suite_{name.replace('-', '_')}"
+        f"tests::{SUITE_HOMES.get(name, module)}::suite_{name.replace('-', '_')}"
         for name in names
     ]
     done = run(
@@ -974,6 +976,18 @@ def check_differential() -> str:
         raise Skip("the reference bundles are not in this checkout")
     return hold_ground(run_suites(ORACLE_SUITES))
 
+def check_linker() -> str:
+    """Our ld.lld and lld-link keep every LLD lit test they have ever passed."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo is not on this machine")
+    if not bundles_present():
+        raise Skip("the reference bundles are not in this checkout")
+    missing = [tool for tool in ("llvm-mc", "yaml2obj", "llvm-readobj", "llvm-objdump")
+               if shutil.which(tool) is None]
+    if missing:
+        raise Skip(f"the LLVM tools the LLD tests run are not here: {', '.join(missing)}")
+    return hold_ground(run_suites(LINKER_SUITES, module="linker_lit"))
+
 def kotlin_standard_library() -> Path | None:
     """The newest kotlin-stdlib this machine holds, the way the Core suite finds it."""
     named = os.environ.get("APK_BUILDER_KOTLIN_STDLIB")
@@ -1028,6 +1042,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "differential": ("our engines agree with independent ones", check_differential),
     "determinism": ("the same verdicts on one worker and many", check_determinism),
     "kotlin-omni": ("Kotlin answers the same on Omni IR as on the JVM", check_kotlin_omni),
+    "linker": ("our linkers hold their ground on the LLD tests", check_linker),
 }
 
 DEFAULT = [

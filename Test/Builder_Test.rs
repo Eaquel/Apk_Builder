@@ -68432,4 +68432,2506 @@ far_function:
             finish(&folder);
         }
     }
+
+    const LIBRARY_SOURCE: &str = r#"
+        .text
+        .globl greet
+        .type greet,@function
+greet:
+        movq shared_counter@GOTPCREL(%rip), %rax
+        movq (%rax), %rax
+        addq $7, %rax
+        call twice@PLT
+        ret
+        .size greet, .-greet
+        .globl twice
+        .type twice,@function
+twice:
+        leaq (%rax,%rax), %rax
+        ret
+        .size twice, .-twice
+        .data
+        .globl shared_counter
+        .type shared_counter,@object
+        .p2align 3
+shared_counter:
+        .quad 7
+        .size shared_counter, 8
+        .globl table
+        .type table,@object
+table:
+        .quad greet
+        .quad twice
+        .quad shared_counter + 8
+        .size table, 24
+"#;
+
+    const PROGRAM_SOURCE: &str = r#"
+        .text
+        .globl _start
+        .type _start,@function
+_start:
+        call greet@PLT
+        movq shared_counter@GOTPCREL(%rip), %rdi
+        addq (%rdi), %rax
+        movq %rax, %rdi
+        leaq pointers(%rip), %rsi
+        movq $60, %rax
+        syscall
+        .size _start, .-_start
+        .data
+        .p2align 3
+pointers:
+        .quad greet
+        .quad table
+"#;
+
+    #[test]
+    fn shared_objects_and_position_independent_programs_match_lld() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("dynamic");
+        assemble(&folder, "library", "x86_64-linux-gnu", LIBRARY_SOURCE);
+        assemble(&folder, "program", "x86_64-linux-gnu", PROGRAM_SOURCE);
+        let library = folder.join("library.o").to_string_lossy().to_string();
+        let program = folder.join("program.o").to_string_lossy().to_string();
+        compare_with_lld(
+            &folder,
+            std::slice::from_ref(&library),
+            &["-shared", "-soname", "libomni.so"],
+            "shared",
+        );
+        let shared = folder.join("libomni.so").to_string_lossy().to_string();
+        assert!(reference_link(&[
+            library,
+            "-shared".to_string(),
+            "-soname".to_string(),
+            "libomni.so".to_string(),
+            "-o".to_string(),
+            shared.clone(),
+        ]));
+        compare_with_lld(
+            &folder,
+            &[program.clone(), shared.clone()],
+            &["-pie"],
+            "pie",
+        );
+        compare_with_lld(&folder, &[program, shared], &[], "executable");
+        finish(&folder);
+    }
+
+    #[test]
+    fn build_identifiers_hash_the_output_the_way_lld_does() {
+        use crate::compilers::linker::{blake3, chunked_hash, xxh3_64};
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("build-id");
+        let mut source = String::from(".globl _start\n_start:\n ret\n.data\n");
+        for value in 0..300_000u32 {
+            source.push_str(&format!(".long {}\n", value.wrapping_mul(2_654_435_761)));
+        }
+        assemble(&folder, "start", "x86_64-linux-gnu", &source);
+        let object = folder.join("start.o").to_string_lossy().to_string();
+        let identifier_of = |path: &Path| -> (Vec<u8>, usize) {
+            let bytes = std::fs::read(path).expect("the output is read");
+            let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+            let index = parsed
+                .section_named(".note.gnu.build-id")
+                .expect("a build identifier note exists");
+            let at = parsed.sections[index].offset as usize + 16;
+            let length = parsed.sections[index].size as usize - 16;
+            (bytes[at..at + length].to_vec(), at)
+        };
+        for (style, size) in [("fast", 8usize), ("md5", 16), ("sha1", 20)] {
+            let recompute = |bytes: &[u8]| -> Vec<u8> {
+                match style {
+                    "fast" => chunked_hash(bytes, size, &|chunk: &[u8]| {
+                        xxh3_64(chunk).to_le_bytes().to_vec()
+                    }),
+                    _ => chunked_hash(bytes, size, &|chunk: &[u8]| blake3(chunk)[..size].to_vec()),
+                }
+            };
+            for linker in ["ours", "theirs"] {
+                let output = folder.join(format!("{style}-{linker}"));
+                let arguments = vec![
+                    object.clone(),
+                    format!("--build-id={style}"),
+                    "-o".to_string(),
+                    output.to_string_lossy().to_string(),
+                ];
+                if linker == "ours" {
+                    let outcome = link_on_disk(&arguments);
+                    assert!(outcome.succeeded(), "{}", describe(&outcome));
+                } else {
+                    assert!(reference_link(&arguments));
+                }
+                let (identifier, at) = identifier_of(&output);
+                let mut bytes = std::fs::read(&output).expect("the output is read");
+                bytes[at..at + identifier.len()].fill(0);
+                assert_eq!(recompute(&bytes), identifier, "{style} {linker}");
+            }
+        }
+        finish(&folder);
+    }
+
+    const LLD_18_DIVERGENCES: &[&str] = &[
+        "lld main adds a nameless STT_FILE symbol in front of localized symbols",
+        "lld main writes version index 0 for undefined symbols in .gnu.version",
+        "lld main marks a needed version weak when every reference to it is weak",
+    ];
+
+    fn host_file(name: &str) -> Option<String> {
+        let done = Command::new("gcc")
+            .arg(format!("-print-file-name={name}"))
+            .output()
+            .ok()?;
+        let path = String::from_utf8_lossy(&done.stdout).trim().to_string();
+        if path.contains('/') && Path::new(&path).exists() {
+            std::fs::canonicalize(&path)
+                .ok()
+                .map(|path| path.to_string_lossy().to_string())
+        } else {
+            None
+        }
+    }
+
+    fn allocated_layout(path: &Path) -> Vec<String> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        parsed
+            .sections
+            .iter()
+            .filter(|section| section.flags & crate::compilers::elf::section_flag::ALLOCATE != 0)
+            .map(|section| {
+                format!(
+                    "{} {} {:x} {:x} {:x} {:x} {} {} {} {}",
+                    section.name,
+                    section.kind,
+                    section.flags,
+                    section.address,
+                    section.offset,
+                    section.size,
+                    section.link,
+                    section.info,
+                    section.alignment,
+                    section.entry_size
+                )
+            })
+            .collect()
+    }
+
+    fn symbol_multiset(path: &Path) -> Vec<String> {
+        let bytes = std::fs::read(path).expect("the output is read");
+        let parsed = crate::compilers::elf::ElfFile::parse(&bytes).expect("the output parses");
+        let Some(table) = parsed.symbol_table() else {
+            return Vec::new();
+        };
+        let mut symbols: Vec<String> = parsed
+            .symbols(table)
+            .expect("the symbols parse")
+            .into_iter()
+            .skip(1)
+            .filter(|symbol| {
+                !(symbol.kind == crate::compilers::elf::symbol_type::FILE && symbol.name.is_empty())
+            })
+            .map(|symbol| {
+                format!(
+                    "{} {:x} {} {} {} {} {}",
+                    symbol.name,
+                    symbol.value,
+                    symbol.size,
+                    symbol.binding,
+                    symbol.kind,
+                    symbol.other,
+                    symbol.section
+                )
+            })
+            .collect();
+        symbols.sort();
+        symbols
+    }
+
+    fn compare_dynamic_with_lld_18(ours: &Path, theirs: &Path, label: &str) {
+        let view = |path: &Path| -> String {
+            let done = Command::new("llvm-readelf")
+                .args([
+                    "--program-headers",
+                    "--dynamic",
+                    "--relocations",
+                    "--dyn-syms",
+                    "--wide",
+                ])
+                .arg(path)
+                .output()
+                .expect("llvm-readelf runs");
+            String::from_utf8_lossy(&done.stdout)
+                .lines()
+                .filter(|line| !line.contains("File:"))
+                .map(str::to_string)
+                .collect::<Vec<_>>()
+                .join("\n")
+        };
+        let difference = first_difference(&view(ours), &view(theirs));
+        assert!(
+            difference.is_none(),
+            "{label}: {}",
+            difference.unwrap_or_default()
+        );
+        assert_eq!(allocated_layout(ours), allocated_layout(theirs), "{label}");
+        assert_eq!(
+            symbol_multiset(ours),
+            symbol_multiset(theirs),
+            "{label}: {}",
+            LLD_18_DIVERGENCES[0]
+        );
+        let left = allocated_bytes(ours);
+        let right = allocated_bytes(theirs);
+        for ((name, ours_bytes), (_, theirs_bytes)) in left.iter().zip(&right) {
+            match name.as_str() {
+                ".note.gnu.build-id" => assert_eq!(ours_bytes.len(), theirs_bytes.len()),
+                ".gnu.version" => {
+                    for (position, (left, right)) in
+                        ours_bytes.chunks(2).zip(theirs_bytes.chunks(2)).enumerate()
+                    {
+                        assert!(
+                            left == right || (left == [0, 0] && right == [1, 0]),
+                            "{label}: entry {position}: {}",
+                            LLD_18_DIVERGENCES[1]
+                        );
+                    }
+                }
+                ".gnu.version_r" => {
+                    let needs = |path: &Path| {
+                        let bytes = std::fs::read(path).expect("the output is read");
+                        let parsed = crate::compilers::elf::ElfFile::parse(&bytes)
+                            .expect("the output parses");
+                        let mut needs = parsed.version_needs().expect("the needs parse");
+                        for need in &mut needs {
+                            for entry in &mut need.entries {
+                                entry.flags &= !crate::compilers::elf::version_flag::WEAK;
+                            }
+                        }
+                        needs
+                    };
+                    assert_eq!(
+                        needs(ours),
+                        needs(theirs),
+                        "{label}: {}",
+                        LLD_18_DIVERGENCES[2]
+                    );
+                }
+                _ => assert!(
+                    ours_bytes == theirs_bytes,
+                    "{label}: section {name} differs"
+                ),
+            }
+        }
+    }
+
+    const HELLO_SOURCE: &str = "#include <stdio.h>\nint main(int count, char **values) { printf(\"hello %d %s\\n\", count, values[0] ? \"there\" : \"nobody\"); return 3; }\n";
+
+    const SHARED_SOURCE: &str = "int counter = 5;\n__thread int local_tls = 3;\nstatic int hidden_helper(int value) { return value * 3; }\nint shared_add(int value) { counter += value; local_tls += 1; return hidden_helper(counter) + local_tls; }\nconst char *shared_name(void) { return \"omni-library\"; }\n";
+
+    const USER_SOURCE: &str = "#include <stdio.h>\nextern int counter;\nint shared_add(int);\nconst char *shared_name(void);\nint main(void) { int result = shared_add(2); printf(\"%s %d %d\\n\", shared_name(), result, counter); return result & 0xff; }\n";
+
+    #[test]
+    fn glibc_programs_and_shared_libraries_run_like_lld_ones() {
+        if !cfg!(all(target_arch = "x86_64", target_os = "linux"))
+            || tool_missing("clang")
+            || tool_missing("gcc")
+            || tool_missing("ld.lld")
+            || tool_missing("llvm-readelf")
+        {
+            return;
+        }
+        let files: Vec<Option<String>> = [
+            "Scrt1.o",
+            "crt1.o",
+            "crti.o",
+            "crtn.o",
+            "crtbeginS.o",
+            "crtendS.o",
+            "crtbegin.o",
+            "crtend.o",
+            "libc.so",
+        ]
+        .iter()
+        .map(|name| host_file(name))
+        .collect();
+        if files.iter().any(Option::is_none) {
+            if std::env::var_os("APK_BUILDER_REQUIRE_LINKER_CONFORMANCE").is_some() {
+                panic!("the glibc start files are missing");
+            }
+            return;
+        }
+        let files: Vec<String> = files.into_iter().flatten().collect();
+        let [start_pie, start, initial, final_part, begin_shared, end_shared, begin, end, libc] =
+            &files[..]
+        else {
+            return;
+        };
+        let folder_of = |path: &str| {
+            Path::new(path)
+                .parent()
+                .map(|parent| parent.to_string_lossy().to_string())
+                .unwrap_or_default()
+        };
+        let folder = work_folder("glibc");
+        let compile = |name: &str, source: &str, flags: &[&str]| -> String {
+            let source_path = folder.join(format!("{name}.c"));
+            std::fs::write(&source_path, source).expect("the source is written");
+            let object = folder.join(format!("{name}.o"));
+            let done = Command::new("clang")
+                .args(["-c", "-O1"])
+                .args(flags)
+                .arg(&source_path)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .expect("clang runs");
+            assert!(done.success());
+            object.to_string_lossy().to_string()
+        };
+        let hello = compile("hello", HELLO_SOURCE, &["-fPIE"]);
+        let shared = compile("shared", SHARED_SOURCE, &["-fPIC"]);
+        let user_pie = compile("user-pie", USER_SOURCE, &["-fPIE"]);
+        let user_fixed = compile("user-fixed", USER_SOURCE, &["-fno-pic"]);
+        let mut common: Vec<String> = [
+            "-z",
+            "relro",
+            "--hash-style=gnu",
+            "--eh-frame-hdr",
+            "-m",
+            "elf_x86_64",
+        ]
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+        let mut folders = vec![
+            folder_of(begin_shared),
+            folder_of(start_pie),
+            folder_of(libc),
+        ];
+        folders.dedup();
+        for path in folders {
+            common.push(format!("-L{path}"));
+        }
+        let libraries: Vec<String> = [
+            "-lgcc",
+            "--as-needed",
+            "-lgcc_s",
+            "--no-as-needed",
+            "-lc",
+            "-lgcc",
+            "--as-needed",
+            "-lgcc_s",
+            "--no-as-needed",
+        ]
+        .iter()
+        .map(|text| text.to_string())
+        .collect();
+        let program = |start_file: &str,
+                       begin_file: &str,
+                       end_file: &str,
+                       pie: bool,
+                       inputs: &[String]|
+         -> Vec<String> {
+            let mut arguments = common.clone();
+            if pie {
+                arguments.push("-pie".to_string());
+            }
+            arguments.extend([
+                "-dynamic-linker".to_string(),
+                "/lib64/ld-linux-x86-64.so.2".to_string(),
+                start_file.to_string(),
+                initial.clone(),
+                begin_file.to_string(),
+            ]);
+            arguments.extend(inputs.iter().cloned());
+            arguments.extend(libraries.iter().cloned());
+            arguments.extend([end_file.to_string(), final_part.clone()]);
+            arguments
+        };
+        let run_pair =
+            |label: &str, arguments: &[String], library_folder: Option<(&Path, &Path)>| {
+                let ours = folder.join(format!("{label}-ours"));
+                let theirs = folder.join(format!("{label}-theirs"));
+                let mut ours_arguments = arguments.to_vec();
+                ours_arguments.extend(["-o".to_string(), ours.to_string_lossy().to_string()]);
+                let mut theirs_arguments = arguments.to_vec();
+                theirs_arguments.extend(["-o".to_string(), theirs.to_string_lossy().to_string()]);
+                let outcome = link_on_disk(&ours_arguments);
+                assert!(outcome.succeeded(), "{label}: {}", describe(&outcome));
+                assert!(reference_link(&theirs_arguments), "{label}: ld.lld refused");
+                compare_dynamic_with_lld_18(&ours, &theirs, label);
+                if let Some((ours_libraries, theirs_libraries)) = library_folder {
+                    let run = Command::new(&ours)
+                        .env("LD_LIBRARY_PATH", ours_libraries)
+                        .output()
+                        .expect("the program runs");
+                    let reference = Command::new(&theirs)
+                        .env("LD_LIBRARY_PATH", theirs_libraries)
+                        .output()
+                        .expect("the reference runs");
+                    assert_eq!(run.status.code(), reference.status.code(), "{label}");
+                    assert_eq!(run.stdout, reference.stdout, "{label}");
+                    (run.status.code(), run.stdout)
+                } else {
+                    (None, Vec::new())
+                }
+            };
+        let empty = folder.join("none");
+        let hello_arguments = program(start_pie, begin_shared, end_shared, true, &[hello]);
+        let (code, output) = run_pair("hello", &hello_arguments, Some((&empty, &empty)));
+        assert_eq!(code, Some(3));
+        assert!(String::from_utf8_lossy(&output).starts_with("hello 1 there"));
+        let ours_libraries = folder.join("ours-libraries");
+        let theirs_libraries = folder.join("theirs-libraries");
+        std::fs::create_dir_all(&ours_libraries).expect("the folder is made");
+        std::fs::create_dir_all(&theirs_libraries).expect("the folder is made");
+        let mut library_arguments = common.clone();
+        library_arguments.extend([
+            "-shared".to_string(),
+            "-soname".to_string(),
+            "libomni.so".to_string(),
+            initial.clone(),
+            begin_shared.clone(),
+            shared,
+        ]);
+        library_arguments.extend(libraries.iter().cloned());
+        library_arguments.extend([end_shared.clone(), final_part.clone()]);
+        run_pair("library", &library_arguments, None);
+        std::fs::copy(
+            folder.join("library-ours"),
+            ours_libraries.join("libomni.so"),
+        )
+        .expect("the library is placed");
+        std::fs::copy(
+            folder.join("library-theirs"),
+            theirs_libraries.join("libomni.so"),
+        )
+        .expect("the library is placed");
+        let ours_library = ours_libraries
+            .join("libomni.so")
+            .to_string_lossy()
+            .to_string();
+        for (label, start_file, begin_file, end_file, pie, object) in [
+            (
+                "user-pie",
+                start_pie,
+                begin_shared,
+                end_shared,
+                true,
+                &user_pie,
+            ),
+            ("user-fixed", start, begin, end, false, &user_fixed),
+        ] {
+            let arguments = program(
+                start_file,
+                begin_file,
+                end_file,
+                pie,
+                &[object.clone(), ours_library.clone()],
+            );
+            let (code, output) = run_pair(
+                label,
+                &arguments,
+                Some((&ours_libraries, &theirs_libraries)),
+            );
+            assert_eq!(code, Some(25), "{label}");
+            assert_eq!(
+                String::from_utf8_lossy(&output),
+                "omni-library 25 7\n",
+                "{label}"
+            );
+        }
+        finish(&folder);
+    }
+
+    const COLLECTED_SOURCE: &str = r#"
+        .section .text._start,"ax",@progbits
+        .globl _start
+        .type _start,@function
+_start:
+        .cfi_startproc
+        call used_function
+        leaq kept_string(%rip), %rax
+        leaq __start___libc_keep(%rip), %rcx
+        leaq __stop_keep_me(%rip), %rdx
+        .reloc ., R_X86_64_NONE, other_named
+        movq comdat_value(%rip), %rsi
+        ret
+        .cfi_endproc
+        .size _start, .-_start
+        .section .text.used,"ax",@progbits
+        .type used_function,@function
+used_function:
+        .cfi_startproc
+        movl used_data(%rip), %eax
+        ret
+        .cfi_endproc
+        .section .text.unused,"ax",@progbits
+        .globl unused_function
+        .type unused_function,@function
+unused_function:
+        .cfi_startproc
+        leaq dropped_string(%rip), %rax
+        movl unused_data(%rip), %eax
+        ret
+        .cfi_endproc
+        .section .data.used,"aw",@progbits
+used_data:
+        .long 1
+        .section .data.unused,"aw",@progbits
+unused_data:
+        .long 2
+        .section .rodata.str1.1,"aMS",@progbits,1
+kept_string:
+        .asciz "kept"
+dropped_string:
+        .asciz "dropped"
+        .section keep_me,"a",@progbits
+        .quad 6
+        .section __libc_keep,"a",@progbits
+        .quad 7
+        .section other_named,"a",@progbits
+        .quad 8
+        .section .init_array,"aw",@init_array
+        .quad used_function
+        .section .data.retained,"awR",@progbits
+        .quad 9
+        .section .data.comdat,"awG",@progbits,group_name,comdat
+comdat_value:
+        .quad 10
+        .section .data.comdat2,"awG",@progbits,group_name,comdat
+        .quad 11
+        .section .note.custom,"a",@note
+        .long 0
+"#;
+
+    #[test]
+    fn garbage_collection_keeps_the_sections_lld_keeps() {
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("collect");
+        assemble(&folder, "collect", "x86_64-linux-gnu", COLLECTED_SOURCE);
+        let without_stop = COLLECTED_SOURCE.replace(
+            "        leaq __stop_keep_me(%rip), %rdx
+",
+            "",
+        );
+        assemble(&folder, "retained", "x86_64-linux-gnu", &without_stop);
+        let object = folder.join("collect.o").to_string_lossy().to_string();
+        let retained = folder.join("retained.o").to_string_lossy().to_string();
+        for (label, input, extra) in [
+            ("start-stop", &retained, &["--gc-sections"][..]),
+            (
+                "named",
+                &object,
+                &["--gc-sections", "-z", "nostart-stop-gc"][..],
+            ),
+            (
+                "exported",
+                &object,
+                &[
+                    "--gc-sections",
+                    "-z",
+                    "nostart-stop-gc",
+                    "--export-dynamic",
+                    "-pie",
+                ][..],
+            ),
+            (
+                "shared",
+                &object,
+                &["--gc-sections", "-z", "nostart-stop-gc", "-shared"][..],
+            ),
+            ("kept", &object, &[][..]),
+        ] {
+            compare_with_lld(&folder, std::slice::from_ref(input), extra, label);
+        }
+        let outcome = link_on_disk(&[
+            object,
+            "--gc-sections".to_string(),
+            "--print-gc-sections".to_string(),
+            "-o".to_string(),
+            folder.join("refused").to_string_lossy().to_string(),
+        ]);
+        assert!(!outcome.succeeded());
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "EI207"
+                && diagnostic
+                    .context
+                    .iter()
+                    .any(|line| line.contains("__stop_keep_me"))));
+        assert!(outcome
+            .messages
+            .iter()
+            .any(|line| line.ends_with("collect.o:(.text.unused)")));
+        finish(&folder);
+    }
+
+    const VERSIONED_SOURCE: &str = r#"
+        .text
+        .globl alpha, beta, gamma, hidden_by_script, old_impl, new_impl, wild_one, wild_two
+        .type alpha,@function
+alpha:  ret
+        .type beta,@function
+beta:   call gamma@PLT
+        ret
+gamma:  ret
+hidden_by_script: ret
+old_impl: ret
+new_impl: ret
+wild_one: ret
+wild_two: ret
+        .symver old_impl, versioned@VERS_1
+        .symver new_impl, versioned@@VERS_2
+        .data
+        .globl table
+table:  .quad alpha
+"#;
+
+    const VERSION_SCRIPT: &str = "VERS_1 {\n  global: alpha; table;\n  local: hidden_by_script;\n};\nVERS_2 {\n  global: beta; wild_*;\n} VERS_1;\nVERS_3 { local: *; };\n";
+
+    #[test]
+    fn version_scripts_and_dynamic_lists_export_what_lld_exports() {
+        use crate::compilers::linker::{glob_match, read_version_script, VersionDefinition};
+        assert!(glob_match("wild_*", "wild_one"));
+        assert!(glob_match("w?ld_[a-z]*", "wild_two"));
+        assert!(glob_match("[!x]y", "zy"));
+        assert!(!glob_match("[!z]y", "zy"));
+        assert!(glob_match("a\\*b", "a*b"));
+        assert!(!glob_match("a\\*b", "axb"));
+        assert!(glob_match("*", ""));
+        let mut definitions = vec![
+            VersionDefinition {
+                name: "local".to_string(),
+                identifier: 0,
+                non_local: Vec::new(),
+                local: Vec::new(),
+            },
+            VersionDefinition {
+                name: "global".to_string(),
+                identifier: 1,
+                non_local: Vec::new(),
+                local: Vec::new(),
+            },
+        ];
+        read_version_script(VERSION_SCRIPT, &mut definitions).expect("the script reads");
+        assert_eq!(definitions.len(), 5);
+        assert_eq!(definitions[3].name, "VERS_2");
+        assert!(definitions[3].non_local[1].wildcard);
+        assert!(
+            read_version_script("{ global: a; }; V { b; };", &mut definitions.clone()).is_err()
+        );
+        if tool_missing("llvm-mc") || tool_missing("ld.lld") || tool_missing("llvm-readelf") {
+            return;
+        }
+        let folder = work_folder("versions");
+        assemble(&folder, "versioned", "x86_64-linux-gnu", VERSIONED_SOURCE);
+        assemble(
+            &folder,
+            "listed",
+            "x86_64-linux-gnu",
+            ".globl _start, alpha, wild_x, other\n_start: ret\nalpha: ret\nwild_x: ret\nother: ret\n",
+        );
+        let script = folder.join("versions.map");
+        std::fs::write(&script, VERSION_SCRIPT).expect("the script is written");
+        let list = folder.join("dynamic.list");
+        std::fs::write(&list, "{ alpha; wild_*; };\n").expect("the list is written");
+        let wrapper = folder.join("wrapper.lds");
+        std::fs::write(&wrapper, format!("VERSION {{ {VERSION_SCRIPT} }}\n")).expect("written");
+        let versioned = folder.join("versioned.o").to_string_lossy().to_string();
+        let listed = folder.join("listed.o").to_string_lossy().to_string();
+        let script = script.to_string_lossy().to_string();
+        let list = list.to_string_lossy().to_string();
+        let wrapper = wrapper.to_string_lossy().to_string();
+        let version_option = format!("--version-script={script}");
+        let list_option = format!("--dynamic-list={list}");
+        compare_with_lld(
+            &folder,
+            std::slice::from_ref(&versioned),
+            &["-shared", "-soname", "libv.so.1", &version_option],
+            "versions",
+        );
+        compare_with_lld(
+            &folder,
+            std::slice::from_ref(&versioned),
+            &[
+                "-shared",
+                "-soname",
+                "libv.so.1",
+                "--gc-sections",
+                &version_option,
+            ],
+            "versions-collected",
+        );
+        compare_with_lld(
+            &folder,
+            &[versioned.clone(), wrapper],
+            &["-shared", "-soname", "libv.so.1"],
+            "versions-in-script",
+        );
+        for (label, extra) in [
+            ("list-pie", vec!["-pie", list_option.as_str()]),
+            ("list-shared", vec!["-shared", list_option.as_str()]),
+            ("symbol-pie", vec!["-pie", "--export-dynamic-symbol=other"]),
+            (
+                "symbolic-functions",
+                vec!["-shared", "-Bsymbolic-functions"],
+            ),
+            ("symbolic-non-weak", vec!["-shared", "-Bsymbolic-non-weak"]),
+        ] {
+            compare_with_lld(&folder, std::slice::from_ref(&listed), &extra, label);
+        }
+        let missing = folder.join("missing.map");
+        std::fs::write(&missing, "V { global: nowhere; };\n").expect("written");
+        let missing_option = format!("--version-script={}", missing.to_string_lossy());
+        let output = folder.join("refused").to_string_lossy().to_string();
+        let outcome = link_on_disk(&[
+            listed.clone(),
+            "-shared".to_string(),
+            missing_option.clone(),
+            "-o".to_string(),
+            output.clone(),
+        ]);
+        assert!(outcome
+            .diagnostics
+            .iter()
+            .any(|diagnostic| diagnostic.code == "EI242"));
+        let outcome = link_on_disk(&[
+            listed,
+            "-shared".to_string(),
+            "--undefined-version".to_string(),
+            missing_option,
+            "-o".to_string(),
+            output,
+        ]);
+        assert!(outcome.succeeded(), "{}", describe(&outcome));
+        finish(&folder);
+    }
+}
+
+mod portable_executables {
+    use super::object_files::{tool_missing, work_folder};
+    use crate::compilers::pe::{
+        image_check_sum, machine, parse_module_definition, storage_class, CoffObject, ImportObject,
+    };
+    use std::process::Command;
+
+    const COFF_SOURCE: &str = r#"
+        .text
+        .globl main
+        .def main; .scl 2; .type 32; .endef
+main:
+        call helper
+        leaq message(%rip), %rax
+        movq table(%rip), %rcx
+        ret
+        .section .text$helper,"xr",discard,helper
+        .globl helper
+helper:
+        ret
+        .section .rdata,"dr"
+message:
+        .asciz "a long enough string"
+        .data
+        .globl table
+table:
+        .quad message
+        .quad main
+        .section .a_very_long_section_name,"dr"
+        .long 7
+        .weak weak_alias
+        .set weak_alias, main
+"#;
+
+    #[test]
+    fn coff_objects_round_trip_through_the_reader_and_writer() {
+        if tool_missing("llvm-mc") || tool_missing("llvm-readobj") {
+            return;
+        }
+        let folder = work_folder("coff");
+        for (label, triple) in [("x64", "x86_64-windows-msvc"), ("x86", "i686-windows-msvc")] {
+            let source = folder.join(format!("{label}.s"));
+            let object = folder.join(format!("{label}.o"));
+            let text = if label == "x86" {
+                COFF_SOURCE
+                    .replace("leaq message(%rip), %rax", "leal message, %eax")
+                    .replace("movq table(%rip), %rcx", "movl table, %ecx")
+                    .replace(".quad", ".long")
+            } else {
+                COFF_SOURCE.to_string()
+            };
+            std::fs::write(&source, text).expect("the source is written");
+            let done = Command::new("llvm-mc")
+                .args(["-filetype=obj", "-triple", triple])
+                .arg(&source)
+                .arg("-o")
+                .arg(&object)
+                .status()
+                .expect("llvm-mc runs");
+            assert!(done.success());
+            let bytes = std::fs::read(&object).expect("the object is read");
+            let parsed = CoffObject::parse(&bytes).expect("the object parses");
+            let expected_machine = if label == "x64" {
+                machine::AMD64
+            } else {
+                machine::I386
+            };
+            assert_eq!(parsed.machine, expected_machine);
+            assert!(parsed
+                .sections
+                .iter()
+                .any(|section| section.name == ".a_very_long_section_name"));
+            let helper = parsed
+                .sections
+                .iter()
+                .position(|section| section.name == ".text$helper")
+                .expect("the comdat section exists");
+            let definition = parsed
+                .symbols
+                .iter()
+                .find(|symbol| {
+                    symbol.section_number == helper as i32 + 1 && symbol.is_section_definition()
+                })
+                .and_then(|symbol| symbol.section_definition(false))
+                .expect("the comdat has a section definition");
+            assert_eq!(definition.selection, 2);
+            assert!(parsed.symbols.iter().any(|symbol| symbol.storage_class
+                == storage_class::WEAK_EXTERNAL
+                && symbol.weak_external().is_some()));
+            let text_section = parsed
+                .sections
+                .iter()
+                .find(|section| section.name == ".text")
+                .expect("the text section exists");
+            assert!(!text_section.relocations.is_empty());
+            for symbol in &parsed.symbols {
+                assert_eq!(parsed.symbol_at(symbol.index), Some(symbol));
+            }
+            let written = parsed.to_bytes();
+            let reparsed = CoffObject::parse(&written).expect("the written object parses");
+            assert_eq!(reparsed.sections.len(), parsed.sections.len());
+            for (left, right) in reparsed.sections.iter().zip(&parsed.sections) {
+                assert_eq!(left.name, right.name);
+                assert_eq!(left.data, right.data);
+                assert_eq!(left.relocations, right.relocations);
+                assert_eq!(left.characteristics, right.characteristics);
+            }
+            assert_eq!(reparsed.symbols, parsed.symbols);
+            let mut big = parsed.clone();
+            big.big = true;
+            let big_bytes = big.to_bytes();
+            let big_path = folder.join(format!("{label}-big.o"));
+            std::fs::write(&big_path, &big_bytes).expect("the big object is written");
+            let reparsed = CoffObject::parse(&big_bytes).expect("the big object parses");
+            assert!(reparsed.big);
+            assert_eq!(reparsed.symbols.len(), parsed.symbols.len());
+            for (left, right) in reparsed.symbols.iter().zip(&parsed.symbols) {
+                assert_eq!(left.name, right.name);
+                assert_eq!(left.section_number, right.section_number);
+                assert_eq!(left.storage_class, right.storage_class);
+            }
+            let listing = Command::new("llvm-readobj")
+                .args(["--sections", "--symbols"])
+                .arg(&big_path)
+                .output()
+                .expect("llvm-readobj runs");
+            assert!(
+                listing.status.success(),
+                "{}",
+                String::from_utf8_lossy(&listing.stderr)
+            );
+            let reference = Command::new("llvm-readobj")
+                .args(["--sections", "--symbols"])
+                .arg(&object)
+                .output()
+                .expect("llvm-readobj runs");
+            let names = |text: &[u8]| -> Vec<String> {
+                String::from_utf8_lossy(text)
+                    .lines()
+                    .filter(|line| line.trim_start().starts_with("Name:"))
+                    .map(|line| line.trim().split(" (").next().unwrap_or("").to_string())
+                    .collect()
+            };
+            assert_eq!(names(&listing.stdout), names(&reference.stdout));
+        }
+        if !tool_missing("llvm-dlltool") {
+            let definition = folder.join("library.def");
+            std::fs::write(
+                &definition,
+                "LIBRARY library.dll\nEXPORTS\n  alpha\n  beta @5 NONAME\n  gamma DATA\n  delta == other_name\n",
+            )
+            .expect("the definition is written");
+            let library = folder.join("library.lib");
+            let done = Command::new("llvm-dlltool")
+                .args(["-m", "i386:x86-64", "-d"])
+                .arg(&definition)
+                .arg("-l")
+                .arg(&library)
+                .status()
+                .expect("llvm-dlltool runs");
+            assert!(done.success());
+            let bytes = std::fs::read(&library).expect("the library is read");
+            let path = library.to_string_lossy().to_string();
+            let members = crate::compilers::linker::read_archive(&path, &bytes, &|_| None)
+                .expect("the library reads");
+            let imports: Vec<ImportObject> = members
+                .iter()
+                .filter(|member| crate::compilers::pe::is_import_object(&member.bytes))
+                .map(|member| ImportObject::parse(&member.bytes).expect("the import parses"))
+                .collect();
+            let names: Vec<&str> = imports
+                .iter()
+                .map(|import| import.symbol_name.as_str())
+                .collect();
+            assert!(names.contains(&"alpha"));
+            assert!(names.contains(&"gamma"));
+            let beta = imports
+                .iter()
+                .find(|import| import.symbol_name == "beta")
+                .expect("beta is imported");
+            assert_eq!(beta.name_type, 0);
+            assert_eq!(beta.ordinal_or_hint, 5);
+            assert_eq!(
+                imports
+                    .iter()
+                    .find(|import| import.symbol_name == "gamma")
+                    .map(|import| import.kind),
+                Some(1)
+            );
+            for import in &imports {
+                assert_eq!(import.library_name, "library.dll");
+                assert_eq!(ImportObject::parse(&import.to_bytes()).as_ref(), Ok(import));
+            }
+        }
+        super::linker_conformance::finish(&folder);
+    }
+
+    #[test]
+    fn module_definitions_parse_the_way_llvm_reads_them() {
+        let text = "; comment\nLIBRARY \"my lib\" BASE=0x10000000\nHEAPSIZE 0x1000,0x200\nSTACKSIZE 4096\nVERSION 3.14\nEXPORTS\n  first\n  second=internal @7 NONAME\n  third @ 9 DATA PRIVATE\n  fourth == imported\n  fifth EXPORTAS renamed\n";
+        let parsed = parse_module_definition(text, machine::AMD64, false, false).expect("parses");
+        assert_eq!(parsed.import_name, "my lib");
+        assert_eq!(parsed.output_file, "my lib.dll");
+        assert_eq!(parsed.image_base, 0x1000_0000);
+        assert_eq!(parsed.heap_reserve, Some(0x1000));
+        assert_eq!(parsed.heap_commit, Some(0x200));
+        assert_eq!(parsed.stack_reserve, Some(4096));
+        assert_eq!(
+            (parsed.major_image_version, parsed.minor_image_version),
+            (3, 14)
+        );
+        assert_eq!(parsed.exports.len(), 5);
+        assert_eq!(parsed.exports[1].name, "internal");
+        assert_eq!(parsed.exports[1].external_name, "second");
+        assert_eq!(parsed.exports[1].ordinal, 7);
+        assert!(parsed.exports[1].no_name);
+        assert_eq!(parsed.exports[2].ordinal, 9);
+        assert!(parsed.exports[2].data && parsed.exports[2].private);
+        assert_eq!(parsed.exports[3].import_name, "imported");
+        assert_eq!(parsed.exports[4].export_as, "renamed");
+        let decorated = parse_module_definition(
+            "EXPORTS\n  plain\n  _already\n  stdcall@4\n",
+            machine::I386,
+            false,
+            true,
+        )
+        .expect("parses");
+        assert_eq!(decorated.exports[0].name, "_plain");
+        assert_eq!(decorated.exports[1].name, "__already");
+        assert_eq!(decorated.exports[2].name, "stdcall@4");
+        assert!(parse_module_definition("BOGUS\n", machine::AMD64, false, false).is_err());
+        assert_eq!(image_check_sum(&[1, 0, 2, 0, 3]), 6 + 5);
+    }
+
+    const LINK_PROGRAM: &str = r#"
+        .text
+        .globl main
+main:
+        call weak_function
+        call alternate
+        call shared_function
+        call *__imp_ExitProcess(%rip)
+        leaq associated_data(%rip), %rax
+        movq table(%rip), %rcx
+        movl common_value(%rip), %edx
+        ret
+        .weak weak_function
+        .set weak_function, default_weak
+        .globl default_weak
+default_weak:
+        ret
+        .section .text$shared,"xr",discard,shared_function
+        .globl shared_function
+shared_function:
+        ret
+        .section .data$associated,"dw",associative,shared_function
+associated_data:
+        .quad 1
+        .data
+table:
+        .quad main
+        .quad message
+        .section .rdata,"dr"
+message:
+        .asciz "message"
+        .comm common_value, 4, 2
+        .section .other,"dw"
+        .quad 42
+        .section .drectve,"yn"
+        .ascii " /alternatename:alternate=default_weak /include:forced"
+"#;
+
+    const LINK_LIBRARY_MEMBER: &str = r#"
+        .section .text$shared,"xr",discard,shared_function
+        .globl shared_function
+shared_function:
+        nop
+        ret
+        .section .data$associated,"dw",associative,shared_function
+        .quad 2
+        .text
+        .globl forced
+forced:
+        ret
+        .globl weak_function
+weak_function:
+        nop
+        nop
+        ret
+        .globl unused_function
+unused_function:
+        ret
+"#;
+
+    const LINK_SYSTEM_LIBRARY: &str = r#"
+        .text
+        .globl ExitProcess
+ExitProcess:
+        ret
+"#;
+
+    const LINK_THREAD_LOCAL: &str = r#"
+        .data
+        .globl _tls_index
+_tls_index:
+        .long 0
+        .section .tls,"dw"
+        .globl _tls_start
+_tls_start:
+        .byte 0
+        .section .tls$value,"dw"
+        .p2align 4
+        .globl thread_value
+thread_value:
+        .long 7
+        .section .tls$ZZZ,"dw"
+        .globl _tls_end
+_tls_end:
+        .byte 0
+        .section .rdata$T,"dr"
+        .p2align 3
+        .globl _tls_used
+_tls_used:
+        .quad _tls_start
+        .quad _tls_end
+        .quad _tls_index
+        .quad 0
+        .long 0
+        .long 0
+"#;
+
+    fn assemble(folder: &std::path::Path, name: &str, triple: &str, text: &str) {
+        let source = folder.join(format!("{name}.s"));
+        std::fs::write(&source, text).expect("the source is written");
+        let done = Command::new("llvm-mc")
+            .args(["-filetype=obj", "-triple", triple])
+            .arg(&source)
+            .arg("-o")
+            .arg(folder.join(format!("{name}.obj")))
+            .status()
+            .expect("llvm-mc runs");
+        assert!(done.success(), "{name} assembles");
+    }
+
+    fn run_in(folder: &std::path::Path, tool: &str, arguments: &[&str]) -> bool {
+        Command::new(tool)
+            .current_dir(folder)
+            .args(arguments)
+            .output()
+            .expect("the tool runs")
+            .status
+            .success()
+    }
+
+    fn link_both(folder: &std::path::Path, label: &str, extension: &str, arguments: &[&str]) {
+        use crate::compilers::linker::link_coff;
+        let reference = format!("/out:reference/{label}.{extension}");
+        let mut lld_arguments: Vec<&str> = vec![reference.as_str(), "/timestamp:0"];
+        lld_arguments.extend_from_slice(arguments);
+        let lld_succeeded = run_in(folder, "lld-link", &lld_arguments);
+        let mut ours: Vec<String> = vec![
+            format!("/out:ours/{label}.{extension}"),
+            "/timestamp:0".to_string(),
+        ];
+        ours.extend(arguments.iter().map(|argument| argument.to_string()));
+        let outcome = link_coff(&ours, &|path: &str| std::fs::read(folder.join(path)).ok());
+        assert_eq!(
+            outcome.succeeded(),
+            lld_succeeded,
+            "{label}: lld-link and our linker agree on success: {:?}",
+            outcome.diagnostics
+        );
+        if !lld_succeeded {
+            return;
+        }
+        let expected = std::fs::read(folder.join(format!("reference/{label}.{extension}")))
+            .expect("lld-link wrote the image");
+        let produced = outcome
+            .outputs
+            .iter()
+            .find(|(path, _)| path == &format!("ours/{label}.{extension}"))
+            .map(|(_, bytes)| bytes.clone())
+            .expect("our linker wrote the image");
+        assert!(
+            expected == produced,
+            "{label}: the image differs from the one lld-link writes"
+        );
+        let parsed = crate::compilers::pe::PeImage::parse(&produced).expect("the image parses");
+        assert!(!parsed.sections.is_empty());
+        if let Ok(library) = std::fs::read(folder.join(format!("reference/{label}.lib"))) {
+            let ours = outcome
+                .outputs
+                .iter()
+                .find(|(path, _)| path == &format!("ours/{label}.lib"))
+                .map(|(_, bytes)| bytes.clone())
+                .expect("our linker wrote the import library");
+            assert!(
+                library == ours,
+                "{label}: the import library differs from the one lld-link writes"
+            );
+        }
+    }
+
+    #[test]
+    fn coff_programs_and_libraries_link_byte_for_byte_like_lld_link() {
+        if tool_missing("llvm-mc") || tool_missing("lld-link") || tool_missing("llvm-lib") {
+            return;
+        }
+        let folder = work_folder("coff-link");
+        std::fs::create_dir_all(folder.join("reference")).expect("the reference folder");
+        let triple = "x86_64-windows-msvc";
+        assemble(&folder, "program", triple, LINK_PROGRAM);
+        assemble(&folder, "member", triple, LINK_LIBRARY_MEMBER);
+        assemble(&folder, "system", triple, LINK_SYSTEM_LIBRARY);
+        assemble(&folder, "thread", triple, LINK_THREAD_LOCAL);
+        assert!(run_in(
+            &folder,
+            "llvm-lib",
+            &["/out:member.lib", "member.obj"]
+        ));
+        std::fs::write(
+            folder.join("kernel32.def"),
+            "LIBRARY kernel32.dll\nEXPORTS\n  ExitProcess\n",
+        )
+        .expect("the definition is written");
+        assert!(run_in(
+            &folder,
+            "lld-link",
+            &[
+                "/dll",
+                "/noentry",
+                "/def:kernel32.def",
+                "system.obj",
+                "/out:kernel32.dll",
+                "/implib:kernel32.lib"
+            ]
+        ));
+        let console = ["/entry:main", "/subsystem:console"];
+        let cases: Vec<(&str, &str, Vec<&str>)> = vec![
+            (
+                "archive",
+                "exe",
+                vec!["program.obj", "member.lib", "kernel32.lib"],
+            ),
+            (
+                "objects",
+                "exe",
+                vec!["program.obj", "member.obj", "thread.obj", "kernel32.lib"],
+            ),
+            (
+                "reversed",
+                "exe",
+                vec!["member.obj", "program.obj", "kernel32.lib", "/opt:noref"],
+            ),
+            (
+                "no-folding",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.obj",
+                    "kernel32.lib",
+                    "/opt:noref,noicf",
+                ],
+            ),
+            (
+                "merged",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/merge:.other=.text",
+                    "/merge:.absent=.text",
+                ],
+            ),
+            (
+                "sections",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/section:.other,RW",
+                    "/align:0x2000",
+                    "/filealign:0x400",
+                ],
+            ),
+            (
+                "fixed",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/fixed",
+                    "/dynamicbase:no",
+                ],
+            ),
+            (
+                "reproducible",
+                "exe",
+                vec!["program.obj", "member.lib", "kernel32.lib", "/Brepro"],
+            ),
+            (
+                "headers",
+                "exe",
+                vec![
+                    "program.obj",
+                    "member.lib",
+                    "kernel32.lib",
+                    "/stack:0x200000,0x2000",
+                    "/heap:0x300000",
+                    "/version:3.4",
+                    "/highentropyva:no",
+                    "/nxcompat:no",
+                    "/tsaware:no",
+                    "/osversion:10.0",
+                    "/release",
+                ],
+            ),
+            ("undefined", "exe", vec!["program.obj", "kernel32.lib"]),
+        ];
+        for (label, extension, inputs) in &cases {
+            let mut arguments: Vec<&str> = console.to_vec();
+            arguments.extend(inputs.iter().copied());
+            link_both(&folder, label, extension, &arguments);
+        }
+        link_both(
+            &folder,
+            "library",
+            "dll",
+            &[
+                "/dll",
+                "/noentry",
+                "member.obj",
+                "/export:forced",
+                "/export:weak_function,@5,NONAME",
+                "/export:forward=other.dll.function",
+                "/export:shared_function,PRIVATE",
+            ],
+        );
+        link_both(
+            &folder,
+            "subsystem",
+            "exe",
+            &[
+                "/entry:main",
+                "/subsystem:efi_application",
+                "program.obj",
+                "member.lib",
+                "kernel32.lib",
+            ],
+        );
+    }
+}
+
+mod linker_lit {
+    use super::reference::{
+        catalogue, lit_tests, run_parallel, standard_tools, LitSuite, SuiteReport, ToolFunction,
+        ToolOutcome, Tree, World,
+    };
+    use crate::compilers::linker::{link_coff_in, link_elf_in, LinkOutcome};
+    use crate::diag::Severity;
+    use std::collections::BTreeMap;
+    use std::path::{Path, PathBuf};
+    use std::process::{Command, Stdio};
+
+    const HOST_TOOLS: &[&str] = &[
+        "llvm-mc",
+        "yaml2obj",
+        "obj2yaml",
+        "llvm-readobj",
+        "llvm-readelf",
+        "llvm-objdump",
+        "llvm-nm",
+        "llvm-ar",
+        "llvm-ranlib",
+        "llvm-lib",
+        "llvm-dlltool",
+        "llvm-objcopy",
+        "llvm-strip",
+        "llvm-dwarfdump",
+        "llvm-cvtres",
+        "llvm-strings",
+        "llvm-pdbutil",
+        "llvm-symbolizer",
+        "llvm-cxxfilt",
+        "grep",
+        "wc",
+        "od",
+        "ls",
+        "cmp",
+        "tar",
+        "touch",
+        "ln",
+        "chmod",
+        "mv",
+        "sort",
+        "head",
+        "tail",
+        "tr",
+        "xxd",
+        "llc",
+        "python3",
+        "test",
+        "[",
+    ];
+
+    fn host_root() -> PathBuf {
+        use std::sync::atomic::{AtomicU64, Ordering};
+        static COUNTER: AtomicU64 = AtomicU64::new(0);
+        let unique = COUNTER.fetch_add(1, Ordering::Relaxed);
+        std::env::temp_dir().join(format!("builder-lit-{}-{unique}", std::process::id()))
+    }
+
+    fn materialize(world: &World, root: &Path, virtual_path: &str) {
+        let absolute = world.absolute(virtual_path);
+        if !absolute.starts_with('/') || absolute.len() < 2 {
+            return;
+        }
+        let target = root.join(absolute.trim_start_matches('/'));
+        if target.exists() {
+            return;
+        }
+        if let Some(bytes) = world.read(&absolute) {
+            if let Some(parent) = target.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            let _ = std::fs::write(&target, &bytes);
+            let text = String::from_utf8_lossy(&bytes);
+            let folder = absolute
+                .rsplit_once('/')
+                .map(|(folder, _)| folder.to_string())
+                .unwrap_or_default();
+            for line in text.lines() {
+                let trimmed = line.trim_start();
+                for directive in [".include", ".incbin"] {
+                    if let Some(rest) = trimmed.strip_prefix(directive) {
+                        if let Some(name) = rest
+                            .trim()
+                            .strip_prefix('"')
+                            .and_then(|rest| rest.split('"').next())
+                        {
+                            materialize(world, root, &format!("{folder}/{name}"));
+                            materialize(world, root, &format!("{}/{name}", world.directory));
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    fn path_pieces(argument: &str) -> Vec<String> {
+        let mut pieces = vec![argument.to_string()];
+        for separator in ['=', ',', ':'] {
+            pieces = pieces
+                .iter()
+                .flat_map(|piece| {
+                    piece
+                        .split(separator)
+                        .map(str::to_string)
+                        .collect::<Vec<_>>()
+                })
+                .collect();
+        }
+        let mut extra = Vec::new();
+        for piece in &pieces {
+            for prefix in ["-o", "-I", "-L", "@"] {
+                if let Some(rest) = piece.strip_prefix(prefix) {
+                    extra.push(rest.to_string());
+                }
+            }
+        }
+        pieces.extend(extra);
+        pieces.retain(|piece| !piece.is_empty() && !piece.starts_with('-'));
+        pieces
+    }
+
+    fn rewrite(argument: &str, root: &str) -> String {
+        let mut out = String::new();
+        let mut rest = argument;
+        while !rest.is_empty() {
+            let next = ["/output", "/llvm-project/"]
+                .iter()
+                .filter_map(|prefix| rest.find(prefix).map(|at| (at, *prefix)))
+                .min();
+            match next {
+                Some((at, _)) => {
+                    let glued = ["-I", "-L", "-o"]
+                        .iter()
+                        .any(|flag| rest[..at].ends_with(flag));
+                    let boundary = at == 0 || glued || {
+                        let previous = rest.as_bytes()[at - 1];
+                        !previous.is_ascii_alphanumeric() && previous != b'/' && previous != b'.'
+                    };
+                    out.push_str(&rest[..at]);
+                    if boundary {
+                        out.push_str(root);
+                    }
+                    out.push('/');
+                    rest = &rest[at + 1..];
+                }
+                None => {
+                    out.push_str(rest);
+                    break;
+                }
+            }
+        }
+        out
+    }
+
+    fn unroot_thin_archive(bytes: &[u8], root_text: &str) -> Option<Vec<u8>> {
+        if !bytes.starts_with(b"!<thin>\n") || root_text.is_empty() {
+            return None;
+        }
+        let needle = root_text.as_bytes();
+        if !bytes.windows(needle.len()).any(|window| window == needle) {
+            return None;
+        }
+        let mut members: Vec<(usize, Vec<u8>, Option<Vec<u8>>)> = Vec::new();
+        let mut at = 8usize;
+        while at + 60 <= bytes.len() {
+            let header = bytes[at..at + 60].to_vec();
+            let name = String::from_utf8_lossy(&header[..16])
+                .trim_end()
+                .to_string();
+            let size: usize = String::from_utf8_lossy(&header[48..58])
+                .trim()
+                .parse()
+                .ok()?;
+            let stored = name == "/" || name == "//" || name == "/SYM64/";
+            let body = if stored {
+                Some(bytes.get(at + 60..at + 60 + size)?.to_vec())
+            } else {
+                None
+            };
+            members.push((at, header, body));
+            at += 60 + if stored { size + size % 2 } else { 0 };
+        }
+        let mut name_offsets: BTreeMap<usize, usize> = BTreeMap::new();
+        for member in members.iter_mut() {
+            if &member.1[..16] != b"//              " {
+                continue;
+            }
+            let table = member.2.clone()?;
+            let mut rebuilt = Vec::new();
+            let mut start = 0usize;
+            while start < table.len() {
+                let end = table[start..]
+                    .iter()
+                    .position(|byte| *byte == b'\n')
+                    .map(|position| start + position + 1)
+                    .unwrap_or(table.len());
+                name_offsets.insert(start, rebuilt.len());
+                let entry = String::from_utf8_lossy(&table[start..end]).replace(root_text, "");
+                rebuilt.extend_from_slice(entry.as_bytes());
+                start = end;
+            }
+            member.2 = Some(rebuilt);
+        }
+        let mut positions: BTreeMap<usize, usize> = BTreeMap::new();
+        let mut cursor = 8usize;
+        for member in members.iter_mut() {
+            positions.insert(member.0, cursor);
+            let name = String::from_utf8_lossy(&member.1[..16])
+                .trim_end()
+                .to_string();
+            if let Some(offset) = name
+                .strip_prefix('/')
+                .and_then(|rest| rest.parse::<usize>().ok())
+            {
+                let renamed = format!("/{}", name_offsets.get(&offset).copied().unwrap_or(offset));
+                member.1[..16].copy_from_slice(format!("{renamed:<16}").as_bytes());
+            }
+            if let Some(body) = &member.2 {
+                member.1[48..58].copy_from_slice(format!("{:<10}", body.len()).as_bytes());
+                cursor += 60 + body.len() + body.len() % 2;
+            } else {
+                cursor += 60;
+            }
+        }
+        let mut out = b"!<thin>\n".to_vec();
+        for (_, header, body) in &members {
+            out.extend_from_slice(header);
+            if let Some(body) = body {
+                let mut body = body.clone();
+                if &header[..16] == b"/               " && body.len() >= 4 {
+                    let count = u32::from_be_bytes(body[..4].try_into().ok()?) as usize;
+                    for index in 0..count {
+                        let place = 4 + index * 4;
+                        let old = u32::from_be_bytes(body.get(place..place + 4)?.try_into().ok()?)
+                            as usize;
+                        let new = positions.get(&old).copied().unwrap_or(old) as u32;
+                        body[place..place + 4].copy_from_slice(&new.to_be_bytes());
+                    }
+                }
+                out.extend_from_slice(&body);
+                if body.len() % 2 == 1 {
+                    out.push(b'\n');
+                }
+            }
+        }
+        Some(out)
+    }
+
+    fn read_back(world: &mut World, root: &Path, folder: &Path) {
+        let Ok(entries) = std::fs::read_dir(folder) else {
+            return;
+        };
+        let mut paths: Vec<PathBuf> = entries
+            .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+            .collect();
+        paths.sort();
+        for path in paths {
+            let Ok(meta) = std::fs::symlink_metadata(&path) else {
+                continue;
+            };
+            let relative = path
+                .strip_prefix(root)
+                .map(|relative| relative.to_string_lossy().to_string())
+                .unwrap_or_default();
+            let virtual_path = format!("/{relative}");
+            if meta.is_dir() {
+                world.folders.insert(virtual_path);
+                read_back(world, root, &path);
+            } else if let Ok(bytes) = std::fs::read(&path) {
+                let root_text = root.to_string_lossy().to_string();
+                let bytes = unroot_thin_archive(&bytes, &root_text).unwrap_or(bytes);
+                if world.read(&virtual_path).as_deref() != Some(bytes.as_slice()) {
+                    world.write(&virtual_path, bytes, false);
+                }
+            }
+        }
+    }
+
+    fn tool_host(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let root = host_root();
+        let root_text = root.to_string_lossy().to_string();
+        for folder in world.folders.clone() {
+            let _ = std::fs::create_dir_all(root.join(folder.trim_start_matches('/')));
+        }
+        let files: Vec<String> = world.files.keys().cloned().collect();
+        for path in files {
+            materialize(world, &root, &path);
+        }
+        for argument in &arguments[1..] {
+            for piece in path_pieces(argument) {
+                materialize(world, &root, &piece);
+            }
+        }
+        let mut include_folders: Vec<String> = Vec::new();
+        for (position, argument) in arguments.iter().enumerate() {
+            if argument == "-I" {
+                if let Some(folder) = arguments.get(position + 1) {
+                    include_folders.push(folder.clone());
+                }
+            } else if let Some(folder) = argument.strip_prefix("-I") {
+                include_folders.push(folder.to_string());
+            }
+        }
+        for folder in include_folders {
+            let absolute = world.absolute(&folder);
+            let prefix = format!("{}/", absolute.trim_start_matches('/'));
+            for path in world.tree.paths_under(&prefix) {
+                materialize(world, &root, &format!("/{path}"));
+            }
+        }
+        let directory = root.join(world.directory.trim_start_matches('/'));
+        let _ = std::fs::create_dir_all(&directory);
+        let mut command = Command::new(&arguments[0]);
+        command
+            .args(
+                arguments[1..]
+                    .iter()
+                    .map(|argument| rewrite(argument, &root_text)),
+            )
+            .current_dir(&directory)
+            .envs(world.environment.iter())
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped());
+        let outcome = match command.spawn() {
+            Ok(mut child) => {
+                if let Some(mut stdin) = child.stdin.take() {
+                    use std::io::Write;
+                    let _ = stdin.write_all(input);
+                }
+                let identifier = child.id();
+                let (sender, receiver) = std::sync::mpsc::channel::<()>();
+                let watchdog = std::thread::spawn(move || {
+                    if receiver
+                        .recv_timeout(std::time::Duration::from_secs(120))
+                        .is_err()
+                    {
+                        let _ = Command::new("kill")
+                            .arg("-9")
+                            .arg(identifier.to_string())
+                            .status();
+                    }
+                });
+                let waited = child.wait_with_output();
+                let _ = sender.send(());
+                let _ = watchdog.join();
+                match waited {
+                    Ok(output) => {
+                        use std::os::unix::process::ExitStatusExt;
+                        let status = output
+                            .status
+                            .code()
+                            .unwrap_or_else(|| 128 + output.status.signal().unwrap_or(9));
+                        let clean = |bytes: Vec<u8>| {
+                            String::from_utf8_lossy(&bytes)
+                                .replace(&root_text, "")
+                                .into_bytes()
+                        };
+                        let stderr = clean(output.stderr);
+                        let said = String::from_utf8_lossy(&stderr).to_string();
+                        let assembler = matches!(arguments[0].as_str(), "llvm-mc" | "yaml2obj");
+                        let too_new = [
+                            "unknown token in expression",
+                            "unknown flag",
+                            "expect relocation specifier",
+                            "unknown directive",
+                            "unknown relocation name",
+                            "unexpected token",
+                            "expected identifier",
+                            "invalid hex32 number",
+                        ];
+                        if status != 0 && assembler {
+                            if let Some(found) = too_new.iter().find(|text| said.contains(**text)) {
+                                world.missing_tool.get_or_insert(format!(
+                                    "{} on this machine reports {found}",
+                                    arguments[0]
+                                ));
+                            }
+                        }
+                        if status != 0 && said.contains("SHT_CREL") {
+                            world.missing_tool.get_or_insert(format!(
+                                "{} on this machine does not know SHT_CREL",
+                                arguments[0]
+                            ));
+                        }
+                        if status != 0 {
+                            if let Some(rest) = said.split("Unknown command line argument '").nth(1)
+                            {
+                                let option = rest.split('\'').next().unwrap_or_default();
+                                world.missing_tool.get_or_insert(format!(
+                                    "{} on this machine does not know {option}",
+                                    arguments[0]
+                                ));
+                            }
+                        }
+                        let stdout = if std::str::from_utf8(&output.stdout).is_ok() {
+                            clean(output.stdout)
+                        } else {
+                            output.stdout
+                        };
+                        ToolOutcome {
+                            status,
+                            stdout,
+                            stderr,
+                        }
+                    }
+                    Err(error) => ToolOutcome::failed(126, format!("{error}\n")),
+                }
+            }
+            Err(_) => {
+                world.missing_tool.get_or_insert(arguments[0].clone());
+                ToolOutcome::failed(127, format!("'{}': command not found\n", arguments[0]))
+            }
+        };
+        read_back(world, &root, &root);
+        let _ = std::fs::remove_dir_all(&root);
+        outcome
+    }
+
+    fn context_values<'d>(diagnostic: &'d crate::diag::Diagnostic, label: &str) -> Vec<&'d str> {
+        let prefix = format!("{label}: ");
+        diagnostic
+            .context
+            .iter()
+            .filter_map(|context| context.strip_prefix(prefix.as_str()))
+            .collect()
+    }
+
+    fn context_value<'d>(diagnostic: &'d crate::diag::Diagnostic, label: &str) -> Option<&'d str> {
+        context_values(diagnostic, label).into_iter().next()
+    }
+
+    fn lld_message(diagnostic: &crate::diag::Diagnostic, program: &str) -> String {
+        let value = |label: &str| context_value(diagnostic, label).unwrap_or("");
+        let values = |label: &str| context_values(diagnostic, label);
+        let coff = program == "lld-link";
+        if let Some(cause) = context_value(diagnostic, "Cause") {
+            return cause.to_string();
+        }
+        match diagnostic.code.as_str() {
+            "EI207" => {
+                let visibility = context_value(diagnostic, "Visibility")
+                    .map(|shown| format!("{shown} "))
+                    .unwrap_or_default();
+                let references = values("Reference");
+                if coff && references.first() == Some(&"<root>") {
+                    return format!("<root>: undefined symbol: {}", value("Symbol"));
+                }
+                let mut text = format!("undefined {visibility}symbol: {}", value("Symbol"));
+                for reference in references {
+                    text.push_str(&format!("\n>>> referenced by {reference}"));
+                }
+                if let Some(more) = context_value(diagnostic, "More references") {
+                    text.push_str(&format!("\n>>> referenced {more} more times"));
+                }
+                text
+            }
+            "EI206" => {
+                let mut text = format!("duplicate symbol: {}", value("Symbol"));
+                for definition in values("Definition") {
+                    text.push_str(&format!("\n>>> defined at {definition}"));
+                }
+                text
+            }
+            "EI205" => {
+                if let Some(library) = context_value(diagnostic, "Library") {
+                    format!("unable to find library {library}")
+                } else if let Some(script) = context_value(diagnostic, "Script") {
+                    format!("cannot find linker script {script}")
+                } else {
+                    format!("cannot open {}: No such file or directory", value("File"))
+                }
+            }
+            "EI202" => format!("unknown argument '{}'", value("Option")),
+            "EI247" => format!("ignoring unknown argument '{}'", value("Option")),
+            "EI213" => "no input files".to_string(),
+            "EI262" => format!(
+                "section '{}' will not fit in region '{}': overflowed by {}",
+                value("Section"),
+                value("Region"),
+                value("Overflow")
+            ),
+            _ => {
+                let reason = context_value(diagnostic, "Reason");
+                let location = context_value(diagnostic, "Location");
+                match (reason, location) {
+                    (Some(reason), Some(location)) => {
+                        let mut text = format!("{location}: {reason}");
+                        if let (Some(line), Some(column)) = (
+                            context_value(diagnostic, "Line"),
+                            context_value(diagnostic, "Column"),
+                        ) {
+                            let column: usize = column.parse().unwrap_or(0);
+                            text.push_str(&format!("\n>>> {line}\n>>> {}^", " ".repeat(column)));
+                        }
+                        text
+                    }
+                    (Some(reason), None) => match context_value(diagnostic, "File") {
+                        Some(file) => format!("{file}: {reason}"),
+                        None => reason.to_string(),
+                    },
+                    _ => {
+                        let mut text = format!("{} [{}]", diagnostic.message, diagnostic.code);
+                        for context in &diagnostic.context {
+                            text.push_str(&format!("\n>>> {context}"));
+                        }
+                        text
+                    }
+                }
+            }
+        }
+    }
+
+    fn parenthesized_place(line: &str) -> Option<String> {
+        let positions: Vec<usize> = line
+            .char_indices()
+            .filter(|(at, character)| *character == '(' && *at > 0)
+            .map(|(at, _)| at)
+            .collect();
+        for open in positions.into_iter().rev() {
+            let token: String = line[open + 1..]
+                .chars()
+                .take_while(|character| !character.is_whitespace())
+                .collect();
+            let mut found = None;
+            for (at, character) in token.char_indices() {
+                if character != ':' || at == 0 {
+                    continue;
+                }
+                let digits: String = token[at + 1..]
+                    .chars()
+                    .take_while(|character| character.is_ascii_digit())
+                    .collect();
+                if !digits.is_empty() && token[at + 1 + digits.len()..].starts_with(')') {
+                    found = Some(format!("{}({digits})", &token[..at]));
+                }
+            }
+            if found.is_some() {
+                return found;
+            }
+        }
+        None
+    }
+
+    fn plain_place(line: &str) -> Option<String> {
+        let token: String = line
+            .chars()
+            .take_while(|character| !character.is_whitespace())
+            .collect();
+        let mut found = None;
+        for (at, character) in token.char_indices() {
+            if character != ':' || at == 0 {
+                continue;
+            }
+            let digits: String = token[at + 1..]
+                .chars()
+                .take_while(|character| character.is_ascii_digit())
+                .collect();
+            if !digits.is_empty() {
+                found = Some(format!("{}({digits})", &token[..at]));
+            }
+        }
+        found
+    }
+
+    fn visual_location(message: &str) -> Option<String> {
+        let lines: Vec<&str> = message.split('\n').collect();
+        let first = lines.first().copied().unwrap_or("");
+        let second = lines.get(1).copied().unwrap_or("");
+        let undefined = first.starts_with("undefined ")
+            && first["undefined ".len()..]
+                .split_once("symbol:")
+                .is_some_and(|(word, _)| {
+                    word.is_empty()
+                        || (word.ends_with(' ')
+                            && !word.trim_end().is_empty()
+                            && !word.trim_end().contains(char::is_whitespace))
+                });
+        if undefined {
+            if let Some(rest) = second.strip_prefix(">>> referenced by ") {
+                if let Some(place) = parenthesized_place(rest) {
+                    return Some(place);
+                }
+                if let Some(place) = plain_place(rest) {
+                    return Some(place);
+                }
+                if first.starts_with("undefined symbol:") {
+                    if let Some(at) = rest.rfind(':') {
+                        return Some(rest[..at].to_string());
+                    }
+                }
+            }
+        }
+        if first.starts_with("duplicate symbol: ") {
+            if let Some(rest) = second.strip_prefix(">>> defined in ") {
+                let third = lines.get(2).copied().unwrap_or("");
+                if !rest.is_empty()
+                    && !rest.contains(char::is_whitespace)
+                    && third.starts_with(">>> defined in")
+                {
+                    return Some(rest.to_string());
+                }
+            }
+            if let Some(rest) = second.strip_prefix(">>> defined at ") {
+                if let Some(place) = parenthesized_place(rest) {
+                    return Some(place);
+                }
+                if let Some(place) = plain_place(rest) {
+                    return Some(place);
+                }
+            }
+        }
+        for window in lines.windows(3) {
+            if !window[1].starts_with(">>> defined in ") {
+                continue;
+            }
+            if let Some(rest) = window[2].strip_prefix(">>> referenced by ") {
+                if let Some(place) = parenthesized_place(rest) {
+                    return Some(place);
+                }
+            }
+        }
+        for window in lines.windows(3) {
+            if !window[1].starts_with(">>> defined in ") {
+                continue;
+            }
+            if let Some(rest) = window[2].strip_prefix(">>> referenced by ") {
+                if let Some(place) = plain_place(rest) {
+                    return Some(place);
+                }
+            }
+        }
+        for line in &lines {
+            if let Some(at) = line.find(": unclosed quote") {
+                let head = &line[..at];
+                let start = head
+                    .rfind(char::is_whitespace)
+                    .map(|position| position + 1)
+                    .unwrap_or(0);
+                if let Some(place) = plain_place(&head[start..]) {
+                    return Some(place);
+                }
+            }
+        }
+        None
+    }
+
+    fn colored(arguments: &[String]) -> bool {
+        let mut color = false;
+        for argument in arguments {
+            let name = argument.trim_start_matches('-');
+            match name {
+                "color-diagnostics" | "color-diagnostics=always" => color = true,
+                "color-diagnostics=never" | "color-diagnostics=auto" | "no-color-diagnostics" => {
+                    color = false
+                }
+                _ => {}
+            }
+        }
+        color
+    }
+
+    fn render(
+        outcome: &LinkOutcome,
+        program: &str,
+        visual: bool,
+        color: bool,
+    ) -> (Vec<u8>, Vec<u8>, i32) {
+        let mut stderr = String::new();
+        let mut separator = "";
+        for diagnostic in &outcome.diagnostics {
+            let level = match diagnostic.severity {
+                Severity::Error | Severity::Fatal => "error",
+                Severity::Warning => "warning",
+                Severity::Info => "",
+                _ => "message",
+            };
+            let message = lld_message(diagnostic, program);
+            let lines: Vec<&str> = message.split('\n').collect();
+            let source_line = |line: &str| {
+                line.strip_prefix(">>> defined at ")
+                    .is_some_and(|rest| plain_place(rest).is_some())
+            };
+            let split = visual
+                && lines.len() == 5
+                && lines[0].starts_with("duplicate symbol: ")
+                && source_line(lines[1])
+                && lines[2].starts_with(">>>")
+                && source_line(lines[3])
+                && lines[4].starts_with(">>>");
+            let parts = if split {
+                vec![
+                    format!("{}\n{}\n{}", lines[0], lines[1], lines[2]),
+                    format!("{}\n{}\n{}", lines[0], lines[3], lines[4]),
+                ]
+            } else {
+                vec![message]
+            };
+            for part in parts {
+                let location = if visual {
+                    visual_location(&part).unwrap_or_else(|| program.to_string())
+                } else {
+                    program.to_string()
+                };
+                let shown = match (color, level) {
+                    (true, "warning") => "\u{1b}[0;35mwarning: \u{1b}[0m".to_string(),
+                    (true, "error") => "\u{1b}[0;31merror: \u{1b}[0m".to_string(),
+                    (_, "") => String::new(),
+                    _ => format!("{level}: "),
+                };
+                stderr.push_str(&format!("{separator}{location}: {shown}{part}\n"));
+                separator = if part.contains('\n') { "\n" } else { "" };
+            }
+        }
+        let mut stdout = String::new();
+        for message in &outcome.messages {
+            stdout.push_str(message);
+            if !message.ends_with('\n') {
+                stdout.push('\n');
+            }
+        }
+        let status = if outcome.succeeded() { 0 } else { 1 };
+        (stdout.into_bytes(), stderr.into_bytes(), status)
+    }
+
+    fn finish_link(
+        outcome: LinkOutcome,
+        program: &str,
+        world: &mut World,
+        visual: bool,
+        color: bool,
+    ) -> ToolOutcome {
+        let (mut stdout, mut stderr, mut status) = render(&outcome, program, visual, color);
+        for (path, bytes) in outcome.outputs {
+            if path == "-" {
+                stdout.extend_from_slice(&bytes);
+                continue;
+            }
+            let absolute = world.absolute(&path);
+            let parent = absolute
+                .rsplit_once('/')
+                .map(|(parent, _)| parent.to_string())
+                .unwrap_or_default();
+            let inside = format!("{parent}/");
+            let missing = !parent.is_empty()
+                && !parent.starts_with("/dev")
+                && !world.folders.contains(&parent)
+                && !world
+                    .folders
+                    .iter()
+                    .any(|folder| folder.starts_with(&inside))
+                && !world.files.keys().any(|file| file.starts_with(&inside));
+            if missing {
+                let label = if color {
+                    "\u{1b}[0;31merror: \u{1b}[0m"
+                } else {
+                    "error: "
+                };
+                stderr.extend_from_slice(
+                    format!("{program}: {label}failed to open {path}: No such file or directory\n")
+                        .as_bytes(),
+                );
+                status = 1;
+                continue;
+            }
+            world.write(&path, bytes, false);
+        }
+        ToolOutcome {
+            status,
+            stdout,
+            stderr,
+        }
+    }
+
+    fn oracle() -> bool {
+        std::env::var_os("APK_BUILDER_LLD_ORACLE").is_some()
+    }
+
+    fn tool_ld_lld(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        if oracle() {
+            return tool_host(arguments, input, world);
+        }
+        let identity = world
+            .environment
+            .get("LLD_VERSION")
+            .cloned()
+            .unwrap_or_else(|| "LLD 1.0".to_string());
+        let directory = world.directory.clone();
+        let environment: Vec<(String, String)> = world
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let outcome = {
+            let reader = |path: &str| world.read(path);
+            let exists = |path: &str| {
+                world.folders.contains(&world.absolute(path)) || world.read(path).is_some()
+            };
+            link_elf_in(
+                &arguments[1..],
+                &reader,
+                &exists,
+                &identity,
+                &directory,
+                &environment,
+            )
+        };
+        let visual = arguments
+            .iter()
+            .any(|argument| argument == "--vs-diagnostics" || argument == "-vs-diagnostics");
+        finish_link(outcome, "ld.lld", world, visual, colored(arguments))
+    }
+
+    fn tool_lld_link(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        if oracle() {
+            return tool_host(arguments, input, world);
+        }
+        let directory = world.directory.clone();
+        let environment: Vec<(String, String)> = world
+            .environment
+            .iter()
+            .map(|(key, value)| (key.clone(), value.clone()))
+            .collect();
+        let outcome = {
+            let reader = |path: &str| world.read(path);
+            link_coff_in(&arguments[1..], &reader, &directory, &environment)
+        };
+        finish_link(outcome, "lld-link", world, false, colored(arguments))
+    }
+
+    fn lld_tools() -> BTreeMap<String, ToolFunction> {
+        let mut tools = standard_tools();
+        for name in HOST_TOOLS {
+            tools.insert((*name).to_string(), tool_host);
+        }
+        tools.insert("ld.lld".to_string(), tool_ld_lld);
+        tools.insert("lld-link".to_string(), tool_lld_link);
+        tools.insert("[".to_string(), tool_bracket);
+        tools
+    }
+
+    fn tool_bracket(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let words: Vec<&str> = arguments.iter().map(String::as_str).collect();
+        let (negated, path) = match words.as_slice() {
+            ["[", "-x", path, "]"] => (false, *path),
+            ["[", "!", "-x", path, "]"] => (true, *path),
+            _ => return tool_host(arguments, input, world),
+        };
+        let executable = world.read(path).is_some_and(|bytes| {
+            bytes.starts_with(b"\x7fELF")
+                && bytes.len() > 17
+                && u16::from_le_bytes([bytes[16], bytes[17]]) != 1
+                && u16::from_be_bytes([bytes[16], bytes[17]]) != 1
+        });
+        ToolOutcome {
+            status: if executable != negated { 0 } else { 1 },
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+        }
+    }
+
+    fn missing_input(tree: &Tree, path: &str) -> Option<String> {
+        let text = String::from_utf8_lossy(tree.file(path)?).into_owned();
+        let file_name = path.rsplit('/').next().unwrap_or(path);
+        const DECIMAL_SIZES: &str =
+            "the installed LLVM 18 llvm-readobj prints section sizes in decimal";
+        let newer_tool = match path.rsplit_once("lld/test/").map(|(_, rest)| rest) {
+            Some(
+                "COFF/code-merge.s"
+                | "COFF/common-replacement.s"
+                | "COFF/merge-data-bss.test"
+                | "COFF/nodbgdirmerge.test"
+                | "COFF/secrel-common.s",
+            ) => Some(DECIMAL_SIZES),
+            Some("COFF/exdllcharacteristics.test") => Some(
+                "the installed LLVM 18 llvm-readobj does not name every extended DLL characteristic",
+            ),
+            Some("COFF/exportas.test") => {
+                Some("the installed LLVM 18 llvm-lib ignores EXPORTAS in module definitions")
+            }
+            Some("COFF/strtab.s") => {
+                Some("the installed LLVM 18 llvm-readobj prints string tables only for XCOFF")
+            }
+            Some("COFF/rsds.test") => {
+                Some("the installed LLVM 18 llvm-readobj prints the PDB GUID as raw bytes")
+            }
+            Some("COFF/pdb-relative-source-lines.test") => {
+                Some("the test copies the lld-link executable, which this linker is not")
+            }
+            Some("COFF/thin-archive.s") => Some(
+                "the thin archive keeps absolute member paths that the host llvm-nm reads outside the test sandbox",
+            ),
+            Some(
+                "ELF/x86-64-gotpc-no-relax-err.s"
+                | "ELF/x86-64-gotpc-relax-nopic.s"
+                | "ELF/tls-opt.s"
+                | "ELF/x86-64-tlsdesc-gd.s",
+            ) => Some(
+                "the installed LLVM 18 llvm-mc and llvm-objdump do not emit APX relocations or decode APX registers",
+            ),
+            Some(
+                "ELF/gnu-property-align.s"
+                | "ELF/gnu-property-align-32.s"
+                | "ELF/gnu-build-attributes.s",
+            ) => Some(
+                "the installed LLVM 18 llvm-readobj prints notes without the NoteSections and Notes lists",
+            ),
+            Some("ELF/aarch64-feature-pauth.s") => Some(
+                "the installed LLVM 18 llvm-readelf does not decode the AArch64 PAuth core info property",
+            ),
+            Some("ELF/eh-frame-dynrel-offset.s") => Some(
+                "the installed LLVM 18 llvm-readelf prints RELR entries only as decoded relocations",
+            ),
+            Some("ELF/x86-64-plt.s") => Some(
+                "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
+            ),
+            Some("ELF/lto-plugin-ignore.s") => Some(
+                "-plugin-opt=- options go to the LLVM code generator option registry, which a linker without LLVM code generation does not contain",
+            ),
+            Some("ELF/error-handling-script-linux.test") => Some(
+                "the test needs the linker to start an external shell script, and this linker runs inside a sandbox that starts no processes",
+            ),
+            Some("ELF/dynamic-debug.test") => Some(
+                "the installed LLVM 18 llvm-readelf does not name the LLVM_DYNDBG_ELF section type",
+            ),
+            Some("ELF/aarch64-tlsdesc-zrel.s") => Some(
+                "the installed LLVM 18 llvm-readobj prints no blank line between the relocations and the hex dump",
+            ),
+            Some("ELF/aarch64-relocs.s") => Some(
+                "the installed LLVM 18 llvm-mc gives these AArch64 code sections alignment 1, which moves every address the test expects",
+            ),
+            Some("ELF/openbsd-phdr.s" | "ELF/relro-openbsd.s") => Some(
+                "the installed LLVM 18 llvm-mc leaves EI_OSABI at System V for OpenBSD objects",
+            ),
+            Some("ELF/basic-aarch64.s") => Some(
+                "the installed LLVM 18 llvm-mc names the AArch64 mapping symbol $x.0 instead of $x",
+            ),
+            Some("ELF/invalid/mips-invalid-options-descriptor.test") => {
+                Some("the test links a MIPS object, and MIPS is not a target of this linker")
+            }
+            Some("ELF/relocation-none.test" | "ELF/relocation-rel-format.test") => Some(
+                "the test also links PowerPC and RISC-V objects, which are not targets of this linker",
+            ),
+            Some("ELF/aarch64-cortex-a53-843419-thunk-relocation-crash.s") => Some(
+                "the installed LLVM 18 llvm-objdump prints every zero word of the 128 MiB data gap as about 2.7 GB of text",
+            ),
+            Some("ELF/icf-keep-unique.s") => Some(
+                "the lit runner appends stderr after stdout under 2>&1 and the test needs the linker warning before the --print-icf-sections lines",
+            ),
+            Some("ELF/compress-sections-special.s") => Some(
+                "the lit runner appends stderr after stdout under 2>&1 and the test needs llvm-readelf warnings interleaved with its hex dump",
+            ),
+            _ => None,
+        };
+        if let Some(reason) = newer_tool {
+            return Some(reason.to_string());
+        }
+        let arm_triple = ["triple=arm", "triple=thumb", "triple armv", "triple thumbv"]
+            .iter()
+            .any(|marker| text.contains(marker));
+        if path.contains("lld/test/ELF/") && arm_triple && text.contains("@plt>") {
+            return Some(
+                "the installed LLVM 18 llvm-objdump does not label ARM PLT entries".to_string(),
+            );
+        }
+        if path.contains("lld/test/ELF/") && text.contains("Symbolic Address") {
+            return Some(
+                "the installed LLVM 18 llvm-readelf prints RELR entries only as decoded relocations"
+                    .to_string(),
+            );
+        }
+        if path.contains("lld/test/ELF/")
+            && [
+                "DW_IDX_parent: <parent not indexed>",
+                "DW_IDX_parent: Entry @",
+            ]
+            .iter()
+            .any(|form| text.contains(form))
+        {
+            return Some(
+                "the installed LLVM 18 llvm-dwarfdump prints DW_IDX_parent in an older form and lists abbreviations in hash order"
+                    .to_string(),
+            );
+        }
+        if path.contains("lld/test/ELF/")
+            && [" AXy ", " Ay "].iter().any(|flags| text.contains(flags))
+        {
+            return Some(
+                "the installed LLVM 18 llvm-readelf prints the AArch64 purecode flag as p"
+                    .to_string(),
+            );
+        }
+        if file_name.contains("arm64ec")
+            || file_name.contains("arm64x")
+            || file_name == "merge-wowthk.s"
+        {
+            return Some(
+                "ARM64EC and ARM64X hybrid images are not a target of this linker".to_string(),
+            );
+        }
+        let folder = path
+            .rsplit_once('/')
+            .map(|(folder, _)| folder)
+            .unwrap_or("");
+        for line in text.lines() {
+            let Some((_, command)) = line.split_once("RUN:") else {
+                continue;
+            };
+            let builds_bitcode = command.split_whitespace().any(|word| {
+                matches!(
+                    word,
+                    "llvm-as" | "opt" | "llvm-lto" | "llvm-lto2" | "llvm-profdata" | "clang"
+                ) || word.contains("fat-lto-objects")
+            });
+            if builds_bitcode {
+                return Some(
+                    "LLVM bitcode for link-time optimization is not an input this linker reads"
+                        .to_string(),
+                );
+            }
+            if command.contains(">&") && !command.contains("2>&1") && !command.contains(">&2") {
+                return Some("the lit shell here does not support the >& redirect".to_string());
+            }
+            if command.contains("touch -t") {
+                return Some(
+                    "the lit shell here does not keep file times between commands".to_string(),
+                );
+            }
+            for word in command.split(|character: char| {
+                character.is_whitespace() || character == '=' || character == ','
+            }) {
+                let word = word.trim_matches(|character| character == '"' || character == '\'');
+                for prefix in ["%p/", "%S/"] {
+                    let Some(relative) = word
+                        .find(prefix)
+                        .map(|at| word[at + prefix.len()..].trim_end_matches('/'))
+                    else {
+                        continue;
+                    };
+                    if relative.is_empty() || relative.contains('*') || relative.contains('%') {
+                        continue;
+                    }
+                    let full = format!("{folder}/{relative}");
+                    if tree.file(&full).is_none()
+                        && tree.paths_under(&format!("{full}/")).is_empty()
+                    {
+                        return Some(format!("binary input not in the bundle: {relative}"));
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn lld_suite(name: &str, folder: &str) {
+        let names: Vec<String> = catalogue()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("Test_08"))
+            .collect();
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the LLD tests are present");
+        let root = format!("llvm-project/lld/test/{folder}/");
+        let mut tests = lit_tests(&tree, &root, &[".test", ".s", ".ll", ".yaml"]);
+        if let Ok(filter) = std::env::var("APK_BUILDER_LLD_FILTER") {
+            tests.retain(|path| path.contains(&filter));
+        }
+        let architectures: &[&str] = &["x86", "aarch64", "arm"];
+        let features = [
+            "shell",
+            "llvm-64-bits",
+            "system-linux",
+            "host-byteorder-little-endian",
+            "non-root-user",
+            "thread_support",
+            "gnutar",
+            "zlib",
+        ];
+        let suite = LitSuite {
+            tree: &tree,
+            features: features
+                .iter()
+                .chain(architectures)
+                .map(|feature| feature.to_string())
+                .collect(),
+            substitutions: vec![
+                ("%python".to_string(), "python3".to_string()),
+                (
+                    "%errc_ENOENT".to_string(),
+                    "'No such file or directory'".to_string(),
+                ),
+                ("%errc_EISDIR".to_string(), "'Is a directory'".to_string()),
+                (
+                    "%errc_EACCES".to_string(),
+                    "'Permission denied'".to_string(),
+                ),
+                ("%errc_EINVAL".to_string(), "'Invalid argument'".to_string()),
+            ],
+            tools: lld_tools(),
+        };
+        let outcomes = run_parallel(tests, &|path| {
+            let verdict = match missing_input(&tree, path) {
+                Some(reason) => super::reference::Verdict::OutOfScope(reason),
+                None => suite.run_test(path),
+            };
+            if std::env::var_os("APK_BUILDER_SUITE_TRACE").is_some() {
+                eprintln!("finished: {path}");
+            }
+            verdict
+        });
+        let mut listing = String::new();
+        for (path, verdict) in &outcomes {
+            if let super::reference::Verdict::OutOfScope(reason) = verdict {
+                listing.push_str(&format!("{path}\t{reason}\n"));
+            }
+        }
+        let folder = super::reference::repository().join("Tests").join("suites");
+        let _ = std::fs::create_dir_all(&folder);
+        let _ = std::fs::write(folder.join(format!("{name}-out-of-scope.txt")), listing);
+        let report = SuiteReport {
+            name: name.to_string(),
+            outcomes,
+        };
+        report.publish();
+    }
+
+    #[test]
+    fn the_demangler_reads_itanium_names_the_way_llvm_does() {
+        use crate::compilers::linker::demangle_itanium;
+        for (mangled, expected) in [
+            ("_Z1fi", "f(int)"),
+            ("_ZNK2ns1A3getEv", "ns::A::get() const"),
+            ("_ZN2ns1AC2Ev", "ns::A::A()"),
+            ("_ZNSsD1Ev", "std::basic_string<char, std::char_traits<char>, std::allocator<char>>::~basic_string()"),
+            ("_Z3fooIiEvT_", "void foo<int>(int)"),
+            ("_ZplRK1AS1_", "operator+(A const&, A const&)"),
+            ("_Z1gPFviEPA3_c", "g(void (*)(int), char (*) [3])"),
+            ("_ZTV1A", "vtable for A"),
+            ("_ZZ4mainE1x", "main::x"),
+            ("_Z1fv.cold", "f() (.cold)"),
+        ] {
+            assert_eq!(demangle_itanium(mangled).as_deref(), Some(expected), "{mangled}");
+        }
+        assert_eq!(demangle_itanium("_Z"), None);
+        assert_eq!(demangle_itanium("main"), None);
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_lld_elf() {
+        lld_suite("lld-elf", "ELF");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_lld_coff() {
+        lld_suite("lld-coff", "COFF");
+    }
 }
