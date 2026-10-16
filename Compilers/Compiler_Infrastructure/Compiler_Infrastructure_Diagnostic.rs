@@ -110,6 +110,11 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI297", "Library grouping options are not balanced."),
     ("EI298", "Two resources share a type, name and language."),
     ("EI299", "The linker reports a detail of the link."),
+    ("EI300", "The x86 instruction tables could not be loaded."),
+    ("EI301", "The instruction could not be encoded."),
+    ("EI302", "The assembly source has an error."),
+    ("EI303", "The assembly source has a warning."),
+    ("EI304", "The assembly source has a note."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {
