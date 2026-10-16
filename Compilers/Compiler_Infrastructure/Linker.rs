@@ -225,6 +225,8 @@ pub struct Options {
     pub z_keywords: Vec<String>,
     pub target_options: BTreeSet<usize>,
     pub target_option_values: Vec<String>,
+    pub secure_input_libraries: Vec<String>,
+    pub secure_output_library: Option<String>,
     pub copy_relocations: bool,
     pub origin: bool,
     pub no_delete: bool,
@@ -413,6 +415,8 @@ impl Default for Options {
             z_keywords: Vec::new(),
             target_options: BTreeSet::new(),
             target_option_values: Vec::new(),
+            secure_input_libraries: Vec::new(),
+            secure_output_library: None,
             copy_relocations: true,
             origin: false,
             no_delete: false,
@@ -1083,6 +1087,11 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
                 "--out-implib"
             };
             record_target_option(&mut options, key);
+            if key == "--in-implib" {
+                options.secure_input_libraries.push(value.clone());
+            } else {
+                options.secure_output_library = Some(value.clone());
+            }
             options.target_option_values.push(value);
             continue;
         }
@@ -2298,7 +2307,27 @@ pub struct ArmFeatures {
     pub has_arm_instruction_set: bool,
     pub has_thumb2_instruction_set: bool,
     pub floating_point_arguments: Option<u64>,
+    pub secure_extension: bool,
 }
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct SecureGatewayVeneer {
+    pub entry: SymbolIndex,
+    pub special: SymbolIndex,
+    pub address: Option<u64>,
+    pub offset: u64,
+}
+
+const SECURE_SPECIAL_PREFIX: &str = "__acle_se_";
+
+const SECURE_GATEWAY_SIZE: u64 = 8;
+
+const ERRATUM_SECTION: &str = ", section ";
+
+const SECURE_ENTRY_MISSING: &str = ", but no associated entry function definition ";
+
+const SECURE_GATEWAY_UNPLACED: &str =
+    "no address assigned to the veneers output section .gnu.sgstubs";
 
 pub type FileIndex = usize;
 pub type SectionIndex = usize;
@@ -2594,6 +2623,7 @@ pub enum Synthetic {
     GnuStack,
     GdbIndex,
     DebugNames,
+    SecureGateway,
 }
 
 #[derive(Clone, Debug, Default)]
@@ -3531,6 +3561,11 @@ pub struct Context<'s> {
     erratum_map: Option<ErratumMap>,
     pub erratum_patches: BTreeSet<SectionIndex>,
     erratum_patch_addresses: BTreeMap<SectionIndex, u64>,
+    secure_import_library: BTreeMap<String, (u64, u64)>,
+    secure_entries: Vec<(SymbolIndex, SymbolIndex)>,
+    secure_veneers: Vec<SecureGatewayVeneer>,
+    secure_new_entries: u64,
+    secure_import_maximum: u64,
     pub traced_symbols: BTreeSet<SymbolIndex>,
     pub extraction_records: Vec<(String, FileIndex, SymbolIndex)>,
     pub pending_dependent_libraries: Vec<(FileIndex, String)>,
@@ -3680,6 +3715,11 @@ impl<'s> Context<'s> {
             erratum_map: None,
             erratum_patches: BTreeSet::new(),
             erratum_patch_addresses: BTreeMap::new(),
+            secure_import_library: BTreeMap::new(),
+            secure_entries: Vec::new(),
+            secure_veneers: Vec::new(),
+            secure_new_entries: 0,
+            secure_import_maximum: 0,
             traced_symbols: BTreeSet::new(),
             extraction_records: Vec::new(),
             pending_dependent_libraries: Vec::new(),
@@ -4383,9 +4423,540 @@ fn is_cortex_a53_sequence(first: u32, second: u32, last: u32) -> bool {
 type ErratumMap = BTreeMap<SectionIndex, (Option<SymbolIndex>, Vec<SymbolIndex>)>;
 
 impl<'s> Context<'s> {
+    fn secure_implib(&self) -> bool {
+        self.target.architecture == Architecture::Arm && self.target_option("--cmse-implib")
+    }
+
+    fn import_secure_symbols(&mut self) {
+        if self.target.architecture != Architecture::Arm {
+            return;
+        }
+        let libraries = self.options.secure_input_libraries.clone();
+        if libraries.len() > 1 {
+            self.error_always(
+                problem("EI204", "An option value is not valid.")
+                    .with_context("Option: --in-implib".to_string())
+                    .with_context(
+                        "Cause: multiple CMSE import libraries not supported".to_string(),
+                    ),
+            );
+        }
+        let Some(path) = libraries.first().cloned() else {
+            return;
+        };
+        let Some(bytes) = (self.source)(&path) else {
+            self.error(file_missing(&path).with_context(format!(
+                "Cause: cannot open {path}: No such file or directory"
+            )));
+            return;
+        };
+        let parsed = match ElfFile::parse(&bytes) {
+            Ok(parsed) => parsed,
+            Err(diagnostic) => {
+                self.error(diagnostic.with_context(format!("File: {path}")));
+                return;
+            }
+        };
+        let Some(table) = parsed.symbol_table() else {
+            return;
+        };
+        let first_global = parsed.sections[table].info as usize;
+        let symbols = match parsed.symbols(table) {
+            Ok(symbols) => symbols,
+            Err(diagnostic) => {
+                self.error(diagnostic.with_context(format!("File: {path}")));
+                return;
+            }
+        };
+        for symbol in symbols.iter().take(first_global).skip(1) {
+            let name = &symbol.name;
+            self.error(
+                problem("EI218", "A symbol has a binding the linker does not know.")
+                    .with_context(format!("Symbol: {name}"))
+                    .with_context(format!(
+                        "Cause: CMSE symbol '{name}' in import library '{path}' is not global"
+                    )),
+            );
+        }
+        for symbol in symbols.iter().skip(first_global.max(1)) {
+            let name = symbol.name.clone();
+            if !symbol.is_absolute() {
+                self.error(
+                    problem("EI219", "A symbol points at a section that does not exist.")
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!(
+                            "Cause: CMSE symbol '{name}' in import library '{path}' is not absolute"
+                        )),
+                );
+                continue;
+            }
+            if symbol.value & 1 == 0 || symbol.kind != symbol_type::FUNCTION {
+                self.error(
+                    problem("EI253", "A branch and link relocation does not switch between ARM and Thumb state.")
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!(
+                            "Cause: CMSE symbol '{name}' in import library '{path}' is not a Thumb function definition"
+                        )),
+                );
+                continue;
+            }
+            if self.secure_import_library.contains_key(&name) {
+                self.error(
+                    problem("EI206", "A symbol is defined more than once.")
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!(
+                            "Cause: CMSE symbol '{name}' is multiply defined in import library '{path}'"
+                        )),
+                );
+                continue;
+            }
+            if symbol.size != SECURE_GATEWAY_SIZE {
+                self.warn(
+                    caution("EI299", "The linker reports a detail of the link.")
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!(
+                            "Cause: CMSE symbol '{name}' in import library '{path}' does not have correct size of {SECURE_GATEWAY_SIZE} bytes"
+                        )),
+                );
+            }
+            self.secure_import_library
+                .insert(name, (symbol.value, symbol.size));
+        }
+    }
+
+    fn secure_symbol_problem(&self, id: SymbolIndex, role: &str) -> Option<String> {
+        let symbol = &self.symbols[id];
+        let file = self.file_name(symbol.file);
+        let name = &symbol.name;
+        if !(symbol.is_defined()
+            && !symbol.is_shared()
+            && symbol.kind == symbol_type::FUNCTION
+            && symbol.value & 1 != 0)
+        {
+            return Some(format!(
+                "{file}: cmse {role} symbol '{name}' is not a Thumb function definition"
+            ));
+        }
+        if symbol.section.is_none() {
+            return Some(format!(
+                "{file}: cmse {role} symbol '{name}' cannot be an absolute symbol"
+            ));
+        }
+        None
+    }
+
+    fn process_secure_symbols(&mut self) {
+        if !self.secure_implib() {
+            return;
+        }
+        for special in self.global_symbols() {
+            let name = self.symbols[special].name.clone();
+            let Some(entry_name) = name.strip_prefix(SECURE_SPECIAL_PREFIX) else {
+                continue;
+            };
+            if !self.arm_features.secure_extension {
+                self.error(
+                    problem("EI271", "An option is only supported on other targets.")
+                        .with_context("Option: --cmse-implib".to_string())
+                        .with_context(
+                            "Cause: CMSE is only supported by ARMv8-M architecture or later"
+                                .to_string(),
+                        ),
+                );
+                break;
+            }
+            let Some(entry) = self.find(entry_name) else {
+                let file = self.file_name(self.symbols[special].file);
+                self.error(
+                    problem("EI207", "A symbol is referenced but never defined.")
+                        .with_context(format!("Symbol: {entry_name}"))
+                        .with_context(format!(
+                            "Cause: {file}: cmse special symbol '{name}' detected{SECURE_ENTRY_MISSING}'{entry_name}' with external linkage found"
+                        )),
+                );
+                continue;
+            };
+            let found = self
+                .secure_symbol_problem(special, "special")
+                .or_else(|| self.secure_symbol_problem(entry, "entry"));
+            if let Some(cause) = found {
+                let culprit = if cause.contains(" special symbol ") {
+                    name.clone()
+                } else {
+                    entry_name.to_string()
+                };
+                let code = if cause.ends_with("cannot be an absolute symbol") {
+                    problem("EI219", "A symbol points at a section that does not exist.")
+                } else {
+                    problem(
+                        "EI253",
+                        "A branch and link relocation does not switch between ARM and Thumb state.",
+                    )
+                };
+                self.error(
+                    code.with_context(format!("Symbol: {culprit}"))
+                        .with_context(format!("Cause: {cause}")),
+                );
+                continue;
+            }
+            match self
+                .secure_entries
+                .iter()
+                .position(|(_, known)| self.symbols[*known].name == entry_name)
+            {
+                Some(position) => self.secure_entries[position] = (special, entry),
+                None => self.secure_entries.push((special, entry)),
+            }
+        }
+        if self.secure_entries.is_empty() {
+            return;
+        }
+        let replacements: BTreeMap<String, SymbolIndex> = self
+            .secure_entries
+            .iter()
+            .map(|(special, entry)| (self.symbols[*entry].name.clone(), *special))
+            .collect();
+        for file in self.object_files.clone() {
+            for position in 0..self.files[file].symbols.len() {
+                let id = self.files[file].symbols[position];
+                if id == usize::MAX {
+                    continue;
+                }
+                if let Some(special) = replacements.get(&self.symbols[id].name) {
+                    self.files[file].symbols[position] = *special;
+                }
+            }
+        }
+    }
+
+    fn create_secure_gateway_section(&mut self) {
+        let index = self.add_synthetic(
+            ".gnu.sgstubs",
+            section_type::PROGRAM_BITS,
+            section_flag::ALLOCATE | section_flag::EXECUTE,
+            32,
+            Synthetic::SecureGateway,
+        );
+        self.sections[index].entry_size = SECURE_GATEWAY_SIZE;
+        for (value, size) in self.secure_import_library.values() {
+            if self.secure_import_maximum <= *value {
+                self.secure_import_maximum = value + size;
+            }
+        }
+        self.add_synthetic_local("$t", symbol_type::NO_TYPE, 0, 0, index);
+        let mut present: BTreeSet<String> = BTreeSet::new();
+        for (special, entry) in self.secure_entries.clone() {
+            let name = self.symbols[entry].name.clone();
+            let imported = self.secure_import_library.get(&name).copied();
+            if imported.is_some() {
+                present.insert(name);
+            }
+            if self.symbols[special].file != self.symbols[entry].file
+                || self.symbols[special].value != self.symbols[entry].value
+            {
+                continue;
+            }
+            if imported.is_none() {
+                self.secure_new_entries += 1;
+            }
+            self.secure_veneers.push(SecureGatewayVeneer {
+                entry,
+                special,
+                address: imported.map(|(value, _)| value),
+                offset: 0,
+            });
+        }
+        for name in self
+            .secure_import_library
+            .keys()
+            .cloned()
+            .collect::<Vec<_>>()
+        {
+            if !present.contains(&name) {
+                self.warn(
+                    caution("EI299", "The linker reports a detail of the link.")
+                        .with_context(format!("Symbol: {name}"))
+                        .with_context(format!(
+                            "Cause: entry function '{name}' from CMSE import library is not present in secure application"
+                        )),
+                );
+            }
+        }
+        if !self.secure_import_library.is_empty() && self.options.secure_output_library.is_none() {
+            for (_, entry) in self.secure_entries.clone() {
+                let name = self.symbols[entry].name.clone();
+                if !present.contains(&name) {
+                    self.warn(
+                        caution("EI299", "The linker reports a detail of the link.")
+                            .with_context(format!("Symbol: {name}"))
+                            .with_context(format!(
+                                "Cause: new entry function '{name}' introduced but no output import library specified"
+                            )),
+                    );
+                }
+            }
+        }
+    }
+
+    fn diagnose_secure_gateway_address(&mut self) {
+        if !self.secure_implib() || self.secure_entries.is_empty() {
+            return;
+        }
+        let Some(output) = (0..self.outputs.len()).find(|output| {
+            self.outputs[*output].name == ".gnu.sgstubs" && self.order.contains(output)
+        }) else {
+            return;
+        };
+        if self.outputs[output].script.address.is_none()
+            && !self.options.section_start.contains_key(".gnu.sgstubs")
+        {
+            self.error_always(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context("Section: .gnu.sgstubs".to_string())
+                .with_context(format!("Cause: {SECURE_GATEWAY_UNPLACED}")),
+            );
+        }
+    }
+
+    fn finalize_secure_gateways(&mut self) {
+        if self.secure_veneers.is_empty() {
+            return;
+        }
+        let Some(section) = self.synthetic_section(".gnu.sgstubs") else {
+            return;
+        };
+        let mut veneers = std::mem::take(&mut self.secure_veneers);
+        let mut known: Vec<SecureGatewayVeneer> = veneers
+            .iter()
+            .copied()
+            .filter(|veneer| veneer.address.is_some())
+            .collect();
+        known.sort_by_key(|veneer| veneer.address);
+        known.extend(
+            veneers
+                .iter()
+                .copied()
+                .filter(|veneer| veneer.address.is_none()),
+        );
+        veneers = known;
+        let base = self.section_address(section, 0);
+        let first = veneers[0].address.unwrap_or(base);
+        if base & !1 != first & !1 {
+            self.secure_veneers = veneers;
+            self.error(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context("Section: .gnu.sgstubs".to_string())
+                .with_context(
+                    "Cause: start address of '.gnu.sgstubs' is different from previous link"
+                        .to_string(),
+                ),
+            );
+            return;
+        }
+        for (position, veneer) in veneers.iter_mut().enumerate() {
+            veneer.offset = position as u64 * SECURE_GATEWAY_SIZE;
+            let symbol = &mut self.symbols[veneer.entry];
+            symbol.file = Some(INTERNAL);
+            symbol.state = SymbolState::Defined;
+            symbol.section = Some(section);
+            symbol.output_section_symbol = None;
+            symbol.value = veneer.offset | 1;
+            symbol.size = SECURE_GATEWAY_SIZE;
+        }
+        self.secure_veneers = veneers;
+    }
+
+    fn write_secure_gateways(&mut self, section: SectionIndex, out: &mut [u8]) {
+        let base = self.section_address(section, 0);
+        for veneer in self.secure_veneers.clone() {
+            let at = veneer.offset as usize;
+            if out.len() < at + SECURE_GATEWAY_SIZE as usize {
+                continue;
+            }
+            let encoding = self.encoding();
+            for (position, half) in [0xe97fu16, 0xe97f, 0xf000, 0xb000].iter().enumerate() {
+                encoding.write_u16(out, at + position * 2, *half);
+            }
+            let destination = self.symbol_address(veneer.special, 0);
+            let value = destination.wrapping_sub(base + veneer.offset + SECURE_GATEWAY_SIZE);
+            self.encode_no_symbol(out, at + 4, 30, value);
+        }
+    }
+
+    fn write_secure_import_library(&mut self) {
+        let Some(path) = self.options.secure_output_library.clone() else {
+            return;
+        };
+        if !self.secure_implib() {
+            return;
+        }
+        let encoding = self.encoding();
+        let mut entries: Vec<SymbolIndex> = self
+            .secure_entries
+            .iter()
+            .map(|(_, entry)| *entry)
+            .collect();
+        entries.sort_by_key(|entry| self.symbol_address(*entry, 0));
+        let mut strings = vec![0u8];
+        let mut symbols = vec![0u8; 16];
+        for entry in entries {
+            let name_offset = strings.len() as u32;
+            strings.extend_from_slice(self.symbols[entry].name.as_bytes());
+            strings.push(0);
+            let binding = self.compute_binding(entry);
+            encoding.put_u32(&mut symbols, name_offset);
+            encoding.put_u32(&mut symbols, self.symbol_address(entry, 0) as u32);
+            encoding.put_u32(&mut symbols, self.symbols[entry].size as u32);
+            symbols.push((binding << 4) | symbol_type::FUNCTION);
+            symbols.push(0);
+            encoding.put_u16(&mut symbols, section_index::ABSOLUTE as u16);
+        }
+        let names: &[u8] = b"\0.strtab\0.symtab\0.shstrtab\0";
+        let header_size = 52u64;
+        let string_offset = header_size;
+        let symbol_offset = align_to(string_offset + strings.len() as u64, 4);
+        let names_offset = symbol_offset + symbols.len() as u64;
+        let section_headers = align_to(names_offset + names.len() as u64, 4);
+        let mut out = Vec::new();
+        out.extend_from_slice(b"\x7fELF");
+        out.push(1);
+        out.push(if encoding.endian == Endian::Little {
+            1
+        } else {
+            2
+        });
+        out.push(1);
+        out.push(self.operating_system_abi());
+        out.extend_from_slice(&[0; 8]);
+        encoding.put_u16(&mut out, 1);
+        encoding.put_u16(&mut out, 40);
+        encoding.put_u32(&mut out, 1);
+        encoding.put_u32(&mut out, 0);
+        encoding.put_u32(&mut out, 0);
+        encoding.put_u32(&mut out, section_headers as u32);
+        encoding.put_u32(&mut out, self.header_flags());
+        encoding.put_u16(&mut out, header_size as u16);
+        encoding.put_u16(&mut out, 0);
+        encoding.put_u16(&mut out, 0);
+        encoding.put_u16(&mut out, 40);
+        encoding.put_u16(&mut out, 4);
+        encoding.put_u16(&mut out, 3);
+        out.extend_from_slice(&strings);
+        out.resize(symbol_offset as usize, 0);
+        out.extend_from_slice(&symbols);
+        out.extend_from_slice(names);
+        out.resize(section_headers as usize, 0);
+        out.extend_from_slice(&[0; 40]);
+        let headers = [
+            (
+                1u32,
+                section_type::STRING_TABLE,
+                string_offset,
+                strings.len() as u64,
+                0u32,
+                0u32,
+                1u32,
+                0u32,
+            ),
+            (
+                9,
+                section_type::SYMBOL_TABLE,
+                symbol_offset,
+                symbols.len() as u64,
+                1,
+                1,
+                4,
+                16,
+            ),
+            (
+                17,
+                section_type::STRING_TABLE,
+                names_offset,
+                names.len() as u64,
+                0,
+                0,
+                1,
+                0,
+            ),
+        ];
+        for (name, kind, offset, size, link, info, alignment, entry_size) in headers {
+            encoding.put_u32(&mut out, name);
+            encoding.put_u32(&mut out, kind);
+            encoding.put_u32(&mut out, 0);
+            encoding.put_u32(&mut out, 0);
+            encoding.put_u32(&mut out, offset as u32);
+            encoding.put_u32(&mut out, size as u32);
+            encoding.put_u32(&mut out, link);
+            encoding.put_u32(&mut out, info);
+            encoding.put_u32(&mut out, alignment);
+            encoding.put_u32(&mut out, entry_size);
+        }
+        self.extra_outputs.push((path, out));
+    }
+}
+
+fn is_thumb_wide_instruction(half: u32) -> bool {
+    half & 0xe000 == 0xe000 && half & 0x1800 != 0
+}
+
+fn is_thumb_conditional_branch(instruction: u32) -> bool {
+    instruction & 0xf800_d000 == 0xf000_8000 && instruction & 0x0380_0000 != 0x0380_0000
+}
+
+fn is_thumb_wide_unconditional_branch(instruction: u32) -> bool {
+    instruction & 0xf800_d000 == 0xf000_9000
+}
+
+fn is_thumb_branch_link_exchange(instruction: u32) -> bool {
+    instruction & 0xf800_d000 == 0xf000_c000
+}
+
+fn is_thumb_branch_link(instruction: u32) -> bool {
+    instruction & 0xf800_d000 == 0xf000_d000
+}
+
+fn is_thumb_wide_branch(instruction: u32) -> bool {
+    is_thumb_conditional_branch(instruction)
+        || is_thumb_wide_unconditional_branch(instruction)
+        || is_thumb_branch_link(instruction)
+        || is_thumb_branch_link_exchange(instruction)
+}
+
+fn thumb_branch_relocation_kind(instruction: u32) -> u32 {
+    if is_thumb_conditional_branch(instruction) {
+        51
+    } else if is_thumb_wide_unconditional_branch(instruction) {
+        30
+    } else {
+        10
+    }
+}
+
+impl<'s> Context<'s> {
     fn erratum_mapping_symbols(&self) -> ErratumMap {
+        if self.target.architecture == Architecture::Arm {
+            let code = |name: &str| name == "$t" || name.starts_with("$t.");
+            let other = |name: &str| {
+                name == "$a" || name.starts_with("$a.") || name == "$d" || name.starts_with("$d.")
+            };
+            return self.erratum_mapping_symbols_with(&code, &other);
+        }
         let code = |name: &str| name == "$x" || name.starts_with("$x.");
         let data = |name: &str| name == "$d" || name.starts_with("$d.");
+        self.erratum_mapping_symbols_with(&code, &data)
+    }
+
+    fn erratum_mapping_symbols_with(
+        &self,
+        code: &dyn Fn(&str) -> bool,
+        data: &dyn Fn(&str) -> bool,
+    ) -> ErratumMap {
         let mut map: ErratumMap = BTreeMap::new();
         for file in &self.object_files {
             let count = self.files[*file]
@@ -4622,9 +5193,9 @@ impl<'s> Context<'s> {
         output: OutputIndex,
         range: (usize, usize),
         patches: &[SectionIndex],
+        spacing: u64,
     ) {
         let members: Vec<SectionIndex> = self.outputs[output].members[range.0..range.1].to_vec();
-        let spacing = self.thunk_spacing();
         let address = self.outputs[output].address;
         let mut previous_limit = self.sections[members[0]].offset_in_output;
         let mut upper_bound = previous_limit + spacing;
@@ -4716,7 +5287,288 @@ impl<'s> Context<'s> {
                     start = end;
                     continue;
                 }
-                self.insert_cortex_a53_patches(output, (start, end), &patches);
+                let spacing = self.thunk_spacing();
+                self.insert_cortex_a53_patches(output, (start, end), &patches, spacing);
+                changed = true;
+                start = end + patches.len();
+            }
+        }
+        self.erratum_map = Some(map);
+        changed
+    }
+
+    fn thumb_branch_destination(&self, source: u64, instruction: u32) -> u64 {
+        let encoding = self.encoding();
+        let mut bytes = [0u8; 4];
+        encoding.write_u16(&mut bytes, 0, (instruction >> 16) as u16);
+        encoding.write_u16(&mut bytes, 2, instruction as u16);
+        let offset = arm_implicit_addend(
+            thumb_branch_relocation_kind(instruction),
+            &bytes,
+            0,
+            encoding,
+            self.arm_features.j1_j2_branch_encoding,
+        );
+        let source = if is_thumb_branch_link_exchange(instruction) {
+            source & !3
+        } else {
+            source
+        };
+        source.wrapping_add(offset as u64).wrapping_add(4)
+    }
+
+    fn relocation_destination(&self, relocation: &Relocation) -> u64 {
+        if relocation.expression == Expression::PltProgramCounter {
+            self.plt_address(relocation.symbol)
+        } else {
+            self.symbol_address(relocation.symbol, 0)
+        }
+    }
+
+    fn scan_cortex_a8(
+        &mut self,
+        section: SectionIndex,
+        offset: &mut u64,
+        limit: u64,
+    ) -> Option<(u64, u32, Option<usize>)> {
+        let base = self.section_address(section, 0);
+        let aligned = (base
+            .wrapping_add(*offset)
+            .wrapping_sub(0xffa)
+            .wrapping_add(0xfff)
+            & !0xfff)
+            .wrapping_add(0xffa);
+        *offset = aligned.wrapping_sub(base);
+        if *offset >= limit || limit - *offset < 8 {
+            *offset = limit;
+            return None;
+        }
+        let encoding = self.encoding();
+        let data = &self.sections[section].data;
+        let half = |at: u64| u32::from(encoding.read_u16(data, at as usize).unwrap_or(0));
+        let (first_high, first_low) = (half(*offset), half(*offset + 2));
+        let (second_high, second_low) = (half(*offset + 4), half(*offset + 6));
+        let mut result = None;
+        if is_thumb_wide_instruction(first_high) && is_thumb_wide_instruction(second_high) {
+            let first = (first_high << 16) | first_low;
+            let second = (second_high << 16) | second_low;
+            if !is_thumb_wide_branch(first) && is_thumb_wide_branch(second) {
+                let branch = *offset + 4;
+                let found = self.sections[section]
+                    .relocations
+                    .iter()
+                    .position(|relocation| {
+                        relocation.offset == branch && matches!(relocation.kind, 51 | 30 | 10)
+                    });
+                let source = base.wrapping_add(branch);
+                let destination = match found {
+                    Some(position) => self
+                        .relocation_destination(&self.sections[section].relocations[position])
+                        .wrapping_add(self.sections[section].relocations[position].addend as u64)
+                        .wrapping_add(4),
+                    None => self.thumb_branch_destination(source, second),
+                };
+                if destination & 0xffff_f000 == source & 0xffff_f000 {
+                    let kind = if is_thumb_conditional_branch(second) {
+                        51
+                    } else {
+                        30
+                    };
+                    let end = base + self.sections[section].size + 0x100;
+                    if self.in_branch_range(kind, source, end) {
+                        result = Some((branch, second, found));
+                    } else {
+                        let file = self.file_name(self.sections[section].file);
+                        let name = self.sections[section].name.clone();
+                        self.warn(
+                            caution("EI238", "This branch cannot reach its target on the architecture the inputs describe.")
+                                .with_context(format!("Section: {name}"))
+                                .with_context(format!(
+                                    "Cause: {file}: skipping cortex-a8 657417 erratum sequence{ERRATUM_SECTION}{name} is too large to patch"
+                                )),
+                        );
+                    }
+                }
+            }
+        }
+        *offset += 0x1000;
+        result
+    }
+
+    fn implement_cortex_a8_patch(
+        &mut self,
+        section: SectionIndex,
+        patchee_offset: u64,
+        instruction: u32,
+        found: Option<usize>,
+        patches: &mut Vec<SectionIndex>,
+    ) {
+        let start = self.section_address(section, patchee_offset);
+        self.log(format!(
+            "detected cortex-a8-657419 erratum sequence starting at {start:X} in unpatched output"
+        ));
+        let original = found.map(|position| self.sections[section].relocations[position].clone());
+        let is_arm = match &original {
+            Some(relocation) => {
+                (is_thumb_branch_link(instruction) || is_thumb_branch_link_exchange(instruction))
+                    && self.relocation_destination(relocation) & 1 == 0
+            }
+            None => is_thumb_branch_link_exchange(instruction),
+        };
+        let mut patch = InputSection::synthetic(
+            ".text.patch",
+            section_type::PROGRAM_BITS,
+            section_flag::ALLOCATE | section_flag::EXECUTE,
+            4,
+            Synthetic::Thunks,
+        );
+        patch.synthetic = None;
+        let mut bytes = [0u8; 4];
+        self.encoding().write_u32(
+            &mut bytes,
+            0,
+            if is_arm { 0xea00_0000 } else { 0x9000_f000 },
+        );
+        patch.data = bytes.to_vec();
+        patch.size = 4;
+        patch.output = self.sections[section].output;
+        patch.live = true;
+        patch.description = self.sections[section].description;
+        let index = self.sections.len();
+        self.sections.push(patch);
+        self.erratum_patches.insert(index);
+        self.erratum_patch_addresses.insert(index, start);
+        let target = self.add_synthetic_local(
+            &format!("__CortexA8657417_{start:X}"),
+            symbol_type::FUNCTION,
+            u64::from(!is_arm),
+            4,
+            index,
+        );
+        self.add_synthetic_local(
+            if is_arm { "$a" } else { "$t" },
+            symbol_type::NO_TYPE,
+            0,
+            0,
+            index,
+        );
+        match (found, original) {
+            (Some(position), Some(relocation)) => {
+                self.sections[index].relocations.push(Relocation {
+                    expression: relocation.expression,
+                    kind: if is_arm { 29 } else { 30 },
+                    offset: 0,
+                    addend: relocation.addend - if is_arm { 4 } else { 0 },
+                    symbol: relocation.symbol,
+                });
+                let moved = &mut self.sections[section].relocations[position];
+                moved.expression = Expression::ProgramCounter;
+                moved.addend = -4;
+                moved.symbol = target;
+            }
+            _ => {
+                let destination = self.thumb_branch_destination(start, instruction);
+                let mut anchor = SymbolData::new("");
+                anchor.state = SymbolState::Defined;
+                anchor.is_local = true;
+                anchor.binding = symbol_binding::LOCAL;
+                anchor.kind = symbol_type::SECTION;
+                anchor.file = Some(INTERNAL);
+                anchor.section = Some(section);
+                let anchor_index = self.symbols.len();
+                self.symbols.push(anchor);
+                let bias = if is_thumb_branch_link_exchange(instruction) {
+                    8
+                } else {
+                    4
+                };
+                let base = self.section_address(section, 0);
+                self.sections[index].relocations.push(Relocation {
+                    expression: Expression::ProgramCounter,
+                    kind: if is_arm { 29 } else { 30 },
+                    offset: 0,
+                    addend: destination.wrapping_sub(base).wrapping_sub(bias) as i64,
+                    symbol: anchor_index,
+                });
+                self.sections[section].relocations.push(Relocation {
+                    expression: Expression::ProgramCounter,
+                    kind: thumb_branch_relocation_kind(instruction),
+                    offset: patchee_offset,
+                    addend: -4,
+                    symbol: target,
+                });
+            }
+        }
+        patches.push(index);
+    }
+
+    fn patch_cortex_a8_description(
+        &mut self,
+        members: &[SectionIndex],
+        map: &ErratumMap,
+    ) -> Vec<SectionIndex> {
+        let mut patches = Vec::new();
+        for member in members.iter().copied() {
+            if self.sections[member].synthetic.is_some() || self.erratum_patches.contains(&member) {
+                continue;
+            }
+            let mapping = map
+                .get(&member)
+                .map(|entry| entry.1.clone())
+                .unwrap_or_default();
+            let mut position = 0usize;
+            while position < mapping.len() {
+                let mut offset = self.symbols[mapping[position]].value;
+                let limit = match mapping.get(position + 1) {
+                    Some(other) => self.symbols[*other].value,
+                    None => self.sections[member].data.len() as u64,
+                };
+                while offset < limit {
+                    if let Some((patchee, instruction, found)) =
+                        self.scan_cortex_a8(member, &mut offset, limit)
+                    {
+                        self.implement_cortex_a8_patch(
+                            member,
+                            patchee,
+                            instruction,
+                            found,
+                            &mut patches,
+                        );
+                    }
+                }
+                position += 2;
+            }
+        }
+        patches
+    }
+
+    pub fn create_cortex_a8_fixes(&mut self) -> bool {
+        let map = match self.erratum_map.take() {
+            Some(map) => map,
+            None => self.erratum_mapping_symbols(),
+        };
+        let mut changed = false;
+        for output in self.order.clone() {
+            let flags = self.outputs[output].flags;
+            if flags & section_flag::ALLOCATE == 0 || flags & section_flag::EXECUTE == 0 {
+                continue;
+            }
+            let mut start = 0usize;
+            while start < self.outputs[output].members.len() {
+                let description = self.sections[self.outputs[output].members[start]].description;
+                let mut end = start + 1;
+                while end < self.outputs[output].members.len()
+                    && self.sections[self.outputs[output].members[end]].description == description
+                {
+                    end += 1;
+                }
+                let members = self.outputs[output].members[start..end].to_vec();
+                let patches = self.patch_cortex_a8_description(&members, &map);
+                if patches.is_empty() {
+                    start = end;
+                    continue;
+                }
+                self.insert_cortex_a53_patches(output, (start, end), &patches, 0x100000 - 0x7500);
                 changed = true;
                 start = end + patches.len();
             }
@@ -8819,6 +9671,9 @@ impl<'s> Context<'s> {
             return;
         }
         if let Some(architecture) = attributes.get(&6).copied() {
+            if architecture >= 16 && attributes.get(&7) == Some(&0x4d) {
+                self.arm_features.secure_extension = true;
+            }
             match architecture {
                 0..=2 => {}
                 3..=7 | 9 => self.arm_features.has_exchange = true,
@@ -9742,6 +10597,9 @@ impl<'s> Context<'s> {
             1,
             Synthetic::BssRelocationReadOnly,
         );
+        if !self.secure_entries.is_empty() {
+            self.create_secure_gateway_section();
+        }
         if self.indirect_branch_plt() {
             let index = self.add_synthetic(
                 ".plt",
@@ -10222,6 +11080,7 @@ impl<'s> Context<'s> {
                 .exception_index_inputs
                 .iter()
                 .any(|section| self.sections[*section].live),
+            Synthetic::SecureGateway => !self.secure_entries.is_empty(),
             _ => true,
         }
     }
@@ -14910,6 +15769,10 @@ impl<'s> Context<'s> {
                 self.mark_symbol_live(id, "externally visible symbol", &mut queue);
             }
         }
+        for (special, entry) in self.secure_entries.clone() {
+            self.mark_symbol_live(entry, "ARM CMSE symbol", &mut queue);
+            self.mark_symbol_live(special, "ARM CMSE symbol", &mut queue);
+        }
         let mut roots: Vec<(String, &'static str)> = vec![(self.entry_name.clone(), "entry point")];
         roots.push((
             self.options
@@ -18210,6 +19073,19 @@ impl<'s> Context<'s> {
             if let Some(section) = self.synthetic_section(name) {
                 self.sections[section].size = size;
             }
+        }
+        if let Some(section) = self.synthetic_section(".gnu.sgstubs") {
+            self.sections[section].size = if self.secure_veneers.is_empty() {
+                let base = if self.secure_import_maximum != 0 {
+                    self.secure_import_maximum
+                        .wrapping_sub(self.section_address(section, 0))
+                } else {
+                    0
+                };
+                base + self.secure_new_entries * SECURE_GATEWAY_SIZE
+            } else {
+                self.secure_entries.len() as u64 * SECURE_GATEWAY_SIZE
+            };
         }
     }
 
@@ -21715,6 +22591,7 @@ impl<'s> Context<'s> {
             Synthetic::Plt => self.write_plt(&mut buffer),
             Synthetic::IndirectPlt => self.write_indirect_plt(&mut buffer),
             Synthetic::Thunks => self.write_thunks(section, &mut buffer),
+            Synthetic::SecureGateway => self.write_secure_gateways(section, &mut buffer),
             Synthetic::ExceptionFrame => self.write_exception_frame(&mut buffer),
             Synthetic::ArmExceptionIndex => self.write_exception_index(section, &mut buffer),
             Synthetic::ExceptionFrameHeader => self.write_frame_header(&mut buffer),
@@ -22305,12 +23182,35 @@ impl<'s> Context<'s> {
                         .with_context(format!("Option: {key}"))
                         .with_context(format!("Cause: {message}")),
                 );
+            } else if (key == "--in-implib" || key == "--out-implib")
+                && !self.target_option("--cmse-implib")
+            {
+                self.error_always(
+                    problem("EI204", "An option value is not valid.")
+                        .with_context(format!("Option: {key}"))
+                        .with_context(format!(
+                            "Cause: {key} may not be used without --cmse-implib"
+                        )),
+                );
+            } else if key == "--fix-cortex-a8" && self.encoding().endian == Endian::Big {
+                self.error_always(
+                    problem("EI271", "An option is only supported on other targets.")
+                        .with_context(format!("Option: {key}"))
+                        .with_context(
+                            "Cause: --fix-cortex-a8 is not supported on big endian targets"
+                                .to_string(),
+                        ),
+                );
             } else if !matches!(
                 key,
                 "--be8"
+                    | "--cmse-implib"
+                    | "--in-implib"
+                    | "--out-implib"
                     | "--execute-only"
                     | "-z execute-only-report"
                     | "--fix-cortex-a53-843419"
+                    | "--fix-cortex-a8"
                     | "-z pac-plt"
                     | "-z force-bti"
                     | "-z bti-report"
@@ -22613,6 +23513,7 @@ impl<'s> Context<'s> {
         if self.failed() {
             return None;
         }
+        self.import_secure_symbols();
         self.apply_retpoline_sizes();
         if let Some(rela) = self.options.explicit_addends {
             self.target.uses_addends = rela;
@@ -22708,6 +23609,7 @@ impl<'s> Context<'s> {
         for diagnostic in std::mem::take(&mut self.deferred_duplicates) {
             self.error(diagnostic);
         }
+        self.process_secure_symbols();
         self.redirect_wrapped_symbols(&wrapped);
         self.write_archive_statistics();
         self.write_extraction_reasons();
@@ -22905,6 +23807,7 @@ impl<'s> Context<'s> {
         self.build_symbol_tables();
         self.remove_unused_synthetic_sections();
         self.diagnose_orphan_handling();
+        self.diagnose_secure_gateway_address();
         if relocatable {
             self.adjust_script_output_sections();
             self.rebuild_order_from_script();
@@ -22994,6 +23897,15 @@ impl<'s> Context<'s> {
                 }
                 changed |= self.create_cortex_a53_fixes();
             }
+            if self.target_option("--fix-cortex-a8")
+                && self.target.architecture == Architecture::Arm
+                && !relocatable
+            {
+                if changed {
+                    self.layout_addresses();
+                }
+                changed |= self.create_cortex_a8_fixes();
+            }
             self.finalize_synthetic_sizes();
             changed |= self.update_frame_header();
             changed |= self.update_indirect_relocation_bounds();
@@ -23041,6 +23953,7 @@ impl<'s> Context<'s> {
                 break;
             }
         }
+        self.finalize_secure_gateways();
         self.finalize_symbol_table();
         self.finalize_synthetic_sizes();
         self.finalize_copied_sections();
@@ -24049,6 +24962,9 @@ fn link_elf_rooted(
     context.messages = messages;
     context.identity = identity.to_string();
     let bytes = context.run();
+    if bytes.is_some() && !context.failed() {
+        context.write_secure_import_library();
+    }
     let output = if context.options.output.is_empty() {
         "a.out".to_string()
     } else {

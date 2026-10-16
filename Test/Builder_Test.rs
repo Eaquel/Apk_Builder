@@ -68822,7 +68822,10 @@ mod linker_lit {
                 .min();
             match next {
                 Some((at, _)) => {
-                    let boundary = at == 0 || {
+                    let glued = ["-I", "-L", "-o"]
+                        .iter()
+                        .any(|flag| rest[..at].ends_with(flag));
+                    let boundary = at == 0 || glued || {
                         let previous = rest.as_bytes()[at - 1];
                         !previous.is_ascii_alphanumeric() && previous != b'/' && previous != b'.'
                     };
@@ -69682,7 +69685,9 @@ mod linker_lit {
             }) {
                 let word = word.trim_matches(|character| character == '"' || character == '\'');
                 for prefix in ["%p/", "%S/"] {
-                    let Some(relative) = word.find(prefix).map(|at| &word[at + prefix.len()..])
+                    let Some(relative) = word
+                        .find(prefix)
+                        .map(|at| word[at + prefix.len()..].trim_end_matches('/'))
                     else {
                         continue;
                     };
