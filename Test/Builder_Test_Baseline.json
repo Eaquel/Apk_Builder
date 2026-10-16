@@ -36,6 +36,12 @@
       "passed": 1375,
       "total": 2056
     },
+    "mc-x86": {
+      "failed": 3,
+      "out_of_scope": 129,
+      "passed": 510,
+      "total": 642
+    },
     "regex-oracle": {
       "failed": 0,
       "out_of_scope": 2,

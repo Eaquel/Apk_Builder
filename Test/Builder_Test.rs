@@ -61698,6 +61698,7 @@ mod reference {
         pub(super) environment: BTreeMap<String, String>,
         pub(super) tools: &'t BTreeMap<String, ToolFunction>,
         pub(super) missing_tool: Option<String>,
+        pub(super) errors_before_output: bool,
     }
 
     impl<'t> World<'t> {
@@ -61856,11 +61857,20 @@ mod reference {
             if let Some(saved) = saved_environment {
                 world.environment = saved;
             }
+            let errors_first = std::mem::take(&mut world.errors_before_output);
+            let joined = |first: Vec<u8>, second: Vec<u8>| {
+                let (mut leading, trailing) = if errors_first {
+                    (second, first)
+                } else {
+                    (first, second)
+                };
+                leading.extend_from_slice(&trailing);
+                leading
+            };
             let mut out = outcome.stdout;
             let mut err = outcome.stderr;
             if stderr_to_stdout {
-                out.extend_from_slice(&err);
-                err = Vec::new();
+                out = joined(out, std::mem::take(&mut err));
             }
             let mut piped_error = Vec::new();
             if stderr_to_pipe {
@@ -61875,8 +61885,7 @@ mod reference {
                 }
                 None => {
                     if position + 1 < count {
-                        out.extend_from_slice(&piped_error);
-                        input = out;
+                        input = joined(out, piped_error);
                     }
                 }
             }
@@ -62247,6 +62256,7 @@ mod reference {
                 environment: BTreeMap::new(),
                 tools: &self.tools,
                 missing_tool: None,
+                errors_before_output: false,
             };
             world.folders.insert(format!("/output{folder}/Output"));
             let mut failure: Option<String> = None;
@@ -63389,6 +63399,7 @@ mod reference_checks {
             environment: BTreeMap::new(),
             tools: &tools,
             missing_tool: None,
+            errors_before_output: false,
         };
         let run = |world: &mut World, line: &str| -> i32 {
             let script = shell_parse(line).unwrap();
@@ -66658,6 +66669,7 @@ block0:
             include_str!("../Compilers/Compiler_Infrastructure/TableGen.rs"),
             include_str!("../Compilers/Compiler_Infrastructure/Elf.rs"),
             include_str!("../Compilers/Compiler_Infrastructure/Linker.rs"),
+            include_str!("../Compilers/Compiler_Infrastructure/X86_64.rs"),
         ]
         .concat();
         let mut raised = BTreeSet::new();
@@ -69786,7 +69798,7 @@ mod linker_lit {
     use std::path::{Path, PathBuf};
     use std::process::{Command, Stdio};
 
-    const HOST_TOOLS: &[&str] = &[
+    pub(super) const HOST_TOOLS: &[&str] = &[
         "llvm-mc",
         "yaml2obj",
         "obj2yaml",
@@ -70054,7 +70066,7 @@ mod linker_lit {
         }
     }
 
-    fn tool_host(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+    pub(super) fn tool_host(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
         let root = host_root();
         let root_text = root.to_string_lossy().to_string();
         for folder in world.folders.clone() {
@@ -70938,10 +70950,16 @@ mod linker_lit {
 }
 
 mod x86_assembly {
-    use crate::compilers::x86_64::{
-        target, Encoder, MachineInstruction, MachineOperand, Mode, PrintOptions, Printer, Syntax,
-        Target, NO_REGISTER,
+    use super::reference::{
+        catalogue, lit_tests, run_parallel, standard_tools, LitSuite, SuiteReport, ToolFunction,
+        ToolOutcome, Tree, Verdict, World,
     };
+    use crate::compilers::x86_64::{
+        assemble_source, parse_integer_text, render_messages, target, AssemblerOptions, Encoder,
+        MachineInstruction, MachineOperand, Mode, ObjectFormat, OutputKind, PrintOptions, Printer,
+        Syntax, Target, TargetTriple, NO_REGISTER,
+    };
+    use std::collections::BTreeMap;
     use std::io::Write;
     use std::process::{Command, Stdio};
 
@@ -71383,6 +71401,461 @@ mod x86_assembly {
         }
         eprintln!("agreed {agreed} of {total}");
     }
+
+    struct McArguments {
+        options: AssemblerOptions,
+        input: Option<String>,
+        output: Option<String>,
+        disassemble: bool,
+        unsupported: Option<String>,
+    }
+
+    fn parse_mc_arguments(arguments: &[String]) -> McArguments {
+        let mut options = AssemblerOptions::new("x86_64-unknown-linux-gnu");
+        let mut triple: Option<String> = None;
+        let mut architecture: Option<String> = None;
+        let mut input: Option<String> = None;
+        let mut output: Option<String> = None;
+        let mut disassemble = false;
+        let mut unsupported: Option<String> = None;
+        let mut position = 1;
+        let value_options = [
+            "triple",
+            "arch",
+            "o",
+            "mcpu",
+            "mattr",
+            "filetype",
+            "x86-asm-syntax",
+            "output-asm-variant",
+            "defsym",
+            "I",
+            "x86-align-branch-boundary",
+            "x86-align-branch",
+            "x86-pad-max-prefix-size",
+            "x86-pad-for-align",
+            "comment-column",
+            "main-file-name",
+            "fdebug-compilation-dir",
+            "debug-only",
+            "dwarf-version",
+            "M",
+            "x86-branches-within-32B-boundaries",
+        ];
+        while position < arguments.len() {
+            let argument = arguments[position].clone();
+            position += 1;
+            if !argument.starts_with('-') || argument == "-" {
+                input = Some(argument);
+                continue;
+            }
+            let trimmed = argument.trim_start_matches('-').to_string();
+            let (name, inline_value) = match trimmed.split_once('=') {
+                Some((name, value)) => (name.to_string(), Some(value.to_string())),
+                None => (trimmed.clone(), None),
+            };
+            let (name, inline_value) = if name.len() > 1
+                && name.starts_with('I')
+                && inline_value.is_none()
+                && !value_options.contains(&name.as_str())
+            {
+                ("I".to_string(), Some(name[1..].to_string()))
+            } else {
+                (name, inline_value)
+            };
+            let takes_value = value_options.contains(&name.as_str())
+                && !matches!(
+                    name.as_str(),
+                    "x86-branches-within-32B-boundaries" | "x86-pad-for-align"
+                );
+            let value = if takes_value {
+                match inline_value {
+                    Some(value) => value,
+                    None => {
+                        let value = arguments.get(position).cloned().unwrap_or_default();
+                        position += 1;
+                        value
+                    }
+                }
+            } else {
+                inline_value.unwrap_or_default()
+            };
+            match name.as_str() {
+                "triple" => triple = Some(value),
+                "arch" => architecture = Some(value),
+                "o" => output = Some(value),
+                "mcpu" => options.cpu = value,
+                "mattr" => options
+                    .features
+                    .extend(value.split(',').map(str::to_string)),
+                "filetype" => match value.as_str() {
+                    "asm" => options.output = OutputKind::Assembly,
+                    "null" => options.output = OutputKind::Null,
+                    "obj" => {
+                        options.output = OutputKind::Object;
+                        unsupported.get_or_insert("llvm-mc -filetype=obj".to_string());
+                    }
+                    _ => {
+                        unsupported.get_or_insert(format!("llvm-mc -filetype={value}"));
+                    }
+                },
+                "x86-asm-syntax" => {
+                    options.input_syntax = if value == "intel" {
+                        Syntax::Intel
+                    } else {
+                        Syntax::Att
+                    };
+                }
+                "output-asm-variant" => {
+                    options.output_syntax = Some(if value == "1" {
+                        Syntax::Intel
+                    } else {
+                        Syntax::Att
+                    });
+                }
+                "show-encoding" => options.show_encoding = true,
+                "show-inst-operands" => options.show_instruction_operands = true,
+                "print-imm-hex" => {
+                    options.hexadecimal_immediates = value != "false" && value != "0"
+                }
+                "no-print-imm-hex" => options.hexadecimal_immediates = false,
+                "defsym" => {
+                    let Some((symbol, number)) = value.split_once('=') else {
+                        unsupported.get_or_insert("llvm-mc -defsym".to_string());
+                        continue;
+                    };
+                    match parse_integer_text(number) {
+                        Some(number) => options.definitions.push((symbol.to_string(), number)),
+                        None => {
+                            unsupported.get_or_insert("llvm-mc -defsym".to_string());
+                        }
+                    }
+                }
+                "I" => options.include_directories.push(value),
+                "n" => options.no_initial_text_section = true,
+                "preserve-comments" => options.preserve_comments = true,
+                "comment-column" => options.comment_column = value.parse().unwrap_or(40),
+                "mc-relax-all" => options.relax_all = true,
+                "disassemble" | "mdis" | "cdis" | "hex" => disassemble = true,
+                "x86-align-branch-boundary"
+                | "x86-align-branch"
+                | "x86-pad-max-prefix-size"
+                | "x86-pad-for-align"
+                | "x86-branches-within-32B-boundaries" => {
+                    unsupported.get_or_insert(format!("llvm-mc -{name}"));
+                }
+                "masm-integers" => options.masm_integers = true,
+                _ => {
+                    unsupported.get_or_insert(format!("llvm-mc -{name}"));
+                }
+            }
+        }
+        let triple = match (triple, architecture) {
+            (Some(triple), _) => triple,
+            (None, Some(architecture)) => match architecture.as_str() {
+                "x86" => "i386-unknown-unknown".to_string(),
+                _ => "x86_64-unknown-unknown".to_string(),
+            },
+            (None, None) => "x86_64-unknown-linux-gnu".to_string(),
+        };
+        if !(triple.starts_with("x86_64")
+            || triple.starts_with("i386")
+            || triple.starts_with("i686")
+            || triple.starts_with("i586")
+            || triple.starts_with("i486")
+            || triple.starts_with("x86-")
+            || triple.starts_with("amd64"))
+        {
+            unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
+        }
+        let parsed = TargetTriple::parse(&triple);
+        if parsed.format == ObjectFormat::MachObject {
+            unsupported.get_or_insert("llvm-mc Mach-O triple".to_string());
+        }
+        if parsed.format == ObjectFormat::Coff {
+            unsupported.get_or_insert("llvm-mc COFF triple".to_string());
+        }
+        if triple.contains("_lfi") || triple.contains("lfi") {
+            unsupported.get_or_insert("llvm-mc LFI triple".to_string());
+        }
+        options.triple = triple;
+        McArguments {
+            options,
+            input,
+            output,
+            disassemble,
+            unsupported,
+        }
+    }
+
+    pub(super) fn format_assembly_messages(diagnostics: &[crate::diag::Diagnostic]) -> String {
+        let mut text = String::new();
+        for diagnostic in diagnostics {
+            let kind = match diagnostic.severity {
+                crate::diag::Severity::Warning => "warning",
+                crate::diag::Severity::Info => "note",
+                _ => "error",
+            };
+            let field = |label: &str| {
+                diagnostic
+                    .context
+                    .iter()
+                    .find_map(|line| line.strip_prefix(&format!("{label}: ")).map(str::to_string))
+            };
+            let cause = field("Cause").unwrap_or_default();
+            match &diagnostic.location {
+                Some(location) => {
+                    text.push_str(&format!(
+                        "{}:{}:{}: {kind}: {cause}\n",
+                        location.file, location.line, location.column
+                    ));
+                    text.push_str(&field("Source").unwrap_or_default());
+                    text.push('\n');
+                    text.push_str(&field("Marker").unwrap_or_default());
+                    text.push('\n');
+                }
+                None => text.push_str(&format!("llvm-mc: {kind}: {cause}\n")),
+            }
+        }
+        text
+    }
+
+    pub(super) fn tool_llvm_mc(
+        arguments: &[String],
+        input: &[u8],
+        world: &mut World,
+    ) -> ToolOutcome {
+        let parsed = parse_mc_arguments(arguments);
+        if let Some(reason) = parsed.unsupported {
+            world.missing_tool = Some(reason);
+            return ToolOutcome::failed(1, Vec::new());
+        }
+        if parsed.disassemble {
+            world.missing_tool = Some("llvm-mc --disassemble".to_string());
+            return ToolOutcome::failed(1, Vec::new());
+        }
+        let mut options = parsed.options;
+        let source = match parsed.input.as_deref() {
+            None | Some("-") => {
+                options.source_name = "<stdin>".to_string();
+                input.to_vec()
+            }
+            Some(path) => match world.read(path) {
+                Some(bytes) => {
+                    options.source_name = path.to_string();
+                    bytes
+                }
+                None => {
+                    return ToolOutcome::failed(
+                        1,
+                        format!("llvm-mc: error: {path}: No such file or directory\n"),
+                    );
+                }
+            },
+        };
+        let reader = |path: &str| world.read(path);
+        let result = match assemble_source(&options, &source, Some(&reader)) {
+            Ok(result) => result,
+            Err(diagnostic) => {
+                return ToolOutcome::failed(1, format!("llvm-mc: error: {}\n", diagnostic.message))
+            }
+        };
+        let diagnostics = render_messages(&result);
+        let stderr = format_assembly_messages(&diagnostics);
+        let status = if result.failed { 1 } else { 0 };
+        let mut stdout = Vec::new();
+        match parsed.output.as_deref() {
+            None | Some("-") => stdout = result.output,
+            Some(path) => {
+                if !result.failed {
+                    world.write(path, result.output, false);
+                }
+            }
+        }
+        world.errors_before_output = true;
+        ToolOutcome {
+            status,
+            stdout,
+            stderr: stderr.into_bytes(),
+        }
+    }
+
+    fn mc_tools() -> BTreeMap<String, ToolFunction> {
+        let mut tools = standard_tools();
+        for name in super::linker_lit::HOST_TOOLS {
+            tools.insert((*name).to_string(), super::linker_lit::tool_host);
+        }
+        tools.insert("llvm-mc".to_string(), tool_llvm_mc);
+        tools
+    }
+
+    fn mc_suite(name: &str, folder: &str) {
+        let names: Vec<String> = catalogue()
+            .unwrap_or_default()
+            .into_iter()
+            .map(|(name, _)| name)
+            .filter(|name| name.starts_with("Test_03") || name.starts_with("Test_04"))
+            .collect();
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the MC tests are present");
+        let root = format!("llvm-project/llvm/test/{folder}/");
+        let mut tests = lit_tests(&tree, &root, &[".s", ".txt", ".test", ".asm"]);
+        if let Ok(filter) = std::env::var("APK_BUILDER_MC_FILTER") {
+            tests.retain(|path| path.contains(&filter));
+        }
+        let features = [
+            "shell",
+            "llvm-64-bits",
+            "system-linux",
+            "host-byteorder-little-endian",
+            "non-root-user",
+            "x86-registered-target",
+            "asserts",
+        ];
+        let suite = LitSuite {
+            tree: &tree,
+            features: features.iter().map(|feature| feature.to_string()).collect(),
+            substitutions: vec![("%python".to_string(), "python3".to_string())],
+            tools: mc_tools(),
+        };
+        let outcomes = run_parallel(tests, &|path| suite.run_test(path));
+        let mut listing = String::new();
+        for (path, verdict) in &outcomes {
+            if let Verdict::OutOfScope(reason) = verdict {
+                listing.push_str(&format!("{path}\t{reason}\n"));
+            }
+        }
+        let folder = super::reference::repository().join("Tests").join("suites");
+        let _ = std::fs::create_dir_all(&folder);
+        let _ = std::fs::write(folder.join(format!("{name}-out-of-scope.txt")), listing);
+        let report = SuiteReport {
+            name: name.to_string(),
+            outcomes,
+        };
+        report.publish();
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_x86() {
+        mc_suite("mc-x86", "MC/X86");
+    }
+
+    fn assemble_intel(source: &str, masm_integers: bool) -> (String, String) {
+        let mut options = AssemblerOptions::new("x86_64-unknown-unknown");
+        options.input_syntax = Syntax::Intel;
+        options.output_syntax = Some(Syntax::Att);
+        options.show_encoding = true;
+        options.masm_integers = masm_integers;
+        let result =
+            assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+        let output = String::from_utf8_lossy(&result.output)
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (output, format_assembly_messages(&render_messages(&result)))
+    }
+
+    #[test]
+    fn intel_operands_assemble_to_the_bytes_llvm_writes() {
+        let (output, errors) = assemble_intel(
+            "mov eax, dword ptr [rbx + 4*rcx + 16]\n\
+             lea rdi, [(rax + rdi) + 1]\n\
+             mov rax, qword ptr fs:[0x28]\n\
+             push 1\n\
+             mov eax, (1 shl 4) or 3\n\
+             vaddps zmm1 {k1} {z}, zmm2, zmmword ptr [rdx - 64]\n\
+             mov ecx, [rsp + 8*rax]\n\
+             call qword ptr [rip + 16]\n",
+            false,
+        );
+        assert_eq!(errors, "");
+        for expected in [
+            "movl 16(%rbx,%rcx,4), %eax # encoding: [0x8b,0x44,0x8b,0x10]",
+            "leaq 1(%rax,%rdi), %rdi # encoding: [0x48,0x8d,0x7c,0x38,0x01]",
+            "movq %fs:40, %rax # encoding: [0x64,0x48,0x8b,0x04,0x25,0x28,0x00,0x00,0x00]",
+            "pushq $1 # encoding: [0x6a,0x01]",
+            "movl $19, %eax # encoding: [0xb8,0x13,0x00,0x00,0x00]",
+            "vaddps -64(%rdx), %zmm2, %zmm1 {%k1} {z} # encoding: [0x62,0xf1,0x6c,0xc9,0x58,0x4a,0xff]",
+            "movl (%rsp,%rax,8), %ecx # encoding: [0x8b,0x0c,0xc4]",
+            "callq *16(%rip) # encoding: [0xff,0x15,0x10,0x00,0x00,0x00]",
+        ] {
+            assert!(output.contains(expected), "{expected} is missing from\n{output}");
+        }
+    }
+
+    #[test]
+    fn intel_operands_are_refused_where_llvm_refuses_them_and_the_next_line_still_assembles() {
+        let (output, errors) = assemble_intel(
+            "inc [rax]\n\
+             mov eax, [eax*3]\n\
+             mov eax, [rax + rbx + rcx]\n\
+             mov eax, [rax*2 - rbx]\n\
+             mov eax, dword ptr eax\n\
+             nop\n",
+            false,
+        );
+        for expected in [
+            "<stdin>:1:5: error: ambiguous operand size for instruction 'inc'",
+            "<stdin>:2:15: error: scale factor in address must be 1, 2, 4 or 8",
+            "<stdin>:3:26: error: BaseReg/IndexReg already set!",
+            "<stdin>:4:17: error: Scale can't be negative",
+            "<stdin>:5:20: error: expected memory operand after 'ptr', found register operand instead",
+        ] {
+            assert!(errors.contains(expected), "{expected} is missing from\n{errors}");
+        }
+        assert!(output.contains("nop # encoding: [0x90]"), "{output}");
+    }
+
+    #[test]
+    fn masm_integers_read_radix_suffixes() {
+        let (output, errors) = assemble_intel(
+            "mov eax, 10h\n\
+             mov eax, 0ffffffffh\n\
+             mov eax, 0xa2h\n\
+             add rbx, 0B0h\n\
+             mov eax, 101y\n\
+             mov eax, 101b\n\
+             mov eax, 19d\n\
+             mov eax, 17o\n",
+            true,
+        );
+        assert_eq!(errors, "");
+        for expected in [
+            "movl $16, %eax",
+            "movl $4294967295, %eax",
+            "movl $162, %eax",
+            "addq $176, %rbx",
+            "movl $5, %eax",
+            "movl $19, %eax",
+            "movl $15, %eax",
+        ] {
+            assert!(
+                output.contains(expected),
+                "{expected} is missing from\n{output}"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn assemble_from_environment() {
+        let source = std::env::var("APK_BUILDER_MC_SOURCE")
+            .unwrap_or_default()
+            .replace("\\n", "\n");
+        let triple = std::env::var("APK_BUILDER_MC_TRIPLE")
+            .unwrap_or_else(|_| "x86_64-unknown-unknown".to_string());
+        let mut options = AssemblerOptions::new(&triple);
+        options.show_encoding = true;
+        if std::env::var("APK_BUILDER_MC_INTEL").is_ok() {
+            options.input_syntax = Syntax::Intel;
+        }
+        let result =
+            assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+        eprintln!("{}", String::from_utf8_lossy(&result.output));
+        eprintln!("{}", format_assembly_messages(&render_messages(&result)));
+    }
 }
 
 mod c_front_end {
@@ -71527,6 +72000,7 @@ mod c_front_end {
             return out_of_scope(world, "C parser".to_string());
         }
         let mut result = ToolOutcome::ok(Vec::new());
+        world.errors_before_output = true;
         if invocation.action == FrontendAction::Preprocess {
             match invocation.output.as_deref() {
                 None | Some("-") => result.stdout = outcome.output.clone(),
@@ -72534,6 +73008,7 @@ mod c_front_end {
             environment: BTreeMap::new(),
             tools: &tools,
             missing_tool: None,
+            errors_before_output: false,
         };
         world.write(
             "/work/main.c",
