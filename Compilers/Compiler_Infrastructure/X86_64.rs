@@ -6739,6 +6739,8 @@ pub struct Lexer {
     skip_space: bool,
     peeking: bool,
     end_statement_at_end: bool,
+    pub masm_integers: bool,
+    consumed_end_of_statement: bool,
 }
 
 fn is_lexer_identifier_byte(byte: u8) -> bool {
@@ -6815,6 +6817,8 @@ impl Lexer {
             skip_space: true,
             peeking: false,
             end_statement_at_end: true,
+            masm_integers: false,
+            consumed_end_of_statement: false,
         }
     }
 
@@ -6905,6 +6909,7 @@ impl Lexer {
     }
 
     pub fn lex(&mut self) -> Token {
+        self.consumed_end_of_statement = self.token.kind == TokenKind::EndOfStatement;
         let token = match self.pending.pop() {
             Some(token) => token,
             None => self.lex_token(),
@@ -7158,7 +7163,60 @@ impl Lexer {
         self.make_value(kind, start, end, value)
     }
 
+    fn lex_masm_digit(&mut self, start: usize) -> Option<Token> {
+        let first = self.byte(self.state.position - 1);
+        let mut first_non_binary = (!matches!(first, b'0' | b'1')).then_some(start);
+        let mut first_non_decimal: Option<usize> = None;
+        let resume = self.state.position;
+        while self.current().is_ascii_hexdigit() {
+            let byte = self.current();
+            if !byte.is_ascii_digit() && first_non_decimal.is_none() {
+                first_non_decimal = Some(self.state.position);
+            }
+            if !matches!(byte, b'0' | b'1') && first_non_binary.is_none() {
+                first_non_binary = Some(self.state.position);
+            }
+            self.state.position += 1;
+        }
+        if self.current() == b'.' {
+            self.state.position += 1;
+            return Some(self.lex_float(start));
+        }
+        let last = self.state.position - 1;
+        let radix = match self.current() {
+            b'h' | b'H' => 16,
+            b't' | b'T' => 10,
+            b'o' | b'O' | b'q' | b'Q' => 8,
+            b'y' | b'Y' => 2,
+            _ if first_non_decimal == Some(last) && matches!(self.byte(last), b'd' | b'D') => 10,
+            _ if first_non_binary == Some(last) && matches!(self.byte(last), b'b' | b'B') => 2,
+            _ => 0,
+        };
+        if radix == 0 {
+            self.state.position = resume;
+            return None;
+        }
+        if matches!(
+            self.current(),
+            b'h' | b'H' | b't' | b'T' | b'o' | b'O' | b'q' | b'Q' | b'y' | b'Y'
+        ) {
+            self.state.position += 1;
+        }
+        let end = self.state.position;
+        let text = self.make(TokenKind::Integer, start, end - 1).text;
+        let Some(value) = parse_radix(&text, radix) else {
+            return Some(self.error_token(start, &format!("invalid {} number", radix_name(radix))));
+        };
+        self.skip_integer_suffix();
+        Some(self.integer_token(start, end, value))
+    }
+
     fn lex_digit(&mut self, start: usize) -> Token {
+        if self.masm_integers {
+            if let Some(token) = self.lex_masm_digit(start) {
+                return token;
+            }
+        }
         if self.byte(self.state.position - 1) != b'0' || self.current() == b'.' {
             while self.current().is_ascii_digit() {
                 self.state.position += 1;
@@ -7177,7 +7235,7 @@ impl Lexer {
             self.skip_integer_suffix();
             return self.integer_token(start, end, value);
         }
-        if matches!(self.current(), b'b' | b'B') {
+        if !self.masm_integers && matches!(self.current(), b'b' | b'B') {
             self.state.position += 1;
             if !self.current().is_ascii_digit() {
                 self.state.position -= 1;
@@ -7212,11 +7270,16 @@ impl Lexer {
                 let at = self.state.position - 2;
                 return self.error_token(at, "invalid hexadecimal number");
             }
-            let end = self.state.position;
-            let text = self.make(TokenKind::Integer, digits, end).text;
+            let text = self
+                .make(TokenKind::Integer, digits, self.state.position)
+                .text;
             let Some(value) = parse_radix(&text, 16) else {
                 return self.error_token(start, "invalid hexadecimal number");
             };
+            if self.masm_integers && matches!(self.current(), b'h' | b'H') {
+                self.state.position += 1;
+            }
+            let end = self.state.position;
             self.skip_integer_suffix();
             return self.integer_token(start, end, value);
         }
@@ -8833,7 +8896,8 @@ impl<'s> Assembler<'s> {
         let triple = TargetTriple::parse(&options.triple);
         let mode = triple.mode;
         let dialect = options.input_syntax;
-        let lexer = Lexer::new(&options.source_name, source);
+        let mut lexer = Lexer::new(&options.source_name, source);
+        lexer.masm_integers = options.masm_integers;
         Ok(Assembler {
             target,
             matcher,
@@ -9515,7 +9579,7 @@ impl<'s> Assembler<'s> {
     }
 
     fn just_consumed_end_of_line(&self) -> bool {
-        self.lexer.state.at_start_of_statement && self.lexer.pending.is_empty()
+        self.lexer.consumed_end_of_statement
     }
 
     fn parse_statement(&mut self) -> bool {
@@ -13078,6 +13142,595 @@ pub fn parse_integer_text(text: &str) -> Option<i64> {
     })
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum InfixToken {
+    Or,
+    Xor,
+    And,
+    LeftShift,
+    RightShift,
+    Plus,
+    Minus,
+    Multiply,
+    Divide,
+    Modulo,
+    Not,
+    Negate,
+    RightParenthesis,
+    LeftParenthesis,
+    Immediate,
+    Register,
+}
+
+impl InfixToken {
+    fn precedence(self) -> u8 {
+        match self {
+            InfixToken::Or | InfixToken::Immediate | InfixToken::Register => 0,
+            InfixToken::Xor => 1,
+            InfixToken::And => 2,
+            InfixToken::LeftShift | InfixToken::RightShift => 4,
+            InfixToken::Plus | InfixToken::Minus => 5,
+            InfixToken::Multiply | InfixToken::Divide | InfixToken::Modulo => 6,
+            InfixToken::Not => 7,
+            InfixToken::Negate => 8,
+            InfixToken::RightParenthesis => 9,
+            InfixToken::LeftParenthesis => 10,
+        }
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+struct InfixCalculator {
+    operators: Vec<InfixToken>,
+    postfix: Vec<(InfixToken, i64)>,
+}
+
+impl InfixCalculator {
+    fn pop_operand(&mut self) -> i64 {
+        match self.postfix.pop() {
+            Some((InfixToken::Immediate | InfixToken::Register, value)) => value,
+            _ => -1,
+        }
+    }
+
+    fn push_operand(&mut self, token: InfixToken, value: i64) {
+        self.postfix.push((token, value));
+    }
+
+    fn push_operator(&mut self, operator: InfixToken) {
+        let Some(&top) = self.operators.last() else {
+            self.operators.push(operator);
+            return;
+        };
+        if operator.precedence() > top.precedence() || top == InfixToken::LeftParenthesis {
+            self.operators.push(operator);
+            return;
+        }
+        let mut parentheses = 0u32;
+        while let Some(&top) = self.operators.last() {
+            if !(top.precedence() >= operator.precedence() || parentheses != 0) {
+                break;
+            }
+            if parentheses == 0 && top == InfixToken::LeftParenthesis {
+                break;
+            }
+            self.operators.pop();
+            match top {
+                InfixToken::RightParenthesis => parentheses += 1,
+                InfixToken::LeftParenthesis => parentheses -= 1,
+                _ => self.postfix.push((top, 0)),
+            }
+        }
+        self.operators.push(operator);
+    }
+
+    fn execute(&mut self) -> i64 {
+        while let Some(top) = self.operators.pop() {
+            if top != InfixToken::LeftParenthesis && top != InfixToken::RightParenthesis {
+                self.postfix.push((top, 0));
+            }
+        }
+        let mut stack: Vec<i64> = Vec::new();
+        for &(token, value) in &self.postfix {
+            match token {
+                InfixToken::Immediate | InfixToken::Register => stack.push(value),
+                InfixToken::Negate | InfixToken::Not => {
+                    let operand = stack.pop().unwrap_or(0);
+                    stack.push(if token == InfixToken::Negate {
+                        operand.wrapping_neg()
+                    } else {
+                        !operand
+                    });
+                }
+                _ => {
+                    let right = stack.pop().unwrap_or(0);
+                    let left = stack.pop().unwrap_or(0);
+                    stack.push(match token {
+                        InfixToken::Plus => left.wrapping_add(right),
+                        InfixToken::Minus => left.wrapping_sub(right),
+                        InfixToken::Multiply => left.wrapping_mul(right),
+                        InfixToken::Divide => left.checked_div(right).unwrap_or(0),
+                        InfixToken::Modulo => left.checked_rem(right).unwrap_or(0),
+                        InfixToken::Or => left | right,
+                        InfixToken::Xor => left ^ right,
+                        InfixToken::And => left & right,
+                        InfixToken::LeftShift => left.wrapping_shl(right as u32),
+                        _ => left.wrapping_shr(right as u32),
+                    });
+                }
+            }
+        }
+        stack.pop().unwrap_or(0)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum IntelState {
+    Initial,
+    Or,
+    Xor,
+    And,
+    LeftShift,
+    RightShift,
+    Plus,
+    Minus,
+    Offset,
+    Not,
+    Multiply,
+    Divide,
+    Modulo,
+    LeftBracket,
+    RightBracket,
+    LeftParenthesis,
+    RightParenthesis,
+    Register,
+    Integer,
+    Error,
+}
+
+fn check_scale(scale: u32) -> Result<(), &'static str> {
+    if matches!(scale, 1 | 2 | 4 | 8) {
+        Ok(())
+    } else {
+        Err("scale factor in address must be 1, 2, 4 or 8")
+    }
+}
+
+struct IntelExpression {
+    state: IntelState,
+    previous: IntelState,
+    base: RegisterId,
+    index: RegisterId,
+    pending_register: RegisterId,
+    scale: u32,
+    pending_scale: Option<u32>,
+    immediate: i64,
+    symbol: Option<Expression>,
+    calculator: InfixCalculator,
+    bracket_count: i32,
+    parenthesis_count: i32,
+    left_parenthesis: Option<SourceLocation>,
+    memory_expression: bool,
+    bracket_used: bool,
+    negative_term: Option<SourceLocation>,
+    offset_operator: bool,
+    attach_to_operand_index: bool,
+    position_independent: bool,
+}
+
+impl IntelExpression {
+    fn new() -> IntelExpression {
+        IntelExpression {
+            state: IntelState::Initial,
+            previous: IntelState::Error,
+            base: NO_REGISTER,
+            index: NO_REGISTER,
+            pending_register: NO_REGISTER,
+            scale: 0,
+            pending_scale: None,
+            immediate: 0,
+            symbol: None,
+            calculator: InfixCalculator::default(),
+            bracket_count: 0,
+            parenthesis_count: 0,
+            left_parenthesis: None,
+            memory_expression: false,
+            bracket_used: false,
+            negative_term: None,
+            offset_operator: false,
+            attach_to_operand_index: false,
+            position_independent: false,
+        }
+    }
+
+    fn value(&mut self) -> i64 {
+        self.immediate.wrapping_add(self.calculator.execute())
+    }
+
+    fn is_valid_end(&self) -> bool {
+        matches!(
+            self.state,
+            IntelState::RightBracket
+                | IntelState::RightParenthesis
+                | IntelState::Integer
+                | IntelState::Register
+                | IntelState::Offset
+        )
+    }
+
+    fn error_location(&self, default: SourceLocation) -> SourceLocation {
+        self.negative_term.unwrap_or(default)
+    }
+
+    fn registers_used_up(&self) -> &'static str {
+        if self.position_independent && self.attach_to_operand_index {
+            "Don't use 2 or more regs for mem offset in PIC model!"
+        } else {
+            "BaseReg/IndexReg already set!"
+        }
+    }
+
+    fn set_symbol(&mut self, value: Expression) -> Result<(), &'static str> {
+        if self.symbol.is_some() {
+            return Err("cannot use more than one symbol in memory operand");
+        }
+        self.symbol = Some(value);
+        Ok(())
+    }
+
+    fn binary(&mut self, next: IntelState, operator: InfixToken) {
+        let current = self.state;
+        match self.state {
+            IntelState::Integer | IntelState::RightParenthesis | IntelState::Register => {
+                self.state = next;
+                self.calculator.push_operator(operator);
+            }
+            _ => self.state = IntelState::Error,
+        }
+        self.previous = current;
+    }
+
+    fn settle_pending_register(&mut self, check_negative: bool) -> Result<(), &'static str> {
+        if self.pending_register == NO_REGISTER {
+            return Ok(());
+        }
+        if self.base == NO_REGISTER && self.pending_scale.is_none() {
+            self.base = self.pending_register;
+            self.pending_register = NO_REGISTER;
+            return Ok(());
+        }
+        if self.index != NO_REGISTER {
+            return Err(self.registers_used_up());
+        }
+        self.index = self.pending_register;
+        self.pending_register = NO_REGISTER;
+        if check_negative && self.negative_term.is_some() {
+            return Err("Scale can't be negative");
+        }
+        if let Some(scale) = self.pending_scale {
+            check_scale(scale)?;
+        }
+        self.scale = self.pending_scale.unwrap_or(0);
+        Ok(())
+    }
+
+    fn on_plus(&mut self) -> Result<(), &'static str> {
+        let current = self.state;
+        match self.state {
+            IntelState::Integer
+            | IntelState::RightParenthesis
+            | IntelState::Register
+            | IntelState::Offset => {
+                self.state = IntelState::Plus;
+                self.calculator.push_operator(InfixToken::Plus);
+                self.settle_pending_register(true)?;
+            }
+            _ => self.state = IntelState::Error,
+        }
+        self.negative_term = None;
+        self.pending_scale = None;
+        self.previous = current;
+        Ok(())
+    }
+
+    fn on_minus(&mut self, location: SourceLocation) -> Result<(), &'static str> {
+        let current = self.state;
+        match self.state {
+            IntelState::Minus | IntelState::Error => self.state = IntelState::Error,
+            _ => {
+                self.state = IntelState::Minus;
+                self.negative_term = Some(location);
+                if matches!(
+                    current,
+                    IntelState::Register
+                        | IntelState::RightParenthesis
+                        | IntelState::Integer
+                        | IntelState::RightBracket
+                        | IntelState::Offset
+                ) {
+                    self.calculator.push_operator(InfixToken::Minus);
+                    self.settle_pending_register(false)?;
+                } else if self.previous == IntelState::Register && current == IntelState::Multiply {
+                    return Err("Scale can't be negative");
+                } else {
+                    self.calculator.push_operator(InfixToken::Negate);
+                }
+            }
+        }
+        self.pending_scale = None;
+        self.previous = current;
+        Ok(())
+    }
+
+    fn on_not(&mut self) {
+        let current = self.state;
+        match self.state {
+            IntelState::Offset
+            | IntelState::RightBracket
+            | IntelState::RightParenthesis
+            | IntelState::Register
+            | IntelState::Integer
+            | IntelState::Error => self.state = IntelState::Error,
+            _ => {
+                self.state = IntelState::Not;
+                self.calculator.push_operator(InfixToken::Not);
+            }
+        }
+        self.previous = current;
+    }
+
+    fn on_register(&mut self, register: RegisterId) -> Result<(), &'static str> {
+        let current = self.state;
+        match self.state {
+            IntelState::Plus | IntelState::Minus | IntelState::LeftBracket => {
+                self.state = IntelState::Register;
+                self.pending_register = register;
+                self.calculator.push_operand(InfixToken::Register, 0);
+                if self.negative_term.is_some() {
+                    return Err("Scale can't be negative");
+                }
+            }
+            IntelState::LeftParenthesis | IntelState::Multiply => {
+                if self.pending_register != NO_REGISTER {
+                    return Err("Register can't be multiplied with register!");
+                }
+                self.state = IntelState::Register;
+                self.pending_register = register;
+                if self.pending_scale.is_some() {
+                    if self.index != NO_REGISTER {
+                        return Err(self.registers_used_up());
+                    }
+                    if self.negative_term.is_some() {
+                        return Err("Scale can't be negative");
+                    }
+                    self.calculator.push_operand(InfixToken::Immediate, 0);
+                } else {
+                    self.calculator.push_operand(InfixToken::Register, 0);
+                }
+            }
+            _ => self.state = IntelState::Error,
+        }
+        self.previous = current;
+        Ok(())
+    }
+
+    fn on_identifier(&mut self, value: Expression) -> Result<(), &'static str> {
+        if let Expression::Constant(constant) = value {
+            return self.on_integer(constant);
+        }
+        self.previous = self.state;
+        match self.state {
+            IntelState::Plus
+            | IntelState::Minus
+            | IntelState::Not
+            | IntelState::Initial
+            | IntelState::LeftBracket
+            | IntelState::LeftParenthesis => {
+                self.set_symbol(value)?;
+                self.pending_scale = Some(0);
+                self.memory_expression = true;
+                self.state = IntelState::Integer;
+                self.calculator.push_operand(InfixToken::Immediate, 0);
+            }
+            _ => self.state = IntelState::Error,
+        }
+        Ok(())
+    }
+
+    fn on_integer(&mut self, value: i64) -> Result<(), &'static str> {
+        let current = self.state;
+        match self.state {
+            IntelState::Divide
+            | IntelState::Modulo
+            | IntelState::Plus
+            | IntelState::Minus
+            | IntelState::Not
+            | IntelState::Or
+            | IntelState::Xor
+            | IntelState::And
+            | IntelState::LeftShift
+            | IntelState::RightShift
+            | IntelState::Multiply
+            | IntelState::LeftParenthesis
+            | IntelState::Initial
+            | IntelState::LeftBracket => {
+                if value == 0 && current == IntelState::Divide {
+                    self.state = IntelState::Error;
+                    return Err("division by zero in assembly expression");
+                }
+                if value == 0 && current == IntelState::Modulo {
+                    self.state = IntelState::Error;
+                    return Err("modulo by zero in assembly expression");
+                }
+                self.state = IntelState::Integer;
+                let scale = match self.pending_scale {
+                    Some(existing) => existing.wrapping_mul(value as u32),
+                    None => value as u32,
+                };
+                self.pending_scale = Some(scale);
+                if self.pending_register != NO_REGISTER && self.negative_term.is_some() {
+                    return Err("Scale can't be negative");
+                }
+                if self.pending_register != NO_REGISTER {
+                    check_scale(scale)?;
+                }
+                self.calculator.push_operand(InfixToken::Immediate, value);
+            }
+            _ => self.state = IntelState::Error,
+        }
+        self.previous = current;
+        Ok(())
+    }
+
+    fn on_star(&mut self) {
+        self.previous = self.state;
+        match self.state {
+            IntelState::Integer => {
+                self.state = IntelState::Multiply;
+                self.calculator.push_operator(InfixToken::Multiply);
+            }
+            IntelState::Register | IntelState::RightParenthesis => {
+                if self.pending_register != NO_REGISTER && self.pending_scale.is_none() {
+                    self.calculator.pop_operand();
+                    self.calculator.push_operand(InfixToken::Immediate, 0);
+                }
+                self.state = IntelState::Multiply;
+                self.calculator.push_operator(InfixToken::Multiply);
+            }
+            _ => self.state = IntelState::Error,
+        }
+    }
+
+    fn on_divide(&mut self, next: IntelState, operator: InfixToken) {
+        self.previous = self.state;
+        match self.state {
+            IntelState::Integer | IntelState::RightParenthesis => {
+                self.state = next;
+                self.calculator.push_operator(operator);
+            }
+            _ => self.state = IntelState::Error,
+        }
+    }
+
+    fn on_left_bracket(&mut self) -> Result<(), ()> {
+        if self.bracket_count != 0 {
+            return Err(());
+        }
+        self.previous = self.state;
+        match self.state {
+            IntelState::RightBracket | IntelState::Integer | IntelState::RightParenthesis => {
+                self.state = IntelState::Plus;
+                self.calculator.push_operator(InfixToken::Plus);
+            }
+            IntelState::Initial => self.state = IntelState::LeftBracket,
+            _ => self.state = IntelState::Error,
+        }
+        self.negative_term = None;
+        self.pending_scale = None;
+        self.memory_expression = true;
+        self.bracket_used = true;
+        self.bracket_count += 1;
+        Ok(())
+    }
+
+    fn on_right_bracket(&mut self) -> Result<(), &'static str> {
+        let current = self.state;
+        match self.state {
+            IntelState::Integer
+            | IntelState::Offset
+            | IntelState::Register
+            | IntelState::RightParenthesis => {
+                let count = self.bracket_count;
+                self.bracket_count -= 1;
+                if count != 1 {
+                    return Err("unexpected bracket encountered");
+                }
+                self.state = IntelState::RightBracket;
+                if self.pending_register != NO_REGISTER {
+                    if self.base == NO_REGISTER && self.pending_scale.is_none() {
+                        self.base = self.pending_register;
+                        self.pending_register = NO_REGISTER;
+                    } else if self.index == NO_REGISTER {
+                        if self.negative_term.is_some() {
+                            return Err("Scale can't be negative");
+                        }
+                        self.index = self.pending_register;
+                        self.pending_register = NO_REGISTER;
+                        if let Some(scale) = self.pending_scale {
+                            check_scale(scale)?;
+                        }
+                        self.scale = self.pending_scale.unwrap_or(0);
+                    } else {
+                        return Err(self.registers_used_up());
+                    }
+                }
+                self.negative_term = None;
+            }
+            _ => self.state = IntelState::Error,
+        }
+        self.pending_scale = None;
+        self.previous = current;
+        Ok(())
+    }
+
+    fn on_left_parenthesis(&mut self, location: SourceLocation) {
+        let current = self.state;
+        match self.state {
+            IntelState::Offset
+            | IntelState::RightBracket
+            | IntelState::RightParenthesis
+            | IntelState::Register
+            | IntelState::Integer
+            | IntelState::Error => self.state = IntelState::Error,
+            _ => {
+                self.parenthesis_count += 1;
+                self.left_parenthesis = Some(location);
+                self.state = IntelState::LeftParenthesis;
+                self.calculator.push_operator(InfixToken::LeftParenthesis);
+            }
+        }
+        self.previous = current;
+    }
+
+    fn on_right_parenthesis(&mut self) -> Result<(), &'static str> {
+        let current = self.state;
+        match self.state {
+            IntelState::Integer
+            | IntelState::Offset
+            | IntelState::Register
+            | IntelState::RightBracket
+            | IntelState::RightParenthesis => {
+                if self.parenthesis_count == 0 {
+                    return Err("unmatched parenthesis");
+                }
+                self.parenthesis_count -= 1;
+                self.state = IntelState::RightParenthesis;
+                self.calculator.push_operator(InfixToken::RightParenthesis);
+            }
+            _ => self.state = IntelState::Error,
+        }
+        self.previous = current;
+        Ok(())
+    }
+
+    fn on_offset(&mut self, value: Expression, text: &'static str) -> Result<(), &'static str> {
+        self.previous = self.state;
+        match self.state {
+            IntelState::Plus | IntelState::Initial | IntelState::LeftBracket => {
+                self.set_symbol(value)?;
+                if text == "offset" {
+                    self.offset_operator = true;
+                }
+                self.state = IntelState::Offset;
+                self.calculator.push_operand(InfixToken::Immediate, 0);
+                Ok(())
+            }
+            _ if text == "offset" => Err("unexpected offset operator expression"),
+            _ => Err("unexpected imagerel operator expression"),
+        }
+    }
+}
+
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
 pub struct InstructionState {
     pub forced_prefix: u32,
@@ -14244,40 +14897,8 @@ impl<'s> Assembler<'s> {
         if let Some(text) = self.check_base_index_scale(base, index, scale) {
             return self.error(base_location, text);
         }
-        if base != NO_REGISTER || index != NO_REGISTER {
-            if let Expression::Constant(value) = displacement {
-                let is_64 =
-                    self.target.in_class("GR64", base) || self.target.in_class("GR64", index);
-                let is_16 = self.target.in_class("GR16", base);
-                if is_64 {
-                    if i32::try_from(value).is_err() {
-                        return self.error(
-                            base_location,
-                            &format!(
-                                "displacement {value} is not within [-2147483648, 2147483647]"
-                            ),
-                        );
-                    }
-                } else if !is_16 {
-                    if value.unsigned_abs() >> 32 != 0 {
-                        self.warning(
-                            base_location,
-                            &format!(
-                                "displacement {value} shortened to 32-bit signed {}",
-                                value as i32
-                            ),
-                        );
-                    }
-                } else if value.unsigned_abs() >> 16 != 0 {
-                    self.warning(
-                        base_location,
-                        &format!(
-                            "displacement {value} shortened to 16-bit signed {}",
-                            value as i16
-                        ),
-                    );
-                }
-            }
+        if self.check_displacement_overflow(base, index, &displacement, base_location) {
+            return true;
         }
         let mut memory = MemoryOperand::absolute(self.pointer_width(), displacement);
         memory.segment = segment;
@@ -14504,10 +15125,454 @@ impl<'s> Assembler<'s> {
     fn parse_intel_operand(
         &mut self,
         operands: &mut Vec<ParsedOperand>,
-        _name: &str,
+        name: &str,
         state: &mut InstructionState,
     ) -> bool {
-        self.parse_att_operand(operands, state)
+        let Ok(sized) = self.parse_intel_memory_size() else {
+            return true;
+        };
+        let size_given = sized.is_some();
+        let size = sized.unwrap_or(0);
+        let mut start = self.location();
+        if self.is(TokenKind::LeftBrace) {
+            return self.parse_rounding_mode(start, operands);
+        }
+        let mut segment = NO_REGISTER;
+        if self.is(TokenKind::Identifier) {
+            let Ok(found) = self.intel_register(state) else {
+                return true;
+            };
+            if let Some((register, end)) = found {
+                if self.target.registers[register as usize].record == "RIP" {
+                    return self.error(start, "rip can only be used as a base register");
+                }
+                if !self.is(TokenKind::Colon) {
+                    if size_given {
+                        return self.error(
+                            start,
+                            "expected memory operand after 'ptr', found register operand instead",
+                        );
+                    }
+                    operands.push(self.operand_from(ParsedKind::Register(register), start, end));
+                    return false;
+                }
+                if !self.target.in_class("SEGMENT_REG", register) {
+                    return self.error(start, "invalid segment register");
+                }
+                segment = register;
+                self.lex();
+                start = self.location();
+            }
+        }
+        let mut expression = IntelExpression::new();
+        let Ok(end) = self.parse_intel_expression(&mut expression, state) else {
+            return true;
+        };
+        let value = expression.value();
+        let constant = Expression::Constant(value);
+        let displacement = match expression.symbol.clone() {
+            Some(symbol) if value != 0 => Expression::sum(symbol, constant),
+            Some(symbol) => symbol,
+            None => constant,
+        };
+        if !expression.memory_expression && segment == NO_REGISTER {
+            operands.push(self.operand_from(ParsedKind::Immediate(displacement), start, end));
+            return false;
+        }
+        let mut base = expression.base;
+        let mut index = expression.index;
+        let rip = self.target.register("RIP");
+        if index != NO_REGISTER && base == rip {
+            base = NO_REGISTER;
+        }
+        let mut scale = expression.scale;
+        let record = |register: RegisterId| self.target.registers[register as usize].record.clone();
+        if scale == 0
+            && !matches!(record(base).as_str(), "ESP" | "RSP")
+            && matches!(record(index).as_str(), "ESP" | "RSP")
+        {
+            std::mem::swap(&mut base, &mut index);
+        }
+        let vector = |register: RegisterId| {
+            ["VR128X", "VR256X", "VR512"]
+                .iter()
+                .any(|class| self.target.in_class(class, register))
+        };
+        if scale == 0 && !vector(index) && vector(base) {
+            std::mem::swap(&mut base, &mut index);
+        }
+        if scale != 0 && self.target.in_class("GR16", index) {
+            return self.error(start, "16-bit addresses cannot have a scale");
+        }
+        if scale == 0 {
+            scale = 1;
+        }
+        if matches!(record(base).as_str(), "SI" | "DI")
+            && matches!(record(index).as_str(), "BX" | "BP")
+        {
+            std::mem::swap(&mut base, &mut index);
+        }
+        if base != NO_REGISTER || index != NO_REGISTER {
+            if let Some(text) = self.check_base_index_scale(base, index, scale) {
+                return self.error(start, text);
+            }
+        }
+        let branch = name.eq_ignore_ascii_case("jmp") || name.eq_ignore_ascii_case("call");
+        let mut maybe_direct_branch = true;
+        if branch {
+            if !size_given && expression.offset_operator {
+                return self.error(
+                    start,
+                    "`OFFSET` operator cannot be used in an unconditional branch",
+                );
+            }
+            if size_given || expression.bracket_used {
+                maybe_direct_branch = false;
+            }
+        }
+        if self.check_displacement_overflow(base, index, &displacement, start) {
+            return true;
+        }
+        let mut memory = MemoryOperand::absolute(self.pointer_width(), displacement);
+        memory.segment = segment;
+        memory.base = base;
+        memory.index = index;
+        memory.scale = scale;
+        memory.size = size;
+        memory.maybe_direct_branch = maybe_direct_branch;
+        operands.push(self.operand_from(ParsedKind::Memory(memory), start, end));
+        false
+    }
+
+    fn parse_intel_memory_size(&mut self) -> Result<Option<u32>, ()> {
+        let text = self.lexer.token.text.clone();
+        let size = match text.as_str() {
+            "BYTE" | "byte" => 8,
+            "WORD" | "word" => 16,
+            "DWORD" | "dword" | "FLOAT" | "float" | "LONG" | "long" => 32,
+            "FWORD" | "fword" => 48,
+            "DOUBLE" | "double" | "QWORD" | "qword" | "MMWORD" | "mmword" => 64,
+            "XWORD" | "xword" | "TBYTE" | "tbyte" => 80,
+            "XMMWORD" | "xmmword" => 128,
+            "YMMWORD" | "ymmword" => 256,
+            "ZMMWORD" | "zmmword" => 512,
+            _ => return Ok(None),
+        };
+        self.lex();
+        if !matches!(self.lexer.token.text.as_str(), "PTR" | "ptr") {
+            self.token_error("Expected 'PTR' or 'ptr' token!");
+            return Err(());
+        }
+        self.lex();
+        Ok(Some(size))
+    }
+
+    fn intel_register(
+        &mut self,
+        state: &mut InstructionState,
+    ) -> Result<Option<(RegisterId, SourceLocation)>, ()> {
+        let token = self.lexer.token.clone();
+        if token.kind != TokenKind::Identifier {
+            return Ok(None);
+        }
+        let start = token.location();
+        let end = token.end_location();
+        match self.register_by_name_checked(&token.text, start, end, state) {
+            Ok(_) => match self.parse_register_with_state(start, state) {
+                Some(found) => Ok(Some(found)),
+                None => Err(()),
+            },
+            Err(_) => Ok(None),
+        }
+    }
+
+    fn check_displacement_overflow(
+        &mut self,
+        base: RegisterId,
+        index: RegisterId,
+        displacement: &Expression,
+        location: SourceLocation,
+    ) -> bool {
+        if base == NO_REGISTER && index == NO_REGISTER {
+            return false;
+        }
+        let Expression::Constant(value) = *displacement else {
+            return false;
+        };
+        let is_64 = self.target.in_class("GR64", base) || self.target.in_class("GR64", index);
+        let is_16 = self.target.in_class("GR16", base);
+        if is_64 {
+            if i32::try_from(value).is_err() {
+                return self.error(
+                    location,
+                    &format!("displacement {value} is not within [-2147483648, 2147483647]"),
+                );
+            }
+        } else if !is_16 {
+            if value.unsigned_abs() >> 32 != 0 {
+                self.warning(
+                    location,
+                    &format!(
+                        "displacement {value} shortened to 32-bit signed {}",
+                        value as i32
+                    ),
+                );
+            }
+        } else if value.unsigned_abs() >> 16 != 0 {
+            self.warning(
+                location,
+                &format!(
+                    "displacement {value} shortened to 16-bit signed {}",
+                    value as i16
+                ),
+            );
+        }
+        false
+    }
+
+    fn intel_failure<T>(&mut self, location: SourceLocation, text: &str) -> Result<T, ()> {
+        self.error(location, text);
+        Err(())
+    }
+
+    fn parse_intel_expression(
+        &mut self,
+        expression: &mut IntelExpression,
+        state: &mut InstructionState,
+    ) -> Result<SourceLocation, ()> {
+        let mut end = self.location();
+        let mut previous_kind = TokenKind::Error;
+        loop {
+            let token = self.lexer.token.clone();
+            let kind = token.kind;
+            let at = token.location();
+            let mut advance = true;
+            let mut done = false;
+            match kind {
+                TokenKind::Error => {
+                    if let Some((location, message)) = self.lexer.error.take() {
+                        self.error(location, &message);
+                    }
+                    return Err(());
+                }
+                TokenKind::Real => {
+                    advance = false;
+                    self.parse_intel_dot_operator(expression, &mut end)?;
+                }
+                TokenKind::String | TokenKind::At | TokenKind::Identifier => {
+                    advance = false;
+                    self.parse_intel_identifier(expression, state, &mut end)?;
+                }
+                TokenKind::Integer => {
+                    advance = false;
+                    let value = token.integer();
+                    end = at;
+                    self.lex();
+                    let suffix = self.lexer.token.clone();
+                    if suffix.kind == TokenKind::Identifier
+                        && (suffix.text == "f" || suffix.text == "b")
+                    {
+                        let backward = suffix.text == "b";
+                        let symbol = self.context.get_directional_symbol(value, backward);
+                        if backward && self.context.symbols[symbol].is_undefined() {
+                            return self.intel_failure(at, "invalid reference to undefined symbol");
+                        }
+                        self.directional_labels.push((at, symbol));
+                        let name = self.context.symbols[symbol].name.clone();
+                        if let Err(text) = expression.on_identifier(Expression::symbol(&name)) {
+                            let location = expression.error_location(at);
+                            return self.intel_failure(location, text);
+                        }
+                        end = suffix.location();
+                        self.lex();
+                    } else if let Err(text) = expression.on_integer(value) {
+                        let location = expression.error_location(at);
+                        return self.intel_failure(location, text);
+                    }
+                }
+                TokenKind::Plus => {
+                    if let Err(text) = expression.on_plus() {
+                        return self.intel_failure(at, text);
+                    }
+                }
+                TokenKind::Minus => {
+                    if let Err(text) = expression.on_minus(at) {
+                        let location = expression.error_location(at);
+                        return self.intel_failure(location, text);
+                    }
+                }
+                TokenKind::Tilde => expression.on_not(),
+                TokenKind::Star => expression.on_star(),
+                TokenKind::Slash => expression.on_divide(IntelState::Divide, InfixToken::Divide),
+                TokenKind::Percent => expression.on_divide(IntelState::Modulo, InfixToken::Modulo),
+                TokenKind::Pipe => expression.binary(IntelState::Or, InfixToken::Or),
+                TokenKind::Caret => expression.binary(IntelState::Xor, InfixToken::Xor),
+                TokenKind::Ampersand => expression.binary(IntelState::And, InfixToken::And),
+                TokenKind::LessLess => {
+                    expression.binary(IntelState::LeftShift, InfixToken::LeftShift)
+                }
+                TokenKind::GreaterGreater => {
+                    expression.binary(IntelState::RightShift, InfixToken::RightShift)
+                }
+                TokenKind::LeftBracket => {
+                    if expression.on_left_bracket().is_err() {
+                        return self.intel_failure(at, "unexpected bracket encountered");
+                    }
+                    if previous_kind == TokenKind::RightBracket {
+                        expression.attach_to_operand_index = true;
+                    }
+                }
+                TokenKind::RightBracket => {
+                    if let Err(text) = expression.on_right_bracket() {
+                        let location = expression.error_location(at);
+                        return self.intel_failure(location, text);
+                    }
+                }
+                TokenKind::LeftParenthesis => expression.on_left_parenthesis(at),
+                TokenKind::RightParenthesis => {
+                    if let Err(text) = expression.on_right_parenthesis() {
+                        let location = expression.error_location(at);
+                        return self.intel_failure(location, text);
+                    }
+                }
+                _ => {
+                    if expression.is_valid_end() {
+                        done = true;
+                    } else {
+                        return self.intel_failure(at, "unknown token in expression");
+                    }
+                }
+            }
+            if expression.state == IntelState::Error {
+                let here = self.location();
+                return self.intel_failure(here, "unknown token in expression");
+            }
+            if done {
+                break;
+            }
+            if advance {
+                end = self.location();
+                self.lex();
+            }
+            previous_kind = kind;
+        }
+        if expression.parenthesis_count != 0 {
+            let location = expression.left_parenthesis.unwrap_or(end);
+            return self.intel_failure(location, "unmatched parenthesis");
+        }
+        Ok(end)
+    }
+
+    fn parse_intel_identifier(
+        &mut self,
+        expression: &mut IntelExpression,
+        state: &mut InstructionState,
+        end: &mut SourceLocation,
+    ) -> Result<(), ()> {
+        let token = self.lexer.token.clone();
+        let at = token.location();
+        if token.kind == TokenKind::Identifier {
+            if let Some((register, register_end)) = self.intel_register(state)? {
+                *end = register_end;
+                if let Err(text) = expression.on_register(register) {
+                    let location = expression.error_location(at);
+                    return self.intel_failure(location, text);
+                }
+                return Ok(());
+            }
+            let text = token.text.as_str();
+            let uniform = text == text.to_ascii_lowercase() || text == text.to_ascii_uppercase();
+            if uniform {
+                let lower = text.to_ascii_lowercase();
+                let operator = match lower.as_str() {
+                    "not" => Some((IntelState::Not, InfixToken::Not)),
+                    "or" => Some((IntelState::Or, InfixToken::Or)),
+                    "shl" => Some((IntelState::LeftShift, InfixToken::LeftShift)),
+                    "shr" => Some((IntelState::RightShift, InfixToken::RightShift)),
+                    "xor" => Some((IntelState::Xor, InfixToken::Xor)),
+                    "and" => Some((IntelState::And, InfixToken::And)),
+                    "mod" => Some((IntelState::Modulo, InfixToken::Modulo)),
+                    _ => None,
+                };
+                if let Some((next, operator)) = operator {
+                    match next {
+                        IntelState::Not => expression.on_not(),
+                        IntelState::Modulo => expression.on_divide(next, operator),
+                        _ => expression.binary(next, operator),
+                    }
+                    *end = at;
+                    self.lex();
+                    return Ok(());
+                }
+                if lower == "offset" || lower == "imagerel" {
+                    let kind: &'static str = if lower == "offset" {
+                        "offset"
+                    } else {
+                        "imagerel"
+                    };
+                    let value = self.parse_intel_offset_operator(kind, end)?;
+                    if let Err(text) = expression.on_offset(value, kind) {
+                        return self.intel_failure(at, text);
+                    }
+                    return Ok(());
+                }
+            }
+        }
+        match self.parse_generic_primary() {
+            Ok((value, value_end)) => {
+                *end = value_end;
+                if let Err(text) = expression.on_identifier(value) {
+                    let location = expression.error_location(at);
+                    return self.intel_failure(location, text);
+                }
+                Ok(())
+            }
+            Err(()) => self.intel_failure(at, "Unexpected identifier!"),
+        }
+    }
+
+    fn parse_intel_offset_operator(
+        &mut self,
+        kind: &'static str,
+        end: &mut SourceLocation,
+    ) -> Result<Expression, ()> {
+        self.lex();
+        let start = self.location();
+        if !self.is(TokenKind::Identifier) && !self.is(TokenKind::String) {
+            self.error(start, "unexpected token!");
+            return Err(());
+        }
+        let Ok((value, value_end)) = self.parse_generic_primary() else {
+            self.error(start, "unexpected token!");
+            return Err(());
+        };
+        *end = value_end;
+        if kind == "offset" {
+            return Ok(value);
+        }
+        match self.apply_specifier(&value, "IMGREL") {
+            Some(modified) => Ok(modified),
+            None => {
+                self.error(start, "cannot apply 'imagerel' to this expression");
+                Err(())
+            }
+        }
+    }
+
+    fn parse_intel_dot_operator(
+        &mut self,
+        expression: &mut IntelExpression,
+        end: &mut SourceLocation,
+    ) -> Result<(), ()> {
+        let token = self.lexer.token.clone();
+        let text = token.text.strip_prefix('.').unwrap_or(&token.text);
+        let Ok(offset) = text.parse::<u64>() else {
+            return self.intel_failure(token.location(), "Unexpected offset");
+        };
+        *end = token.end_location();
+        self.lex();
+        expression.immediate = expression.immediate.wrapping_add(offset as i64);
+        Ok(())
     }
 }
 
@@ -14565,12 +15630,21 @@ impl<'s> Assembler<'s> {
         operands: &[ParsedOperand],
         state: &InstructionState,
     ) -> MatchOutcome {
+        let variant = if self.dialect == Syntax::Intel { 1 } else { 0 };
+        self.run_matcher_in(operands, state, variant)
+    }
+
+    fn run_matcher_in(
+        &mut self,
+        operands: &[ParsedOperand],
+        state: &InstructionState,
+        variant: usize,
+    ) -> MatchOutcome {
         let context = MatchContext {
             forced_prefix: state.forced_prefix,
             forced_no_flags: state.forced_no_flags,
             uses_extended_registers: state.uses_extended_registers,
         };
-        let variant = if self.dialect == Syntax::Intel { 1 } else { 0 };
         let mode = if self.code_16_gcc {
             Mode::Bits32
         } else {
@@ -14806,24 +15880,157 @@ impl<'s> Assembler<'s> {
         state: &InstructionState,
         prefixes: u32,
     ) -> bool {
-        let outcome = self.run_matcher(operands, state);
-        match outcome.status {
-            MatchStatus::Success => {
-                let instruction = outcome
-                    .instruction
-                    .unwrap_or_else(|| MachineInstruction::new(0));
-                self.finish_instruction(location, instruction, operands, state, prefixes)
-            }
-            MatchStatus::MissingFeature => {
-                self.missing_feature_error(location, &outcome.missing_features)
-            }
-            MatchStatus::MnemonicFail => {
-                let base = operands[0].token_text().to_string();
-                self.error(location, &format!("invalid instruction mnemonic '{base}'"))
-            }
-            MatchStatus::Unsupported => self.error(location, "unsupported instruction"),
-            _ => self.error(location, "invalid operand for instruction"),
+        let saved_mode = self.mode;
+        let forced = self.forced_data_prefix == Some(Mode::Bits32);
+        if forced {
+            self.mode = Mode::Bits32;
         }
+        let mut working = operands.to_vec();
+        let without_size = working
+            .iter()
+            .position(|operand| operand.memory().is_some_and(|memory| memory.size == 0));
+        let mnemonic = working[0].token_text().to_string();
+        if let Some(position) = without_size {
+            if matches!(mnemonic.as_str(), "call" | "jmp" | "push" | "pop") {
+                let width = self.pointer_width();
+                if let ParsedKind::Memory(memory) = &mut working[position].kind {
+                    memory.size = width;
+                }
+            }
+        }
+        let mut results: Vec<MatchStatus> = Vec::new();
+        let mut instruction: Option<MachineInstruction> = None;
+        let mut missing_features: Vec<String> = Vec::new();
+        let mut error_index: Option<usize> = None;
+        if mnemonic == "push" && working.len() == 2 {
+            if let ParsedKind::Immediate(Expression::Constant(value)) = working[1].kind {
+                let bits = self.pointer_width();
+                let signed = bits >= 64 || {
+                    let limit = 1i64 << (bits - 1);
+                    (-limit..limit).contains(&value)
+                };
+                let unsigned = bits >= 64 || (value as u64) < (1u64 << bits);
+                if signed || unsigned {
+                    let suffix = match self.mode {
+                        Mode::Bits64 => "q",
+                        Mode::Bits32 => "l",
+                        Mode::Bits16 => "w",
+                    };
+                    let mut attempt = working.clone();
+                    attempt[0] =
+                        ParsedOperand::token(&format!("{mnemonic}{suffix}"), working[0].start);
+                    let outcome = self.run_matcher_in(&attempt, state, 0);
+                    if outcome.status == MatchStatus::Success {
+                        instruction = outcome.instruction;
+                    }
+                    results.push(outcome.status);
+                }
+            }
+        }
+        let still_without_size = without_size.filter(|position| {
+            working[*position]
+                .memory()
+                .is_some_and(|memory| memory.size == 0)
+        });
+        if let Some(position) = still_without_size {
+            for size in [8u32, 16, 32, 64, 80, 128, 256, 512] {
+                if let ParsedKind::Memory(memory) = &mut working[position].kind {
+                    memory.size = size;
+                }
+                let last_opcode = instruction.as_ref().map(|held| held.opcode);
+                let outcome = self.run_matcher(&working, state);
+                if outcome.status == MatchStatus::Success {
+                    instruction = outcome.instruction.clone();
+                }
+                let opcode = instruction.as_ref().map(|held| held.opcode);
+                if results.is_empty() || last_opcode != opcode {
+                    results.push(outcome.status);
+                }
+                if results.last() == Some(&MatchStatus::MissingFeature) {
+                    missing_features = outcome.missing_features.clone();
+                }
+            }
+            if let ParsedKind::Memory(memory) = &mut working[position].kind {
+                memory.size = 0;
+            }
+        }
+        if results.is_empty() {
+            let outcome = self.run_matcher(&working, state);
+            if outcome.status == MatchStatus::Success {
+                instruction = outcome.instruction.clone();
+            }
+            error_index = outcome.error_index;
+            results.push(outcome.status);
+            if outcome.status == MatchStatus::MissingFeature {
+                missing_features = outcome.missing_features;
+            }
+        }
+        if let Some(position) = without_size {
+            if let ParsedKind::Memory(memory) = &mut working[position].kind {
+                memory.size = 0;
+            }
+        }
+        if forced {
+            self.mode = Mode::Bits16;
+            self.forced_data_prefix = None;
+        } else {
+            self.mode = saved_mode;
+        }
+        if results.last() == Some(&MatchStatus::MnemonicFail) {
+            let range_end = SourceLocation {
+                buffer: location.buffer,
+                position: operands[0].end,
+            };
+            return self.error_range(
+                location,
+                &format!("invalid instruction mnemonic '{mnemonic}'"),
+                (location, range_end),
+            );
+        }
+        let count = |status: MatchStatus| results.iter().filter(|held| **held == status).count();
+        let successes = count(MatchStatus::Success);
+        if successes == 1 {
+            let instruction = instruction.unwrap_or_else(|| MachineInstruction::new(0));
+            return self.finish_instruction(location, instruction, &working, state, prefixes);
+        }
+        if successes > 1 {
+            let position = without_size.unwrap_or(0);
+            let at = self.statement_location(working[position].start);
+            let end = self.statement_location(working[position].end);
+            return self.error_range(
+                at,
+                &format!("ambiguous operand size for instruction '{mnemonic}'"),
+                (at, end),
+            );
+        }
+        if count(MatchStatus::Unsupported) == 1 {
+            return self.error(location, "unsupported instruction");
+        }
+        if count(MatchStatus::MissingFeature) == 1 {
+            return self.missing_feature_error(location, &missing_features);
+        }
+        if count(MatchStatus::InvalidOperand) == 1 {
+            return self.error(location, "invalid operand for instruction");
+        }
+        for (status, text) in [
+            (
+                MatchStatus::InvalidUnsigned4,
+                "immediate must be an integer in range [0, 15]",
+            ),
+            (
+                MatchStatus::InvalidUnsigned6,
+                "immediate must be an integer in range [0, 63]",
+            ),
+        ] {
+            if count(status) == 1 {
+                let at = error_index
+                    .and_then(|index| working.get(index))
+                    .map(|operand| self.statement_location(operand.start))
+                    .unwrap_or(location);
+                return self.error(at, text);
+            }
+        }
+        self.error(location, "unknown instruction mnemonic")
     }
 
     fn validate_instruction(

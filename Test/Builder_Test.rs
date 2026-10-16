@@ -61698,6 +61698,7 @@ mod reference {
         pub(super) environment: BTreeMap<String, String>,
         pub(super) tools: &'t BTreeMap<String, ToolFunction>,
         pub(super) missing_tool: Option<String>,
+        pub(super) errors_before_output: bool,
     }
 
     impl<'t> World<'t> {
@@ -61856,11 +61857,20 @@ mod reference {
             if let Some(saved) = saved_environment {
                 world.environment = saved;
             }
+            let errors_first = std::mem::take(&mut world.errors_before_output);
+            let joined = |first: Vec<u8>, second: Vec<u8>| {
+                let (mut leading, trailing) = if errors_first {
+                    (second, first)
+                } else {
+                    (first, second)
+                };
+                leading.extend_from_slice(&trailing);
+                leading
+            };
             let mut out = outcome.stdout;
             let mut err = outcome.stderr;
             if stderr_to_stdout {
-                out.extend_from_slice(&err);
-                err = Vec::new();
+                out = joined(out, std::mem::take(&mut err));
             }
             let mut piped_error = Vec::new();
             if stderr_to_pipe {
@@ -61875,8 +61885,7 @@ mod reference {
                 }
                 None => {
                     if position + 1 < count {
-                        out.extend_from_slice(&piped_error);
-                        input = out;
+                        input = joined(out, piped_error);
                     }
                 }
             }
@@ -62247,6 +62256,7 @@ mod reference {
                 environment: BTreeMap::new(),
                 tools: &self.tools,
                 missing_tool: None,
+                errors_before_output: false,
             };
             world.folders.insert(format!("/output{folder}/Output"));
             let mut failure: Option<String> = None;
@@ -63389,6 +63399,7 @@ mod reference_checks {
             environment: BTreeMap::new(),
             tools: &tools,
             missing_tool: None,
+            errors_before_output: false,
         };
         let run = |world: &mut World, line: &str| -> i32 {
             let script = shell_parse(line).unwrap();
@@ -71661,6 +71672,7 @@ mod x86_assembly {
                 }
             }
         }
+        world.errors_before_output = true;
         ToolOutcome {
             status,
             stdout,
@@ -71727,6 +71739,103 @@ mod x86_assembly {
     #[ignore]
     fn suite_mc_x86() {
         mc_suite("mc-x86", "MC/X86");
+    }
+
+    fn assemble_intel(source: &str, masm_integers: bool) -> (String, String) {
+        let mut options = AssemblerOptions::new("x86_64-unknown-unknown");
+        options.input_syntax = Syntax::Intel;
+        options.output_syntax = Some(Syntax::Att);
+        options.show_encoding = true;
+        options.masm_integers = masm_integers;
+        let result =
+            assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+        let output = String::from_utf8_lossy(&result.output)
+            .lines()
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .collect::<Vec<_>>()
+            .join("\n");
+        (output, format_assembly_messages(&render_messages(&result)))
+    }
+
+    #[test]
+    fn intel_operands_assemble_to_the_bytes_llvm_writes() {
+        let (output, errors) = assemble_intel(
+            "mov eax, dword ptr [rbx + 4*rcx + 16]\n\
+             lea rdi, [(rax + rdi) + 1]\n\
+             mov rax, qword ptr fs:[0x28]\n\
+             push 1\n\
+             mov eax, (1 shl 4) or 3\n\
+             vaddps zmm1 {k1} {z}, zmm2, zmmword ptr [rdx - 64]\n\
+             mov ecx, [rsp + 8*rax]\n\
+             call qword ptr [rip + 16]\n",
+            false,
+        );
+        assert_eq!(errors, "");
+        for expected in [
+            "movl 16(%rbx,%rcx,4), %eax # encoding: [0x8b,0x44,0x8b,0x10]",
+            "leaq 1(%rax,%rdi), %rdi # encoding: [0x48,0x8d,0x7c,0x38,0x01]",
+            "movq %fs:40, %rax # encoding: [0x64,0x48,0x8b,0x04,0x25,0x28,0x00,0x00,0x00]",
+            "pushq $1 # encoding: [0x6a,0x01]",
+            "movl $19, %eax # encoding: [0xb8,0x13,0x00,0x00,0x00]",
+            "vaddps -64(%rdx), %zmm2, %zmm1 {%k1} {z} # encoding: [0x62,0xf1,0x6c,0xc9,0x58,0x4a,0xff]",
+            "movl (%rsp,%rax,8), %ecx # encoding: [0x8b,0x0c,0xc4]",
+            "callq *16(%rip) # encoding: [0xff,0x15,0x10,0x00,0x00,0x00]",
+        ] {
+            assert!(output.contains(expected), "{expected} is missing from\n{output}");
+        }
+    }
+
+    #[test]
+    fn intel_operands_are_refused_where_llvm_refuses_them_and_the_next_line_still_assembles() {
+        let (output, errors) = assemble_intel(
+            "inc [rax]\n\
+             mov eax, [eax*3]\n\
+             mov eax, [rax + rbx + rcx]\n\
+             mov eax, [rax*2 - rbx]\n\
+             mov eax, dword ptr eax\n\
+             nop\n",
+            false,
+        );
+        for expected in [
+            "<stdin>:1:5: error: ambiguous operand size for instruction 'inc'",
+            "<stdin>:2:15: error: scale factor in address must be 1, 2, 4 or 8",
+            "<stdin>:3:26: error: BaseReg/IndexReg already set!",
+            "<stdin>:4:17: error: Scale can't be negative",
+            "<stdin>:5:20: error: expected memory operand after 'ptr', found register operand instead",
+        ] {
+            assert!(errors.contains(expected), "{expected} is missing from\n{errors}");
+        }
+        assert!(output.contains("nop # encoding: [0x90]"), "{output}");
+    }
+
+    #[test]
+    fn masm_integers_read_radix_suffixes() {
+        let (output, errors) = assemble_intel(
+            "mov eax, 10h\n\
+             mov eax, 0ffffffffh\n\
+             mov eax, 0xa2h\n\
+             add rbx, 0B0h\n\
+             mov eax, 101y\n\
+             mov eax, 101b\n\
+             mov eax, 19d\n\
+             mov eax, 17o\n",
+            true,
+        );
+        assert_eq!(errors, "");
+        for expected in [
+            "movl $16, %eax",
+            "movl $4294967295, %eax",
+            "movl $162, %eax",
+            "addq $176, %rbx",
+            "movl $5, %eax",
+            "movl $19, %eax",
+            "movl $15, %eax",
+        ] {
+            assert!(
+                output.contains(expected),
+                "{expected} is missing from\n{output}"
+            );
+        }
     }
 
     #[test]
