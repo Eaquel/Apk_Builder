@@ -5006,6 +5006,16 @@ impl<'t> Printer<'t> {
     }
 
     pub fn print(&self, instruction: &MachineInstruction, address: u64) -> String {
+        let commented = self.comments.borrow().is_some();
+        let comment = if commented {
+            instruction_comment(self.target, instruction)
+        } else {
+            None
+        };
+        self.custom_comment.set(comment.is_some());
+        if let (Some(text), Some(comments)) = (comment, self.comments.borrow_mut().as_mut()) {
+            comments.push_str(&text);
+        }
         let mut out = String::new();
         self.instruction_flags(instruction, &mut out);
         let record = self.target.instructions[instruction.opcode].record.as_str();
@@ -5028,6 +5038,1684 @@ impl<'t> Printer<'t> {
             }
         }
         out
+    }
+}
+
+const TERNARY_LOGIC_FUNCTIONS: [&str; 256] = [
+    "0",
+    "~(a | b | c)",
+    "c & ~(a | b)",
+    "~(a | b)",
+    "b & ~(a | c)",
+    "~(a | c)",
+    "~a & (b ^ c)",
+    "~(a | (b & c))",
+    "b & c & ~a",
+    "~(a | (b ^ c))",
+    "c & ~a",
+    "~a & (c | ~b)",
+    "b & ~a",
+    "~a & (b | ~c)",
+    "~a & (b | c)",
+    "~a",
+    "a & ~(b | c)",
+    "~(b | c)",
+    "~b & (a ^ c)",
+    "~((a & c) | b)",
+    "~c & (a ^ b)",
+    "~((a & b) | c)",
+    "a ^ ((a & b) | (b ^ c))",
+    "(a & (b ^ c)) ^ ~(b & c)",
+    "(a ^ b) & (a ^ c)",
+    "~((a & b) | (b ^ c))",
+    "a ^ ((a & b) | c)",
+    "(a & c) ^ (c | ~b)",
+    "a ^ ((a & c) | b)",
+    "(a & b) ^ (b | ~c)",
+    "a ^ (b | c)",
+    "~(a & (b | c))",
+    "a & c & ~b",
+    "~(b | (a ^ c))",
+    "c & ~b",
+    "~b & (c | ~a)",
+    "(a ^ b) & (b ^ c)",
+    "~((a & b) | (a ^ c))",
+    "b ^ ((a & b) | c)",
+    "(b & c) ^ (c | ~a)",
+    "c & (a ^ b)",
+    "(a | b) ^ ((a & b) | ~c)",
+    "c & ~(a & b)",
+    "(c & (a ^ b)) | ~(a | b)",
+    "(b | c) & (a ^ b)",
+    "a ^ (b | ~c)",
+    "(a & b) ^ (b | c)",
+    "(c & ~b) | ~a",
+    "a & ~b",
+    "~b & (a | ~c)",
+    "~b & (a | c)",
+    "~b",
+    "b ^ (a | (b & c))",
+    "(a & b) ^ (a | ~c)",
+    "b ^ (a | c)",
+    "~(b & (a | c))",
+    "(a | c) & (a ^ b)",
+    "b ^ (a | ~c)",
+    "(a & b) ^ (a | c)",
+    "(c & ~a) | ~b",
+    "a ^ b",
+    "~(a | c) | (a ^ b)",
+    "(c & ~a) | (a ^ b)",
+    "~(a & b)",
+    "a & b & ~c",
+    "~(c | (a ^ b))",
+    "(a ^ c) & (b ^ c)",
+    "~((a & c) | (a ^ b))",
+    "b & ~c",
+    "~c & (b | ~a)",
+    "c ^ ((a & c) | b)",
+    "(b & c) ^ (b | ~a)",
+    "b & (a ^ c)",
+    "(a | c) ^ ((a & c) | ~b)",
+    "(b | c) & (a ^ c)",
+    "a ^ (c | ~b)",
+    "b & ~(a & c)",
+    "(b & (a ^ c)) | ~(a | c)",
+    "(a & c) ^ (b | c)",
+    "(b & ~c) | ~a",
+    "a & ~c",
+    "~c & (a | ~b)",
+    "c ^ (a | (b & c))",
+    "(a & c) ^ (a | ~b)",
+    "~c & (a | b)",
+    "~c",
+    "c ^ (a | b)",
+    "~(c & (a | b))",
+    "(a | b) & (a ^ c)",
+    "c ^ (a | ~b)",
+    "a ^ c",
+    "~(a | b) | (a ^ c)",
+    "(a & c) ^ (a | b)",
+    "(b & ~a) | ~c",
+    "(b & ~a) | (a ^ c)",
+    "~(a & c)",
+    "a & (b ^ c)",
+    "~(b ^ c) ^ (a | (b & c))",
+    "(a | c) & (b ^ c)",
+    "b ^ (c | ~a)",
+    "(a | b) & (b ^ c)",
+    "c ^ (b | ~a)",
+    "b ^ c",
+    "~(a | b) | (b ^ c)",
+    "(a | b) & (c ^ (a & b))",
+    "b ^ c ^ ~a",
+    "c ^ (a & b)",
+    "~(a | b) | (c ^ (a & b))",
+    "b ^ (a & c)",
+    "~(a | c) | (b ^ (a & c))",
+    "(b & ~a) | (b ^ c)",
+    "~a | (b ^ c)",
+    "a & ~(b & c)",
+    "(a & (b ^ c)) | ~(b | c)",
+    "(b & c) ^ (a | c)",
+    "(a & ~c) | ~b",
+    "(b & c) ^ (a | b)",
+    "(a & ~b) | ~c",
+    "(a & ~b) | (b ^ c)",
+    "~(b & c)",
+    "a ^ (b & c)",
+    "~(b | c) | (a ^ (b & c))",
+    "(a & ~b) | (a ^ c)",
+    "~b | (a ^ c)",
+    "(a & ~c) | (a ^ b)",
+    "~c | (a ^ b)",
+    "(a ^ b) | (a ^ c)",
+    "~(a & b & c)",
+    "a & b & c",
+    "~((a ^ b) | (a ^ c))",
+    "c & ~(a ^ b)",
+    "~(a ^ b) & (c | ~a)",
+    "b & ~(a ^ c)",
+    "~(a ^ c) & (b | ~a)",
+    "(b | c) & (a ^ b ^ c)",
+    "(b & c) ^ ~a",
+    "b & c",
+    "~(b ^ c) & (b | ~a)",
+    "c & (b | ~a)",
+    "~((b & c) ^ (a | b))",
+    "b & (c | ~a)",
+    "~((b & c) ^ (a | c))",
+    "a ^ ((a ^ b) | (a ^ c))",
+    "(b & c) | ~a",
+    "a & ~(b ^ c)",
+    "~(b ^ c) & (a | ~b)",
+    "(a | c) & (a ^ b ^ c)",
+    "(a & c) ^ ~b",
+    "(a | b) & (a ^ b ^ c)",
+    "(a & b) ^ ~c",
+    "a ^ b ^ c",
+    "~(a | b) | (a ^ b ^ c)",
+    "~(b ^ c) & (a | b)",
+    "~(b ^ c)",
+    "c ^ (a & ~b)",
+    "~((a | b) & (b ^ c))",
+    "b ^ (a & ~c)",
+    "~((a | c) & (b ^ c))",
+    "(b & c) | (a ^ (b | c))",
+    "~(a & (b ^ c))",
+    "a & c",
+    "~(a ^ c) & (a | ~b)",
+    "c & (a | ~b)",
+    "~((a & c) ^ (a | b))",
+    "~(a ^ c) & (a | b)",
+    "~(a ^ c)",
+    "c ^ (b & ~a)",
+    "~((a | b) & (a ^ c))",
+    "c & (a | b)",
+    "~c ^ (a | b)",
+    "c",
+    "c | ~(a | b)",
+    "b ^ (a & (b ^ c))",
+    "(b & c) | ~(a ^ c)",
+    "(b & ~a) | c",
+    "c | ~a",
+    "a & (c | ~b)",
+    "~((a & c) ^ (b | c))",
+    "a ^ ((a ^ c) & (b ^ c))",
+    "(a & c) | ~b",
+    "a ^ (b & ~c)",
+    "~((b | c) & (a ^ c))",
+    "(a & c) | (a ^ b ^ c)",
+    "~(b & (a ^ c))",
+    "a ^ (b & (a ^ c))",
+    "(a & c) | ~(b ^ c)",
+    "(a & ~b) | c",
+    "c | ~b",
+    "(a & c) | (a ^ b)",
+    "~((a ^ c) & (b ^ c))",
+    "c | (a ^ b)",
+    "c | ~(a & b)",
+    "a & b",
+    "~(a ^ b) & (a | ~c)",
+    "~(a ^ b) & (a | c)",
+    "~(a ^ b)",
+    "b & (a | ~c)",
+    "~((a & b) ^ (a | c))",
+    "b ^ (c & ~a)",
+    "~((a | c) & (a ^ b))",
+    "b & (a | c)",
+    "~b ^ (a | c)",
+    "c ^ (a & (b ^ c))",
+    "(b & c) | ~(a ^ b)",
+    "b",
+    "b | ~(a | c)",
+    "(c & ~a) | b",
+    "b | ~a",
+    "a & (b | ~c)",
+    "~((a & b) ^ (b | c))",
+    "a ^ (c & ~b)",
+    "~((b | c) & (a ^ b))",
+    "a ^ ((a ^ b) & (b ^ c))",
+    "(a & b) | ~c",
+    "(a & b) | (a ^ b ^ c)",
+    "~(c & (a ^ b))",
+    "a ^ (c & (a ^ b))",
+    "(a & b) | ~(b ^ c)",
+    "(a & b) | (a ^ c)",
+    "~((a ^ b) & (b ^ c))",
+    "(a & ~c) | b",
+    "b | ~c",
+    "b | (a ^ c)",
+    "b | ~(a & c)",
+    "a & (b | c)",
+    "~a ^ (b | c)",
+    "c ^ (b & (a ^ c))",
+    "(a & c) | ~(a ^ b)",
+    "b ^ (c & (a ^ b))",
+    "(a & b) | ~(a ^ c)",
+    "(a & b) | (b ^ c)",
+    "~((a ^ b) & (a ^ c))",
+    "(a | b) & ((a & b) | c)",
+    "(a & b) | (b ^ c ^ ~a)",
+    "(a & b) | c",
+    "c | ~(a ^ b)",
+    "(a & c) | b",
+    "b | ~(a ^ c)",
+    "b | c",
+    "~a | b | c",
+    "a",
+    "a | ~(b | c)",
+    "a | (c & ~b)",
+    "a | ~b",
+    "a | (b & ~c)",
+    "a | ~c",
+    "a | (b ^ c)",
+    "a | ~(b & c)",
+    "a | (b & c)",
+    "a | ~(b ^ c)",
+    "a | c",
+    "~b | a | c",
+    "a | b",
+    "~c | a | b",
+    "a | b | c",
+    "-1",
+];
+
+const SHUFFLE_UNDEFINED: i64 = -1;
+const SHUFFLE_ZERO: i64 = -2;
+
+fn decode_insert_ps(immediate: i64, source_is_memory: bool) -> Vec<i64> {
+    let mut mask = vec![0, 1, 2, 3];
+    let zero = immediate & 15;
+    let destination = ((immediate >> 4) & 3) as usize;
+    let source = if source_is_memory {
+        0
+    } else {
+        (immediate >> 6) & 3
+    };
+    mask[destination] = 4 + source;
+    for (lane, slot) in mask.iter_mut().enumerate() {
+        if zero & (1 << lane) != 0 {
+            *slot = SHUFFLE_ZERO;
+        }
+    }
+    mask
+}
+
+fn decode_insert_element(count: i64, index: i64, length: i64) -> Vec<i64> {
+    let mut mask: Vec<i64> = (0..count).collect();
+    for offset in 0..length {
+        mask[(index + offset) as usize] = count + offset;
+    }
+    mask
+}
+
+fn decode_move_high_low(count: i64) -> Vec<i64> {
+    (count / 2..count)
+        .map(|lane| count + lane)
+        .chain(count / 2..count)
+        .collect()
+}
+
+fn decode_move_low_high(count: i64) -> Vec<i64> {
+    (0..count / 2)
+        .chain((0..count / 2).map(|lane| count + lane))
+        .collect()
+}
+
+fn decode_duplicate(count: i64, odd: i64) -> Vec<i64> {
+    (0..count / 2)
+        .flat_map(|pair| [2 * pair + odd, 2 * pair + odd])
+        .collect()
+}
+
+fn decode_duplicate_double(count: i64) -> Vec<i64> {
+    (0..count)
+        .step_by(2)
+        .flat_map(|lane| [lane, lane])
+        .collect()
+}
+
+fn decode_shift_left_bytes(count: i64, immediate: i64) -> Vec<i64> {
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(16) {
+        for index in 0..16 {
+            mask.push(if index >= immediate {
+                index - immediate + lane
+            } else {
+                SHUFFLE_ZERO
+            });
+        }
+    }
+    mask
+}
+
+fn decode_shift_right_bytes(count: i64, immediate: i64) -> Vec<i64> {
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(16) {
+        for index in 0..16 {
+            let base = index + immediate;
+            mask.push(if base >= 16 {
+                SHUFFLE_ZERO
+            } else {
+                base + lane
+            });
+        }
+    }
+    mask
+}
+
+fn decode_align_bytes(count: i64, immediate: i64) -> Vec<i64> {
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(16) {
+        for index in 0..16 {
+            let mut base = index + immediate;
+            if base >= 16 {
+                base += count - 16;
+            }
+            mask.push(base + lane);
+        }
+    }
+    mask
+}
+
+fn decode_align_elements(count: i64, immediate: i64) -> Vec<i64> {
+    let shift = immediate & (count - 1);
+    (0..count).map(|index| index + shift).collect()
+}
+
+fn decode_shuffle_elements(count: i64, bits: i64, immediate: i64) -> Vec<i64> {
+    let lanes = ((count * bits) / 128).max(1);
+    let per_lane = count / lanes;
+    let mut splat = ((immediate & 0xff) as u32).wrapping_mul(0x0101_0101);
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(per_lane as usize) {
+        for _ in 0..per_lane {
+            mask.push(i64::from(splat) % per_lane + lane);
+            splat /= per_lane as u32;
+        }
+    }
+    mask
+}
+
+fn decode_shuffle_half_words(count: i64, immediate: i64, high: bool) -> Vec<i64> {
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(8) {
+        let mut selector = immediate;
+        let mut shuffled = Vec::new();
+        for _ in 0..4 {
+            shuffled.push(selector & 3);
+            selector >>= 2;
+        }
+        if high {
+            mask.extend((0..4).map(|index| lane + index));
+            mask.extend(shuffled.iter().map(|index| lane + 4 + index));
+        } else {
+            mask.extend(shuffled.iter().map(|index| lane + index));
+            mask.extend((4..8).map(|index| lane + index));
+        }
+    }
+    mask
+}
+
+fn decode_swap_halves(count: i64) -> Vec<i64> {
+    let half = count / 2;
+    (0..half).map(|index| index + half).chain(0..half).collect()
+}
+
+fn decode_shuffle_pairs(count: i64, bits: i64, immediate: i64) -> Vec<i64> {
+    let per_lane = 128 / bits;
+    let mut selector = immediate;
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(per_lane as usize) {
+        for source in (0..count * 2).step_by(count as usize) {
+            for _ in 0..per_lane / 2 {
+                mask.push(selector % per_lane + source + lane);
+                selector /= per_lane;
+            }
+        }
+        if per_lane == 4 {
+            selector = immediate;
+        }
+    }
+    mask
+}
+
+fn decode_unpack(count: i64, bits: i64, high: bool) -> Vec<i64> {
+    let lanes = ((count * bits) / 128).max(1);
+    let per_lane = count / lanes;
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(per_lane as usize) {
+        let start = if high { lane + per_lane / 2 } else { lane };
+        for index in start..start + per_lane / 2 {
+            mask.push(index);
+            mask.push(index + count);
+        }
+    }
+    mask
+}
+
+fn decode_subvector_broadcast(destination: i64, source: i64) -> Vec<i64> {
+    (0..destination / source).flat_map(|_| 0..source).collect()
+}
+
+fn decode_shuffle_lanes(count: i64, bits: i64, immediate: i64) -> Vec<i64> {
+    let per_lane = 128 / bits;
+    let lanes = count / per_lane;
+    let mut selector = immediate;
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(per_lane as usize) {
+        let mut index = (selector % lanes) * per_lane;
+        selector /= lanes;
+        if lane >= count / 2 {
+            index += count;
+        }
+        mask.extend((0..per_lane).map(|offset| index + offset));
+    }
+    mask
+}
+
+fn decode_permute_halves(count: i64, immediate: i64) -> Vec<i64> {
+    let half = count / 2;
+    let mut mask = Vec::new();
+    for lane in 0..2 {
+        let selector = immediate >> (lane * 4);
+        let begin = (selector & 3) * half;
+        for index in begin..begin + half {
+            mask.push(if selector & 8 != 0 {
+                SHUFFLE_ZERO
+            } else {
+                index
+            });
+        }
+    }
+    mask
+}
+
+fn decode_blend(count: i64, immediate: i64) -> Vec<i64> {
+    (0..count)
+        .map(|index| {
+            if (immediate >> (index % 8)) & 1 != 0 {
+                count + index
+            } else {
+                index
+            }
+        })
+        .collect()
+}
+
+fn decode_permute(count: i64, immediate: i64) -> Vec<i64> {
+    let mut mask = Vec::new();
+    for lane in (0..count).step_by(4) {
+        for index in 0..4 {
+            mask.push(lane + ((immediate >> (2 * index)) & 3));
+        }
+    }
+    mask
+}
+
+fn decode_zero_extend(source_bits: i64, destination_bits: i64, count: i64) -> Vec<i64> {
+    let scale = destination_bits / source_bits;
+    let mut mask = Vec::new();
+    for index in 0..count {
+        mask.push(index);
+        mask.extend(std::iter::repeat_n(SHUFFLE_ZERO, (scale - 1) as usize));
+    }
+    mask
+}
+
+fn decode_scalar_move(count: i64) -> Vec<i64> {
+    std::iter::once(count).chain(1..count).collect()
+}
+
+fn decode_bit_field(
+    count: i64,
+    element_bits: i64,
+    length: i64,
+    index: i64,
+    insert: bool,
+) -> Vec<i64> {
+    let half = count / 2;
+    let mut length = length & 0x3f;
+    let mut index = index & 0x3f;
+    if length % element_bits != 0 || index % element_bits != 0 {
+        return Vec::new();
+    }
+    if length == 0 {
+        length = 64;
+    }
+    if length + index > 64 {
+        return vec![SHUFFLE_UNDEFINED; count as usize];
+    }
+    length /= element_bits;
+    index /= element_bits;
+    let mut mask = Vec::new();
+    if insert {
+        mask.extend(0..index);
+        mask.extend((0..length).map(|offset| offset + count));
+        mask.extend(index + length..half);
+    } else {
+        mask.extend((0..length).map(|offset| offset + index));
+        mask.extend(std::iter::repeat_n(
+            SHUFFLE_ZERO,
+            (half - length).max(0) as usize,
+        ));
+    }
+    mask.extend(std::iter::repeat_n(
+        SHUFFLE_UNDEFINED,
+        (count - half) as usize,
+    ));
+    mask
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum FusedOrder {
+    FourRegisters,
+    FourMemoryLast,
+    FourMemoryMiddle,
+    First,
+    Second,
+    Third,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum TernarySource {
+    Register,
+    Memory,
+    Broadcast32,
+    Broadcast64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ShuffleFamily {
+    Blend(i64),
+    InsertPacked,
+    MoveLowHigh,
+    MoveHighLow,
+    InsertElement(i64, i64, i64),
+    DuplicateLow,
+    DuplicateHigh,
+    DuplicateDouble,
+    ShiftLeftBytes,
+    ShiftRightBytes,
+    AlignBytes,
+    AlignElements(i64),
+    ShuffleElements(i64),
+    ShuffleHighWords,
+    ShuffleLowWords,
+    ShuffleMultimediaWords,
+    SwapHalves,
+    Unpack(i64, bool),
+    ShufflePairs(i64),
+    ShuffleLanes(i64),
+    PermuteInLane(i64),
+    PermuteHalves,
+    Permute,
+    ScalarMove(i64),
+    ZeroMoveLow,
+    ExtractField,
+    InsertField,
+    SubvectorBroadcast(i64, i64),
+    ZeroExtend(i64, i64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommentRule {
+    Fused {
+        order: FusedOrder,
+        register: bool,
+        accumulate: &'static str,
+        negate: bool,
+    },
+    Ternary(TernarySource),
+    FloatClass(bool),
+    Shuffle(ShuffleFamily, bool),
+}
+
+struct CommentRules {
+    rules: BTreeMap<String, CommentRule>,
+}
+
+impl CommentRules {
+    fn add(&mut self, names: Vec<String>, rule: CommentRule) {
+        for name in names {
+            self.rules.entry(name).or_insert(rule);
+        }
+    }
+
+    fn shuffle(&mut self, names: Vec<String>, family: ShuffleFamily, register: bool) {
+        self.add(names, CommentRule::Shuffle(family, register));
+    }
+}
+
+fn names_avx(instruction: &str, suffix: &str, source: &str) -> Vec<String> {
+    vec![format!("V{instruction}{suffix}{source}")]
+}
+
+fn names_masked(instruction: &str, suffix: &str, source: &str) -> Vec<String> {
+    vec![format!("V{instruction}{suffix}{source}k")]
+}
+
+fn names_avx512(instruction: &str, suffix: &str, source: &str) -> Vec<String> {
+    vec![
+        format!("V{instruction}{suffix}{source}"),
+        format!("V{instruction}{suffix}{source}k"),
+        format!("V{instruction}{suffix}{source}kz"),
+    ]
+}
+
+fn names_avx512_internal(instruction: &str, suffix: &str, source: &str) -> Vec<String> {
+    vec![
+        format!("V{instruction}{suffix}{source}_Int"),
+        format!("V{instruction}{suffix}{source}k_Int"),
+        format!("V{instruction}{suffix}{source}kz_Int"),
+    ]
+}
+
+fn names_join(groups: Vec<Vec<String>>) -> Vec<String> {
+    groups.into_iter().flatten().collect()
+}
+
+fn names_every_width(instruction: &str, source: &str) -> Vec<String> {
+    names_join(vec![
+        names_avx512(instruction, "Z", source),
+        names_avx512(instruction, "Z256", source),
+        names_avx512(instruction, "Z128", source),
+        names_avx(instruction, "", source),
+        names_avx(instruction, "Y", source),
+        vec![format!("{instruction}{source}")],
+    ])
+}
+
+fn names_permute_in_lane(instruction: &str, source: &str) -> Vec<String> {
+    let source = format!("{source}i");
+    names_join(vec![
+        names_avx512(instruction, "Z", &source),
+        names_avx512(instruction, "Z256", &source),
+        names_avx512(instruction, "Z128", &source),
+        names_avx(instruction, "", &source),
+        names_avx(instruction, "Y", &source),
+    ])
+}
+
+fn names_permute(instruction: &str, source: &str) -> Vec<String> {
+    let source = format!("{source}i");
+    names_join(vec![
+        names_avx512(instruction, "Z", &source),
+        names_avx512(instruction, "Z256", &source),
+        names_avx(instruction, "Y", &source),
+    ])
+}
+
+fn names_shuffle_lanes(instruction: &str, source: &str) -> Vec<String> {
+    let source = format!("r{source}i");
+    let float = format!("SHUFF{instruction}");
+    let integer = format!("SHUFI{instruction}");
+    names_join(vec![
+        names_avx512(&float, "Z", &source),
+        names_avx512(&integer, "Z", &source),
+        names_avx512(&float, "Z256", &source),
+        names_avx512(&integer, "Z256", &source),
+    ])
+}
+
+fn names_fused_wide(instruction: &str, source: &str) -> Vec<String> {
+    names_join(vec![
+        names_avx512(instruction, "Z", source),
+        names_avx512(instruction, "Z256", source),
+        names_avx512(instruction, "Z128", source),
+    ])
+}
+
+fn names_fused(instruction: &str, source: &str) -> Vec<String> {
+    names_join(vec![
+        names_fused_wide(instruction, source),
+        names_avx(instruction, "", source),
+        names_avx(instruction, "Y", source),
+    ])
+}
+
+fn names_fused_packed(instruction: &str, register: bool) -> Vec<String> {
+    let double = format!("{instruction}PD");
+    let single = format!("{instruction}PS");
+    if register {
+        names_join(vec![names_fused(&double, "r"), names_fused(&single, "r")])
+    } else {
+        names_join(vec![
+            names_fused(&double, "m"),
+            names_fused(&single, "m"),
+            names_fused_wide(&double, "mb"),
+            names_fused_wide(&single, "mb"),
+        ])
+    }
+}
+
+fn names_fused_scalar(instruction: &str, register: bool) -> Vec<String> {
+    let source = if register { "r" } else { "m" };
+    let internal = format!("{source}_Int");
+    let double = format!("{instruction}SD");
+    let single = format!("{instruction}SS");
+    names_join(vec![
+        names_avx(&double, "", source),
+        names_avx(&single, "", source),
+        names_avx(&double, "", &internal),
+        names_avx(&single, "", &internal),
+        names_avx(&double, "Z", source),
+        names_avx(&single, "Z", source),
+        names_avx512_internal(&double, "Z", source),
+        names_avx512_internal(&single, "Z", source),
+    ])
+}
+
+fn names_fused_four(instruction: &str, source: &str, scalar: bool) -> Vec<String> {
+    let double = format!("{instruction}PD");
+    let single = format!("{instruction}PS");
+    let mut names = names_join(vec![
+        names_avx(&double, "4", source),
+        names_avx(&double, "4Y", source),
+        names_avx(&single, "4", source),
+        names_avx(&single, "4Y", source),
+    ]);
+    if scalar {
+        let internal = format!("{source}_Int");
+        let double = format!("{instruction}SD4");
+        let single = format!("{instruction}SS4");
+        names.extend(names_join(vec![
+            names_avx(&double, "", source),
+            names_avx(&single, "", source),
+            names_avx(&double, "", &internal),
+            names_avx(&single, "", &internal),
+        ]));
+    }
+    names
+}
+
+fn names_float_class_packed(instruction: &str, source: &str) -> Vec<String> {
+    let source = format!("{source}i");
+    names_join(vec![
+        names_avx(instruction, "Z", &source),
+        names_avx(instruction, "Z256", &source),
+        names_avx(instruction, "Z128", &source),
+        names_masked(instruction, "Z", &source),
+    ])
+}
+
+fn names_float_class_scalar(instruction: &str, source: &str) -> Vec<String> {
+    let source = format!("{source}i");
+    names_join(vec![
+        names_avx(instruction, "Z", &source),
+        names_masked(instruction, "Z", &source),
+    ])
+}
+
+fn names_plain(names: &[&str]) -> Vec<String> {
+    names.iter().map(|name| name.to_string()).collect()
+}
+
+fn build_comment_rules() -> CommentRules {
+    let mut rules = CommentRules {
+        rules: BTreeMap::new(),
+    };
+    for (operation, accumulate, negate, scalar) in [
+        ("FMADD", "+", false, true),
+        ("FMSUB", "-", false, true),
+        ("FNMADD", "+", true, true),
+        ("FNMSUB", "-", true, true),
+        ("FMADDSUB", "+/-", false, false),
+        ("FMSUBADD", "-/+", false, false),
+    ] {
+        for (source, order) in [
+            ("rr", FusedOrder::FourRegisters),
+            ("rm", FusedOrder::FourMemoryLast),
+            ("mr", FusedOrder::FourMemoryMiddle),
+        ] {
+            rules.add(
+                names_fused_four(operation, source, scalar),
+                CommentRule::Fused {
+                    order,
+                    register: true,
+                    accumulate,
+                    negate,
+                },
+            );
+        }
+    }
+    for (operation, accumulate, negate, scalar) in [
+        ("FMADD", "+", false, true),
+        ("FMSUB", "-", false, true),
+        ("FNMADD", "+", true, true),
+        ("FNMSUB", "-", true, true),
+        ("FMADDSUB", "+/-", false, false),
+        ("FMSUBADD", "-/+", false, false),
+    ] {
+        for (number, order) in [
+            ("132", FusedOrder::First),
+            ("213", FusedOrder::Second),
+            ("231", FusedOrder::Third),
+        ] {
+            let instruction = format!("{operation}{number}");
+            for register in [true, false] {
+                let rule = CommentRule::Fused {
+                    order,
+                    register,
+                    accumulate,
+                    negate,
+                };
+                rules.add(names_fused_packed(&instruction, register), rule);
+                if scalar {
+                    rules.add(names_fused_scalar(&instruction, register), rule);
+                }
+            }
+        }
+    }
+    for instruction in ["PTERNLOGD", "PTERNLOGQ"] {
+        for (source, kind) in [
+            ("r", TernarySource::Register),
+            ("m", TernarySource::Memory),
+            (
+                "mb",
+                if instruction == "PTERNLOGD" {
+                    TernarySource::Broadcast32
+                } else {
+                    TernarySource::Broadcast64
+                },
+            ),
+        ] {
+            let source = format!("r{source}i");
+            rules.add(
+                names_fused_wide(instruction, &source),
+                CommentRule::Ternary(kind),
+            );
+        }
+    }
+    for instruction in ["FPCLASSBF16", "FPCLASSPH", "FPCLASSPS", "FPCLASSPD"] {
+        rules.add(
+            names_float_class_packed(instruction, "r"),
+            CommentRule::FloatClass(true),
+        );
+        rules.add(
+            names_join(vec![
+                names_float_class_packed(instruction, "m"),
+                names_float_class_packed(instruction, "mb"),
+            ]),
+            CommentRule::FloatClass(false),
+        );
+    }
+    for instruction in ["FPCLASSSH", "FPCLASSSS", "FPCLASSSD"] {
+        rules.add(
+            names_float_class_scalar(instruction, "r"),
+            CommentRule::FloatClass(true),
+        );
+        rules.add(
+            names_float_class_scalar(instruction, "m"),
+            CommentRule::FloatClass(false),
+        );
+    }
+    for (base, bits, extra) in [
+        ("BLENDPD", 64, false),
+        ("BLENDPS", 32, false),
+        ("PBLENDW", 16, false),
+        ("PBLENDD", 32, true),
+    ] {
+        let avx = base;
+        let mut register = if extra {
+            Vec::new()
+        } else {
+            vec![format!("{base}rri")]
+        };
+        register.extend([format!("V{avx}rri"), format!("V{avx}Yrri")]);
+        let mut memory = if extra {
+            Vec::new()
+        } else {
+            vec![format!("{base}rmi")]
+        };
+        memory.extend([format!("V{avx}rmi"), format!("V{avx}Yrmi")]);
+        rules.shuffle(register, ShuffleFamily::Blend(bits), true);
+        rules.shuffle(memory, ShuffleFamily::Blend(bits), false);
+    }
+    rules.shuffle(
+        names_plain(&["INSERTPSrri", "VINSERTPSrri", "VINSERTPSZrri"]),
+        ShuffleFamily::InsertPacked,
+        true,
+    );
+    rules.shuffle(
+        names_plain(&["INSERTPSrmi", "VINSERTPSrmi", "VINSERTPSZrmi"]),
+        ShuffleFamily::InsertPacked,
+        false,
+    );
+    rules.shuffle(
+        names_plain(&["MOVLHPSrr", "VMOVLHPSrr", "VMOVLHPSZrr"]),
+        ShuffleFamily::MoveLowHigh,
+        true,
+    );
+    rules.shuffle(
+        names_plain(&["MOVHLPSrr", "VMOVHLPSrr", "VMOVHLPSZrr"]),
+        ShuffleFamily::MoveHighLow,
+        true,
+    );
+    for (name, family) in [
+        ("MOVHPD", ShuffleFamily::InsertElement(2, 1, 1)),
+        ("MOVHPS", ShuffleFamily::InsertElement(4, 2, 2)),
+        ("MOVLPD", ShuffleFamily::InsertElement(2, 0, 1)),
+        ("MOVLPS", ShuffleFamily::InsertElement(4, 0, 2)),
+    ] {
+        rules.shuffle(
+            vec![
+                format!("{name}rm"),
+                format!("V{name}rm"),
+                format!("V{name}Z128rm"),
+            ],
+            family,
+            false,
+        );
+    }
+    for (name, family) in [
+        ("MOVSLDUP", ShuffleFamily::DuplicateLow),
+        ("MOVSHDUP", ShuffleFamily::DuplicateHigh),
+        ("MOVDDUP", ShuffleFamily::DuplicateDouble),
+    ] {
+        rules.shuffle(names_every_width(name, "rr"), family, true);
+        rules.shuffle(names_every_width(name, "rm"), family, false);
+    }
+    for (name, family) in [
+        ("PSLLDQ", ShuffleFamily::ShiftLeftBytes),
+        ("PSRLDQ", ShuffleFamily::ShiftRightBytes),
+    ] {
+        rules.shuffle(
+            vec![
+                format!("{name}ri"),
+                format!("V{name}ri"),
+                format!("V{name}Yri"),
+                format!("V{name}Z128ri"),
+                format!("V{name}Z256ri"),
+                format!("V{name}Zri"),
+            ],
+            family,
+            true,
+        );
+        rules.shuffle(
+            vec![
+                format!("V{name}Z128mi"),
+                format!("V{name}Z256mi"),
+                format!("V{name}Zmi"),
+            ],
+            family,
+            false,
+        );
+    }
+    rules.shuffle(
+        names_every_width("PALIGNR", "rri"),
+        ShuffleFamily::AlignBytes,
+        true,
+    );
+    rules.shuffle(
+        names_every_width("PALIGNR", "rmi"),
+        ShuffleFamily::AlignBytes,
+        false,
+    );
+    for (name, bits) in [("ALIGNQ", 64), ("ALIGND", 32)] {
+        rules.shuffle(
+            names_fused_wide(name, "rri"),
+            ShuffleFamily::AlignElements(bits),
+            true,
+        );
+        rules.shuffle(
+            names_fused_wide(name, "rmi"),
+            ShuffleFamily::AlignElements(bits),
+            false,
+        );
+    }
+    for (name, family) in [
+        ("PSHUFD", ShuffleFamily::ShuffleElements(32)),
+        ("PSHUFHW", ShuffleFamily::ShuffleHighWords),
+        ("PSHUFLW", ShuffleFamily::ShuffleLowWords),
+    ] {
+        rules.shuffle(names_every_width(name, "ri"), family, true);
+        rules.shuffle(names_every_width(name, "mi"), family, false);
+    }
+    rules.shuffle(
+        names_plain(&["MMX_PSHUFWri"]),
+        ShuffleFamily::ShuffleMultimediaWords,
+        true,
+    );
+    rules.shuffle(
+        names_plain(&["MMX_PSHUFWmi"]),
+        ShuffleFamily::ShuffleMultimediaWords,
+        false,
+    );
+    rules.shuffle(names_plain(&["PSWAPDrr"]), ShuffleFamily::SwapHalves, true);
+    rules.shuffle(names_plain(&["PSWAPDrm"]), ShuffleFamily::SwapHalves, false);
+    for (name, bits, high, multimedia) in [
+        ("PUNPCKHBW", 8, true, true),
+        ("PUNPCKHWD", 16, true, true),
+        ("PUNPCKHDQ", 32, true, true),
+        ("PUNPCKHQDQ", 64, true, false),
+        ("PUNPCKLBW", 8, false, true),
+        ("PUNPCKLWD", 16, false, true),
+        ("PUNPCKLDQ", 32, false, true),
+        ("PUNPCKLQDQ", 64, false, false),
+        ("UNPCKLPD", 64, false, false),
+        ("UNPCKLPS", 32, false, false),
+        ("UNPCKHPD", 64, true, false),
+        ("UNPCKHPS", 32, true, false),
+    ] {
+        let mut register = names_every_width(name, "rr");
+        let mut memory = names_every_width(name, "rm");
+        if multimedia {
+            register.push(format!("MMX_{name}rr"));
+            memory.push(format!("MMX_{name}rm"));
+        }
+        rules.shuffle(register, ShuffleFamily::Unpack(bits, high), true);
+        rules.shuffle(memory, ShuffleFamily::Unpack(bits, high), false);
+    }
+    for (name, bits) in [("SHUFPD", 64), ("SHUFPS", 32)] {
+        rules.shuffle(
+            names_every_width(name, "rri"),
+            ShuffleFamily::ShufflePairs(bits),
+            true,
+        );
+        rules.shuffle(
+            names_every_width(name, "rmi"),
+            ShuffleFamily::ShufflePairs(bits),
+            false,
+        );
+    }
+    for (name, bits) in [("64X2", 64), ("32X4", 32)] {
+        rules.shuffle(
+            names_shuffle_lanes(name, "r"),
+            ShuffleFamily::ShuffleLanes(bits),
+            true,
+        );
+        rules.shuffle(
+            names_shuffle_lanes(name, "m"),
+            ShuffleFamily::ShuffleLanes(bits),
+            false,
+        );
+    }
+    for (name, bits) in [("PERMILPS", 32), ("PERMILPD", 64)] {
+        rules.shuffle(
+            names_permute_in_lane(name, "r"),
+            ShuffleFamily::PermuteInLane(bits),
+            true,
+        );
+        rules.shuffle(
+            names_permute_in_lane(name, "m"),
+            ShuffleFamily::PermuteInLane(bits),
+            false,
+        );
+    }
+    rules.shuffle(
+        names_plain(&["VPERM2F128rri", "VPERM2I128rri"]),
+        ShuffleFamily::PermuteHalves,
+        true,
+    );
+    rules.shuffle(
+        names_plain(&["VPERM2F128rmi", "VPERM2I128rmi"]),
+        ShuffleFamily::PermuteHalves,
+        false,
+    );
+    for name in ["PERMPD", "PERMQ"] {
+        rules.shuffle(names_permute(name, "r"), ShuffleFamily::Permute, true);
+        rules.shuffle(names_permute(name, "m"), ShuffleFamily::Permute, false);
+    }
+    rules.shuffle(
+        names_plain(&["MOVSDrr", "VMOVSDrr", "VMOVSDZrr"]),
+        ShuffleFamily::ScalarMove(2),
+        true,
+    );
+    rules.shuffle(
+        names_plain(&["MOVSSrr", "VMOVSSrr", "VMOVSSZrr"]),
+        ShuffleFamily::ScalarMove(4),
+        true,
+    );
+    rules.shuffle(
+        names_plain(&["VMOVSHZrr"]),
+        ShuffleFamily::ScalarMove(8),
+        true,
+    );
+    rules.shuffle(
+        names_plain(&[
+            "MOVPQI2QIrr",
+            "MOVZPQILo2PQIrr",
+            "VMOVPQI2QIrr",
+            "VMOVPQI2QIZrr",
+            "VMOVZPQILo2PQIrr",
+            "VMOVZPQILo2PQIZrr",
+        ]),
+        ShuffleFamily::ZeroMoveLow,
+        true,
+    );
+    rules.shuffle(names_plain(&["EXTRQI"]), ShuffleFamily::ExtractField, true);
+    rules.shuffle(names_plain(&["INSERTQI"]), ShuffleFamily::InsertField, true);
+    let mut broadcast = |names: Vec<String>, destination: i64, source: i64, register: bool| {
+        rules.shuffle(
+            names,
+            ShuffleFamily::SubvectorBroadcast(destination, source),
+            register,
+        );
+    };
+    broadcast(
+        names_join(vec![
+            names_plain(&["VBROADCASTF128rm", "VBROADCASTI128rm"]),
+            names_avx512("BROADCASTF64X2", "Z256", "rm"),
+            names_avx512("BROADCASTI64X2", "Z256", "rm"),
+        ]),
+        4,
+        2,
+        false,
+    );
+    for (float, integer, suffix, destination, source) in [
+        ("BROADCASTF64X2", "BROADCASTI64X2", "Z", 8, 2),
+        ("BROADCASTF64X4", "BROADCASTI64X4", "Z", 8, 4),
+        ("BROADCASTF32X4", "BROADCASTI32X4", "Z256", 8, 4),
+        ("BROADCASTF32X4", "BROADCASTI32X4", "Z", 16, 4),
+        ("BROADCASTF32X8", "BROADCASTI32X8", "Z", 16, 8),
+    ] {
+        broadcast(
+            names_join(vec![
+                names_avx512(float, suffix, "rm"),
+                names_avx512(integer, suffix, "rm"),
+            ]),
+            destination,
+            source,
+            false,
+        );
+    }
+    broadcast(names_avx512("BROADCASTI32X2", "Z128", "rr"), 4, 2, true);
+    broadcast(names_avx512("BROADCASTI32X2", "Z128", "rm"), 4, 2, false);
+    for (suffix, destination) in [("Z256", 8), ("Z", 16)] {
+        for (source_form, register) in [("rr", true), ("rm", false)] {
+            broadcast(
+                names_join(vec![
+                    names_avx512("BROADCASTF32X2", suffix, source_form),
+                    names_avx512("BROADCASTI32X2", suffix, source_form),
+                ]),
+                destination,
+                2,
+                register,
+            );
+        }
+    }
+    for (name, source, destination) in [
+        ("PMOVZXBW", 8, 16),
+        ("PMOVZXBD", 8, 32),
+        ("PMOVZXBQ", 8, 64),
+        ("PMOVZXWD", 16, 32),
+        ("PMOVZXWQ", 16, 64),
+        ("PMOVZXDQ", 32, 64),
+    ] {
+        rules.shuffle(
+            names_every_width(name, "rr"),
+            ShuffleFamily::ZeroExtend(source, destination),
+            true,
+        );
+    }
+    rules
+}
+
+fn comment_rules() -> &'static CommentRules {
+    static RULES: OnceLock<CommentRules> = OnceLock::new();
+    RULES.get_or_init(build_comment_rules)
+}
+
+struct CommentOperands<'i> {
+    target: &'i Target,
+    instruction: &'i MachineInstruction,
+}
+
+impl<'i> CommentOperands<'i> {
+    fn count(&self) -> usize {
+        self.instruction.operands.len()
+    }
+
+    fn name(&self, index: usize) -> Option<String> {
+        match self.instruction.operands.get(index) {
+            Some(MachineOperand::Register(register)) => {
+                Some(self.target.register_name(*register).to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn counted_from_end(&self, distance: usize) -> Option<String> {
+        self.count()
+            .checked_sub(distance)
+            .and_then(|index| self.name(index))
+    }
+
+    fn last_immediate(&self) -> Option<i64> {
+        self.immediate(self.count().checked_sub(1)?)
+    }
+
+    fn immediate(&self, index: usize) -> Option<i64> {
+        match self.instruction.operands.get(index) {
+            Some(MachineOperand::Immediate(value)) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn elements(&self, bits: i64) -> i64 {
+        let name = self.name(0).unwrap_or_default();
+        let size = if name.starts_with("zmm") {
+            512
+        } else if name.starts_with("ymm") {
+            256
+        } else if name.starts_with("xmm") {
+            128
+        } else {
+            64
+        };
+        size / bits
+    }
+
+    fn masking(&self) -> String {
+        let description = &self.target.instructions[self.instruction.opcode];
+        if description.flags & EVEX_K == 0 {
+            return String::new();
+        }
+        let mut operand = description.definitions;
+        if description
+            .tied_to
+            .get(operand)
+            .copied()
+            .flatten()
+            .is_some()
+        {
+            operand += 1;
+        }
+        let mut text = format!(" {{%{}}}", self.name(operand).unwrap_or_default());
+        if description.flags & EVEX_Z != 0 {
+            text.push_str(" {z}");
+        }
+        text
+    }
+}
+
+fn fused_comment(
+    operands: &CommentOperands,
+    order: FusedOrder,
+    register: bool,
+    accumulate: &str,
+    negate: bool,
+) -> String {
+    let last = 1;
+    let middle = if register { 2 } else { 6 };
+    let (first, second, added) = match order {
+        FusedOrder::FourRegisters => (
+            operands.name(1),
+            operands.name(2),
+            operands.counted_from_end(last),
+        ),
+        FusedOrder::FourMemoryLast => (operands.name(1), operands.name(2), None),
+        FusedOrder::FourMemoryMiddle => (operands.name(1), None, operands.counted_from_end(last)),
+        FusedOrder::First => (
+            operands.name(1),
+            if register {
+                operands.counted_from_end(last)
+            } else {
+                None
+            },
+            operands.counted_from_end(middle),
+        ),
+        FusedOrder::Second => (
+            operands.counted_from_end(middle),
+            operands.name(1),
+            if register {
+                operands.counted_from_end(last)
+            } else {
+                None
+            },
+        ),
+        FusedOrder::Third => (
+            operands.counted_from_end(middle),
+            if register {
+                operands.counted_from_end(last)
+            } else {
+                None
+            },
+            operands.name(1),
+        ),
+    };
+    let memory = || "mem".to_string();
+    format!(
+        "{}{} = {}({} * {}) {} {}\n",
+        operands.name(0).unwrap_or_default(),
+        operands.masking(),
+        if negate { "-" } else { "" },
+        first.unwrap_or_else(memory),
+        second.unwrap_or_else(memory),
+        accumulate,
+        added.unwrap_or_else(memory)
+    )
+}
+
+fn ternary_comment(operands: &CommentOperands, source: TernarySource) -> Option<String> {
+    let third = match source {
+        TernarySource::Register => operands.counted_from_end(2).unwrap_or_default(),
+        TernarySource::Memory => "mem".to_string(),
+        TernarySource::Broadcast32 => "m32bcst".to_string(),
+        TernarySource::Broadcast64 => "m64bcst".to_string(),
+    };
+    let second_distance = if source == TernarySource::Register {
+        3
+    } else {
+        7
+    };
+    let names = [
+        operands.name(1).unwrap_or_default(),
+        operands
+            .counted_from_end(second_distance)
+            .unwrap_or_default(),
+        third,
+    ];
+    let table = operands.last_immediate()? as u8;
+    let mut text = format!(
+        "{}{} = ",
+        operands.name(0).unwrap_or_default(),
+        operands.masking()
+    );
+    for character in TERNARY_LOGIC_FUNCTIONS[table as usize].chars() {
+        match character {
+            'a' | 'b' | 'c' => text.push_str(&names[(character as u8 - b'a') as usize]),
+            other => text.push(other),
+        }
+    }
+    text.push('\n');
+    Some(text)
+}
+
+fn float_class_comment(operands: &CommentOperands, register: bool) -> Option<String> {
+    let categories = operands.last_immediate()? as u8;
+    let source = if register {
+        operands.counted_from_end(2).unwrap_or_default()
+    } else {
+        "mem".to_string()
+    };
+    let mut text = format!(
+        "{}{} = ",
+        operands.name(0).unwrap_or_default(),
+        operands.masking()
+    );
+    if categories == 0 {
+        text.push_str("false");
+    } else {
+        let names = [
+            "QuietNaN",
+            "PositiveZero",
+            "NegativeZero",
+            "PositiveInfinity",
+            "NegativeInfinity",
+            "Subnormal",
+            "Negative",
+            "SignalingNaN",
+        ];
+        let mut first = true;
+        for (bit, name) in names.iter().enumerate() {
+            if categories & (1 << bit) != 0 {
+                if !first {
+                    text.push_str(" | ");
+                }
+                first = false;
+                text.push_str(&format!("is{name}({source})"));
+            }
+        }
+    }
+    text.push('\n');
+    Some(text)
+}
+
+fn shuffle_comment(
+    operands: &CommentOperands,
+    family: ShuffleFamily,
+    register: bool,
+) -> Option<String> {
+    let mut destination = operands.name(0);
+    let mut first: Option<String> = None;
+    let mut second: Option<String> = None;
+    let immediate = operands
+        .last_immediate()
+        .map(|value| i64::from(value as u32));
+    let far = |near: usize, distant: usize| if register { near } else { distant };
+    let mask: Vec<i64> = match family {
+        ShuffleFamily::Blend(bits) => {
+            if register {
+                second = operands.name(2);
+            }
+            first = operands.name(1);
+            immediate
+                .map(|value| decode_blend(operands.elements(bits), value))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::InsertPacked => {
+            if register {
+                second = operands.name(2);
+            }
+            first = operands.name(1);
+            immediate
+                .map(|value| decode_insert_ps(value, !register))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::MoveLowHigh => {
+            second = operands.name(2);
+            first = operands.name(1);
+            decode_move_low_high(2)
+        }
+        ShuffleFamily::MoveHighLow => {
+            second = operands.name(2);
+            first = operands.name(1);
+            decode_move_high_low(2)
+        }
+        ShuffleFamily::InsertElement(count, index, length) => {
+            first = operands.name(1);
+            decode_insert_element(count, index, length)
+        }
+        ShuffleFamily::DuplicateLow
+        | ShuffleFamily::DuplicateHigh
+        | ShuffleFamily::DuplicateDouble => {
+            if register {
+                first = operands.counted_from_end(1);
+            }
+            match family {
+                ShuffleFamily::DuplicateLow => decode_duplicate(operands.elements(32), 0),
+                ShuffleFamily::DuplicateHigh => decode_duplicate(operands.elements(32), 1),
+                _ => decode_duplicate_double(operands.elements(64)),
+            }
+        }
+        ShuffleFamily::ShiftLeftBytes | ShuffleFamily::ShiftRightBytes => {
+            if register {
+                first = operands.name(1);
+            }
+            immediate
+                .map(|value| {
+                    if family == ShuffleFamily::ShiftLeftBytes {
+                        decode_shift_left_bytes(operands.elements(8), value)
+                    } else {
+                        decode_shift_right_bytes(operands.elements(8), value)
+                    }
+                })
+                .unwrap_or_default()
+        }
+        ShuffleFamily::AlignBytes | ShuffleFamily::AlignElements(_) => {
+            if register {
+                first = operands.counted_from_end(2);
+            }
+            second = operands.counted_from_end(far(3, 7));
+            immediate
+                .map(|value| match family {
+                    ShuffleFamily::AlignElements(bits) => {
+                        decode_align_elements(operands.elements(bits), value)
+                    }
+                    _ => decode_align_bytes(operands.elements(8), value),
+                })
+                .unwrap_or_default()
+        }
+        ShuffleFamily::ShuffleElements(bits) | ShuffleFamily::PermuteInLane(bits) => {
+            if register {
+                first = operands.counted_from_end(2);
+            }
+            immediate
+                .map(|value| decode_shuffle_elements(operands.elements(bits), bits, value))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::ShuffleHighWords | ShuffleFamily::ShuffleLowWords => {
+            if register {
+                first = operands.counted_from_end(2);
+            }
+            immediate
+                .map(|value| {
+                    decode_shuffle_half_words(
+                        operands.elements(16),
+                        value,
+                        family == ShuffleFamily::ShuffleHighWords,
+                    )
+                })
+                .unwrap_or_default()
+        }
+        ShuffleFamily::ShuffleMultimediaWords => {
+            if register {
+                first = operands.name(1);
+            }
+            immediate
+                .map(|value| decode_shuffle_elements(4, 16, value))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::SwapHalves => {
+            if register {
+                first = operands.name(1);
+            }
+            decode_swap_halves(2)
+        }
+        ShuffleFamily::Unpack(bits, high) => {
+            if register {
+                second = operands.counted_from_end(1);
+            }
+            first = operands.counted_from_end(far(2, 6));
+            decode_unpack(operands.elements(bits), bits, high)
+        }
+        ShuffleFamily::ShufflePairs(bits) => {
+            if register {
+                second = operands.counted_from_end(2);
+            }
+            first = operands.counted_from_end(far(3, 7));
+            immediate
+                .map(|value| decode_shuffle_pairs(operands.elements(bits), bits, value))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::ShuffleLanes(bits) => {
+            if register {
+                second = operands.counted_from_end(2);
+            }
+            first = operands.counted_from_end(far(3, 7));
+            decode_shuffle_lanes(operands.elements(bits), bits, immediate.unwrap_or(0))
+        }
+        ShuffleFamily::PermuteHalves => {
+            if register {
+                second = operands.name(2);
+            }
+            first = operands.name(1);
+            immediate
+                .map(|value| decode_permute_halves(4, value))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::Permute => {
+            if register {
+                first = operands.counted_from_end(2);
+            }
+            immediate
+                .map(|value| decode_permute(operands.elements(64), value))
+                .unwrap_or_default()
+        }
+        ShuffleFamily::ScalarMove(count) => {
+            second = operands.name(2);
+            first = operands.name(1);
+            decode_scalar_move(count)
+        }
+        ShuffleFamily::ZeroMoveLow => {
+            first = operands.name(1);
+            std::iter::once(0)
+                .chain(std::iter::repeat_n(SHUFFLE_ZERO, 1))
+                .collect()
+        }
+        ShuffleFamily::ExtractField => {
+            first = operands.name(1);
+            match (operands.immediate(2), operands.immediate(3)) {
+                (Some(length), Some(index)) => decode_bit_field(16, 8, length, index, false),
+                _ => Vec::new(),
+            }
+        }
+        ShuffleFamily::InsertField => {
+            first = operands.name(1);
+            second = operands.name(2);
+            match (operands.immediate(3), operands.immediate(4)) {
+                (Some(length), Some(index)) => decode_bit_field(16, 8, length, index, true),
+                _ => Vec::new(),
+            }
+        }
+        ShuffleFamily::SubvectorBroadcast(count, source) => {
+            if register {
+                first = operands.counted_from_end(1);
+            }
+            decode_subvector_broadcast(count, source)
+        }
+        ShuffleFamily::ZeroExtend(source, target) => {
+            first = operands.counted_from_end(1);
+            decode_zero_extend(source, target, operands.elements(target))
+        }
+    };
+    let mut mask = mask;
+    if mask.is_empty() {
+        return None;
+    }
+    if destination.is_none() {
+        destination = first.clone();
+    }
+    let mut text = match &destination {
+        Some(name) => format!("{name}{}", operands.masking()),
+        None => "mem".to_string(),
+    };
+    text.push_str(" = ");
+    let size = mask.len() as i64;
+    if first == second {
+        for value in mask.iter_mut() {
+            if *value >= size {
+                *value -= size;
+            }
+        }
+    }
+    let mut index = 0;
+    while index < mask.len() {
+        if index != 0 {
+            text.push(',');
+        }
+        if mask[index] == SHUFFLE_ZERO {
+            text.push_str("zero");
+            index += 1;
+            continue;
+        }
+        let from_first = mask[index] < size;
+        let source = if from_first { &first } else { &second };
+        text.push_str(source.as_deref().unwrap_or("mem"));
+        text.push('[');
+        let mut leading = true;
+        while index < mask.len()
+            && mask[index] != SHUFFLE_ZERO
+            && (mask[index] < size) == from_first
+        {
+            if !leading {
+                text.push(',');
+            }
+            leading = false;
+            if mask[index] == SHUFFLE_UNDEFINED {
+                text.push('u');
+            } else {
+                text.push_str(&(mask[index] % size).to_string());
+            }
+            index += 1;
+        }
+        text.push(']');
+    }
+    text.push('\n');
+    Some(text)
+}
+
+pub fn instruction_comment(target: &Target, instruction: &MachineInstruction) -> Option<String> {
+    let record = target.instructions.get(instruction.opcode)?.record.as_str();
+    let rule = *comment_rules().rules.get(record)?;
+    let operands = CommentOperands {
+        target,
+        instruction,
+    };
+    match rule {
+        CommentRule::Fused {
+            order,
+            register,
+            accumulate,
+            negate,
+        } => Some(fused_comment(
+            &operands, order, register, accumulate, negate,
+        )),
+        CommentRule::Ternary(source) => ternary_comment(&operands, source),
+        CommentRule::FloatClass(register) => float_class_comment(&operands, register),
+        CommentRule::Shuffle(family, register) => shuffle_comment(&operands, family, register),
     }
 }
 

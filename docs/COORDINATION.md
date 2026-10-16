@@ -56,19 +56,19 @@ Bu bileşenlerin doğruluğu, LLVM/LLD/GCC'nin kendi test paketleriyle ölçül�
 - TableGen: `tablegen-lit` 190/456, `tablegen-oracle` 152/459 (kapsam dışılar listeli, 0 hata); dört komut tablosu.
 - Bağlayıcı: `lld-elf` 1375/2056, `lld-coff` 341/565 (0 hata).
 - x86 (Claude-A, sürüyor): kodlayıcı ve AT&T/Intel yazıcı tamam; AT&T ve Intel assembler
-  tamam; `mc-x86` 510/642 (3 hata `X86InstComments`, 129 kapsam dışı: nesne dosyası çıktısı, COFF/Mach-O/LFI).
+  tamam; karıştırma/FMA/PTERNLOG/FPCLASS yorumları tamam; `mc-x86` 513/642, kapsam içi %100 (129 kapsam dışı:
+  nesne dosyası çıktısı, COFF/Mach-O/LFI).
 
 ## 4. Kalan işler (öncelik sırasıyla)
 
-1. x86 assembler: `X86InstComments` (karıştırma/FMA/imm yorumları), `mc-x86` %100 (kapsam içi).
-2. x86 disassembler ve `mc-x86-disassembler` paketi %100; kodla→çöz→aynı komut gidiş-dönüş testi.
-3. Assembler'dan ELF/COFF nesne dosyası çıktısı (parçalar, gevşetme, düzeltmeler,
+1. x86 disassembler ve `mc-x86-disassembler` paketi %100; kodla→çöz→aynı komut gidiş-dönüş testi.
+2. Assembler'dan ELF/COFF nesne dosyası çıktısı (parçalar, gevşetme, düzeltmeler,
    relocation, `.eh_frame`), bizim bağlayıcıyla bağlayıp bu makinede çalıştırma testi.
-4. ARMv7/ARMv8 kodlayıcı + assembler + disassembler (`Armv7.rs`, `Armv8.rs`, tablolar hazır).
-5. Omni IR → makine kodu arka ucu (komut seçimi, yazmaç ayırma, çağrı kuralları) x86_64 ve ARMv8 için.
-6. C/C++ ön yüzü (`Cpp.rs`) ve Rust ön yüzü (`Rust.rs`).
-7. Kotlin/Java derleyicilerinin kapsamını büyütmek (`kotlin-omni` kapsam dışılarını azaltmak).
-8. Uygulama (`Builder.kt`) ve yerel köprü: derleyicilerin arayüze bağlanması, cihazda uçtan uca APK.
+3. ARMv7/ARMv8 kodlayıcı + assembler + disassembler (`Armv7.rs`, `Armv8.rs`, tablolar hazır).
+4. Omni IR → makine kodu arka ucu (komut seçimi, yazmaç ayırma, çağrı kuralları) x86_64 ve ARMv8 için.
+5. C/C++ ön yüzü (`Cpp.rs`) ve Rust ön yüzü (`Rust.rs`).
+6. Kotlin/Java derleyicilerinin kapsamını büyütmek (`kotlin-omni` kapsam dışılarını azaltmak).
+7. Uygulama (`Builder.kt`) ve yerel köprü: derleyicilerin arayüze bağlanması, cihazda uçtan uca APK.
 
 ## 5. Önerilen iş bölümü
 
@@ -149,8 +149,8 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 ## 9. Güncel durum
 
 - Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
-- Claude-A: x86 assembler. Intel girdi sözdizimi ve `-masm-integers` tamam; `mc-x86` 510/642 (129 kapsam dışı,
-  3 hata `X86InstComments` bekliyor). Sıradaki adım `X86InstComments`, ardından disassembler ve nesne dosyası çıktısı.
+- Claude-A: x86 assembler. AT&T ve Intel girdisi, `-masm-integers` ve `X86InstComments` tamam; `mc-x86` 513/642,
+  kapsam içi %100 (129 kapsam dışı). Sıradaki adım x86 disassembler, ardından nesne dosyası çıktısı.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.

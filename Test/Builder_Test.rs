@@ -71839,6 +71839,48 @@ mod x86_assembly {
     }
 
     #[test]
+    fn shuffle_and_fused_multiply_comments_read_as_llvm_writes_them() {
+        let source = "pshufd $27, %xmm1, %xmm2\n\
+                      vpshufd $0x4e, %zmm1, %zmm2 {%k1} {z}\n\
+                      vshufpd $5, (%rax), %ymm2, %ymm3\n\
+                      vpunpcklqdq %zmm1, %zmm2, %zmm3 {%k2}\n\
+                      vpalignr $3, (%rax), %ymm1, %ymm2\n\
+                      insertps $0x1c, %xmm1, %xmm2\n\
+                      vperm2i128 $0x08, (%rax), %ymm2, %ymm3\n\
+                      extrq $8, $16, %xmm1\n\
+                      vpmovzxdq %ymm1, %zmm2 {%k1} {z}\n\
+                      vfmsubadd132pd (%rax){1to8}, %zmm2, %zmm3\n\
+                      vfnmsubsd %xmm1, %xmm2, %xmm3, %xmm4\n\
+                      vpternlogd $0xca, %zmm1, %zmm2, %zmm3\n\
+                      vfpclassps $0x81, %zmm1, %k1\n";
+        let result = assemble_source(
+            &AssemblerOptions::new("x86_64-unknown-unknown"),
+            source.as_bytes(),
+            None,
+        )
+        .expect("the assembler starts");
+        assert_eq!(format_assembly_messages(&render_messages(&result)), "");
+        let output = String::from_utf8_lossy(&result.output);
+        for expected in [
+            "# xmm2 = xmm1[3,2,1,0]",
+            "# zmm2 {%k1} {z} = zmm1[2,3,0,1,6,7,4,5,10,11,8,9,14,15,12,13]",
+            "# ymm3 = ymm2[1],mem[0],ymm2[3],mem[2]",
+            "# zmm3 {%k2} = zmm2[0],zmm1[0],zmm2[2],zmm1[2],zmm2[4],zmm1[4],zmm2[6],zmm1[6]",
+            "# ymm2 = mem[3,4,5,6,7,8,9,10,11,12,13,14,15],ymm1[0,1,2],mem[19,20,21,22,23,24,25,26,27,28,29,30,31],ymm1[16,17,18]",
+            "# xmm2 = xmm2[0],xmm1[0],zero,zero",
+            "# ymm3 = zero,zero,ymm2[0,1]",
+            "# xmm1 = xmm1[1,2],zero,zero,zero,zero,zero,zero,xmm1[u,u,u,u,u,u,u,u]",
+            "# zmm2 {%k1} {z} = ymm1[0],zero,ymm1[1],zero,ymm1[2],zero,ymm1[3],zero,ymm1[4],zero,ymm1[5],zero,ymm1[6],zero,ymm1[7],zero",
+            "# zmm3 = (zmm3 * mem) -/+ zmm2",
+            "# xmm4 = -(xmm3 * xmm2) - xmm1",
+            "# zmm3 = zmm1 ^ (zmm3 & (zmm2 ^ zmm1))",
+            "# k1 = isQuietNaN(zmm1) | isSignalingNaN(zmm1)",
+        ] {
+            assert!(output.contains(expected), "{expected} is missing from\n{output}");
+        }
+    }
+
+    #[test]
     #[ignore]
     fn assemble_from_environment() {
         let source = std::env::var("APK_BUILDER_MC_SOURCE")
