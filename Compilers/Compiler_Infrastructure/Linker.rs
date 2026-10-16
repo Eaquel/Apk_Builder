@@ -527,6 +527,7 @@ fn decode_package_metadata(text: &str) -> Result<Vec<u8>, usize> {
 }
 
 const EXECUTABLE_STACK_NOTE: &str = ", but -z execstack is not specified";
+const FUNCTION_TYPE_DIRECTIVE: &str = ", %function";
 const SPLIT_STACK_PROLOGUE: &str = ", but couldn't adjust its prologue";
 
 const NON_PREVAILING_NOTE: &str = "\n>>> or the symbol in the prevailing group had STB_WEAK binding and the symbol in a non-prevailing group had STB_GLOBAL binding. Mixing groups with STB_WEAK and STB_GLOBAL binding signature is not supported";
@@ -3554,6 +3555,7 @@ pub struct Context<'s> {
     pub why_live: BTreeMap<LiveItem, (Option<LiveItem>, &'static str)>,
     pub memtag_symbols: Vec<SymbolIndex>,
     pub nop_filled: BTreeSet<SectionIndex>,
+    pub orphan_first_members: BTreeMap<OutputIndex, SectionIndex>,
     pub script_symbol_locations: BTreeMap<SymbolIndex, String>,
     pub script_load_offsets: BTreeMap<OutputIndex, u64>,
     pub indirect_locals: Vec<SymbolIndex>,
@@ -3715,6 +3717,7 @@ impl<'s> Context<'s> {
             why_live: BTreeMap::new(),
             memtag_symbols: Vec::new(),
             nop_filled: BTreeSet::new(),
+            orphan_first_members: BTreeMap::new(),
             script_symbol_locations: BTreeMap::new(),
             script_load_offsets: BTreeMap::new(),
             indirect_locals: Vec::new(),
@@ -8401,6 +8404,7 @@ impl<'s> Context<'s> {
             if header.kind == section_type::AARCH64_ATTRIBUTES
                 && self.target.architecture == Architecture::Aarch64
             {
+                self.check_aarch64_attributes(index, &header.name, &header.data);
                 self.files[index].discarded[position] = true;
                 continue;
             }
@@ -8679,7 +8683,7 @@ impl<'s> Context<'s> {
             }
         }
         self.files[index].sections = map;
-        if !relocatable {
+        {
             for group in self.files[index].kept_groups.clone() {
                 let Ok(group) = self.files[index].elf.group(group) else {
                     continue;
@@ -8759,6 +8763,36 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn check_aarch64_attributes(&mut self, index: FileIndex, name: &str, data: &[u8]) {
+        if data.first() != Some(&b'A') {
+            return;
+        }
+        let mut at = 1usize;
+        while at < data.len() {
+            let Some(length) = self
+                .encoding()
+                .read_u32(data, at)
+                .filter(|_| at + 4 <= data.len())
+            else {
+                let display = self.file_name(Some(index));
+                let end = data.len();
+                let until = at + 4;
+                self.warn(
+                    caution("EI254", "The ARM attributes of an input could not be read.")
+                        .with_context(format!("File: {display}"))
+                        .with_context(format!(
+                            "Cause: {display}:({name}): unexpected end of data at offset 0x{end:x} while reading [0x{at:x}, 0x{until:x})"
+                        )),
+                );
+                return;
+            };
+            if length == 0 {
+                return;
+            }
+            at += length as usize;
+        }
+    }
+
     fn read_arm_attributes(&mut self, index: FileIndex, name: &str, data: &[u8]) {
         let Some(attributes) = parse_arm_attributes(data, self.encoding()) else {
             let display = self.file_name(Some(index));
@@ -8773,6 +8807,17 @@ impl<'s> Context<'s> {
             self.warn(diagnostic);
             return;
         };
+        if let Some(arguments) = attributes.get(&28).copied().filter(|value| *value > 3) {
+            let display = self.file_name(Some(index));
+            self.warn(
+                caution("EI254", "The ARM attributes of an input could not be read.")
+                    .with_context(format!("File: {display}"))
+                    .with_context(format!(
+                        "Cause: {display}:({name}): unknown ABI_VFP_args value: {arguments}"
+                    )),
+            );
+            return;
+        }
         if let Some(architecture) = attributes.get(&6).copied() {
             match architecture {
                 0..=2 => {}
@@ -10544,6 +10589,16 @@ impl<'s> Context<'s> {
                 tag::PLT_RELOCATIONS_SIZE,
                 self.plt_relocations.len() as u64 * encoding.relocation_size(rela) as u64,
             );
+            if self.target.architecture == Architecture::Aarch64
+                && self.plt_relocations.iter().any(|relocation| {
+                    relocation.kind == self.target.jump_slot_relocation
+                        && relocation
+                            .symbol
+                            .is_some_and(|symbol| self.symbols[symbol].other & 0x80 != 0)
+                })
+            {
+                add(0x7000_0005, 0);
+            }
             add(
                 tag::PLT_GOT,
                 self.dynamic_tables_section_address(".got.plt"),
@@ -13755,12 +13810,25 @@ impl<'s> Context<'s> {
                 encoding,
                 self.arm_features.j1_j2_branch_encoding,
             ),
-            Architecture::Aarch64 => match kind {
-                257 | 260 | 1027 | 1032 | 1030 | 1025 | 1026 => read64() as i64,
-                258 | 261 => sign_extend(read32(), 32),
-                259 | 262 => sign_extend(read16(), 16),
-                _ => 0,
-            },
+            Architecture::Aarch64 => {
+                let instruction = u64::from(data.get(at..at + 4).map_or(0, |bytes| {
+                    u32::from_le_bytes([bytes[0], bytes[1], bytes[2], bytes[3]])
+                }));
+                let bits =
+                    |low: u32, high: u32| (instruction >> low) & ((1u64 << (high - low + 1)) - 1);
+                match kind {
+                    257 | 260 | 1027 | 1032 | 1030 | 1025 | 1026 => read64() as i64,
+                    258 | 261 => sign_extend(read32(), 32),
+                    259 | 262 => sign_extend(read16(), 16),
+                    263..=269 => sign_extend(bits(5, 20), 16),
+                    279 => sign_extend(bits(5, 18) << 2, 16),
+                    280 | 273 => sign_extend(bits(5, 23) << 2, 21),
+                    277 => sign_extend(bits(10, 21), 12),
+                    274..=276 => sign_extend((bits(5, 23) << 2) | bits(29, 30), 21),
+                    282 | 283 => sign_extend(bits(0, 25) << 2, 28),
+                    _ => 0,
+                }
+            }
         }
     }
 
@@ -18448,7 +18516,14 @@ impl<'s> Context<'s> {
                 .wrapping_add(self.tls_index_offset.unwrap_or(0))
                 .wrapping_add(addend as u64)
                 .wrapping_sub(place),
-            ArmStaticBaseRelative => self.symbol_address(symbol, addend),
+            ArmStaticBaseRelative => {
+                let base = self
+                    .symbol_output_section(symbol)
+                    .and_then(|output| self.outputs[output].load_segment)
+                    .and_then(|segment| self.segments[segment].first)
+                    .map_or(0, |first| self.outputs[first].address);
+                self.symbol_address(symbol, addend).wrapping_sub(base)
+            }
         }
     }
 
@@ -18966,18 +19041,17 @@ fn aarch64_undefined_weak_destination(kind: u32, place: u64) -> u64 {
 }
 
 fn arm_undefined_weak_destination(kind: u32, addend: i64, place: u64) -> u64 {
-    let mut destination = 0u64;
-    match kind {
-        1 | 28 | 29 | 27 => destination = place.wrapping_add(8).wrapping_add(addend as u64),
-        10 | 30 | 51 | 102 | 103 | 52 => {
-            destination = place.wrapping_add(4).wrapping_add(addend as u64)
-        }
-        _ => {}
-    }
-    if destination == 0 {
-        return addend as u64;
-    }
-    destination
+    let addend = addend as u32;
+    let place = place as u32;
+    let destination = match kind {
+        102 | 103 => place.wrapping_add(2).wrapping_add(addend),
+        1 | 27 | 28 | 29 | 30 | 42 | 51 => place.wrapping_add(4).wrapping_add(addend),
+        10 => place.wrapping_add(5).wrapping_add(addend),
+        3 | 45 | 46 | 49 | 50 | 53 | 54 => place.wrapping_add(addend),
+        11 => place,
+        _ => addend,
+    };
+    u64::from(destination)
 }
 
 impl<'s> Context<'s> {
@@ -20071,7 +20145,6 @@ impl<'s> Context<'s> {
     }
 
     fn arm_state_change_warning(&mut self, location: &str, relocation: &Relocation) {
-        let symbol = &self.symbols[relocation.symbol];
         let name = relocation_name(Architecture::Arm, relocation.kind);
         let mut diagnostic = caution(
             "EI253",
@@ -20079,13 +20152,34 @@ impl<'s> Context<'s> {
         )
         .with_context(format!("Location: {location}"))
         .with_context(format!("Relocation: {name}"));
+        let hint = match self.relocating_section {
+            Some(section) => {
+                let source = self.source_message(section, "", self.relocating_offset);
+                if source.is_empty() {
+                    String::new()
+                } else {
+                    format!("; {source}")
+                }
+            }
+            None => String::new(),
+        };
+        let symbol = &self.symbols[relocation.symbol];
         if symbol.is_section() {
             if let Some(section) = symbol.section {
-                diagnostic =
-                    diagnostic.with_context(format!("Section: {}", self.sections[section].name));
+                let section_name = self.sections[section].name.clone();
+                diagnostic = diagnostic
+                    .with_context(format!("Section: {section_name}"))
+                    .with_context(format!(
+                        "Cause: {location}: branch and link relocation: {name} to STT_SECTION symbol {section_name} ; interworking not performed{hint}"
+                    ));
             }
         } else {
-            diagnostic = diagnostic.with_context(format!("Symbol: {}", symbol.name));
+            let symbol_name = symbol.name.clone();
+            diagnostic = diagnostic
+                .with_context(format!("Symbol: {symbol_name}"))
+                .with_context(format!(
+                    "Cause: {location}: branch and link relocation: {name} to non STT_FUNC symbol: {symbol_name} interworking not performed; consider using directive '.type {symbol_name}{FUNCTION_TYPE_DIRECTIVE}' to give symbol type STT_FUNC if interworking between ARM and Thumb is required{hint}"
+                ));
         }
         self.warn(diagnostic);
     }
@@ -20435,6 +20529,10 @@ impl<'s> Context<'s> {
         value: u64,
         location: &str,
     ) {
+        let value = match self.target.architecture {
+            Architecture::X86 | Architecture::Arm => sign_extend(value, 32) as u64,
+            _ => value,
+        };
         match self.target.architecture {
             Architecture::X86_64 => self.relocate_x86_64(buffer, at, relocation, value, location),
             Architecture::X86 => self.relocate_x86(buffer, at, relocation, value, location),
@@ -24017,6 +24115,7 @@ pub enum ThunkKind {
     ThumbV7AbsoluteLong,
     ThumbV7PositionIndependentLong,
     ThumbV6MAbsoluteLong,
+    ThumbV6MAbsoluteExecuteOnlyLong,
     ThumbV6MPositionIndependentLong,
     ArmV5LongLoadProgramCounter,
     ArmV4AbsoluteLongExchange,
@@ -24035,6 +24134,7 @@ impl ThunkKind {
             ThunkKind::ThumbV7AbsoluteLong
                 | ThunkKind::ThumbV7PositionIndependentLong
                 | ThunkKind::ThumbV6MAbsoluteLong
+                | ThunkKind::ThumbV6MAbsoluteExecuteOnlyLong
                 | ThunkKind::ThumbV6MPositionIndependentLong
                 | ThunkKind::ThumbV4AbsoluteLongExchange
                 | ThunkKind::ThumbV4AbsoluteLong
@@ -24060,6 +24160,7 @@ impl ThunkKind {
             ThunkKind::ThumbV7AbsoluteLong => 10,
             ThunkKind::ThumbV7PositionIndependentLong => 12,
             ThunkKind::ThumbV6MAbsoluteLong => 12,
+            ThunkKind::ThumbV6MAbsoluteExecuteOnlyLong => 20,
             ThunkKind::ThumbV6MPositionIndependentLong => 16,
             ThunkKind::ArmV5LongLoadProgramCounter => 8,
             ThunkKind::ArmV4AbsoluteLongExchange => 12,
@@ -24082,6 +24183,7 @@ impl ThunkKind {
             ThunkKind::ThumbV7AbsoluteLong => "__Thumbv7ABSLongThunk_",
             ThunkKind::ThumbV7PositionIndependentLong => "__ThumbV7PILongThunk_",
             ThunkKind::ThumbV6MAbsoluteLong => "__Thumbv6MABSLongThunk_",
+            ThunkKind::ThumbV6MAbsoluteExecuteOnlyLong => "__Thumbv6MABSXOLongThunk_",
             ThunkKind::ThumbV6MPositionIndependentLong => "__Thumbv6MPILongThunk_",
             ThunkKind::ArmV5LongLoadProgramCounter => "__ARMv5LongLdrPcThunk_",
             ThunkKind::ArmV4AbsoluteLongExchange => "__ARMv4ABSLongBXThunk_",
@@ -24307,6 +24409,12 @@ impl<'s> Context<'s> {
         matches!(kind, 1 | 27 | 29 | 28 | 10)
     }
 
+    fn is_pure_code(&self, section: SectionIndex) -> bool {
+        self.sections[section]
+            .output
+            .is_some_and(|output| self.outputs[output].flags & section_flag::ARM_PURE_CODE != 0)
+    }
+
     fn choose_thunk(
         &self,
         kind: u32,
@@ -24322,13 +24430,14 @@ impl<'s> Context<'s> {
                 ThunkKind::Aarch64AbsoluteLong
             };
         }
-        let _ = section;
         let features = self.arm_features;
         let arm_branch = matches!(kind, 1 | 27 | 29 | 28);
         if !features.has_move_wide {
             if features.j1_j2_branch_encoding {
                 return if position_independent {
                     ThunkKind::ThumbV6MPositionIndependentLong
+                } else if self.is_pure_code(section) {
+                    ThunkKind::ThumbV6MAbsoluteExecuteOnlyLong
                 } else {
                     ThunkKind::ThumbV6MAbsoluteLong
                 };
@@ -24738,6 +24847,23 @@ impl<'s> Context<'s> {
             (base_address + offset).wrapping_add(relocation.addend as u64),
         ) {
             offset += self.sections[section].size;
+            if !self.in_branch_range(
+                relocation.kind,
+                source,
+                (base_address + offset).wrapping_add(relocation.addend as u64),
+            ) {
+                let start = self.section_address(section, 0);
+                let place = self.object_message(section, source.wrapping_sub(start));
+                self.error_always(
+                    problem(
+                        "EI238",
+                        "This branch cannot reach its target on the architecture the inputs describe.",
+                    )
+                    .with_context(format!(
+                        "Cause: InputSection too large for range extension thunk {place}"
+                    )),
+                );
+            }
         }
         self.add_thunk_section(output, offset, pass, description, false)
     }
@@ -24864,6 +24990,25 @@ impl<'s> Context<'s> {
                                 .with_context(format!("Symbol: {symbol}"))
                                 .with_context(format!(
                                     "Cause: relocation {name} to {symbol} not supported for Armv5 or Armv6 targets"
+                                )),
+                        );
+                        self.sections[member].relocations[position].expression = Expression::None;
+                        continue;
+                    }
+                    if self.target.architecture == Architecture::Arm
+                        && !self.arm_features.has_move_wide
+                        && self.arm_features.j1_j2_branch_encoding
+                        && self.is_pic()
+                        && self.is_pure_code(member)
+                    {
+                        let name = relocation_name(Architecture::Arm, relocation.kind);
+                        let symbol = self.symbols[relocation.symbol].name.clone();
+                        self.error(
+                            problem("EI238", "This branch cannot reach its target on the architecture the inputs describe.")
+                                .with_context(format!("Relocation: {name}"))
+                                .with_context(format!("Symbol: {symbol}"))
+                                .with_context(format!(
+                                    "Cause: relocation {name} to {symbol} not supported for Armv6-M targets for position independent and execute only code"
                                 )),
                         );
                         self.sections[member].relocations[position].expression = Expression::None;
@@ -25189,6 +25334,26 @@ impl<'s> Context<'s> {
                     half(out, at, value);
                 }
                 word(out, 8, destination as u32);
+            }
+            ThunkKind::ThumbV6MAbsoluteExecuteOnlyLong => {
+                for (at, value) in [
+                    (0, 0xb403),
+                    (2, 0x2000),
+                    (4, 0x0200),
+                    (6, 0x3000),
+                    (8, 0x0200),
+                    (10, 0x3000),
+                    (12, 0x0200),
+                    (14, 0x3000),
+                    (16, 0x9001),
+                    (18, 0xbd01),
+                ] {
+                    half(out, at, value);
+                }
+                self.encode_no_symbol(out, 2, 135, destination);
+                self.encode_no_symbol(out, 6, 134, destination);
+                self.encode_no_symbol(out, 10, 133, destination);
+                self.encode_no_symbol(out, 14, 132, destination);
             }
             ThunkKind::ThumbV6MPositionIndependentLong => {
                 for (at, value) in [
@@ -42697,11 +42862,28 @@ impl<'s> Context<'s> {
         }
         let kind = self.sections[section].kind;
         let flags = self.sections[section].flags;
-        let is_group = kind == section_type::GROUP
-            || flags & section_flag::GROUP != 0
-            || (self.is_relocatable() && flags & section_flag::LINK_ORDER != 0);
+        let is_group = kind == section_type::GROUP || flags & section_flag::GROUP != 0;
+        let ordered = self.is_relocatable() && flags & section_flag::LINK_ORDER != 0;
         let existing = if is_group {
             None
+        } else if ordered {
+            let dependency_output = self.sections[section]
+                .link_order_dependency
+                .and_then(|dependency| self.sections[dependency].output);
+            by_name.get(&name).and_then(|list| {
+                list.iter().copied().find(|output| {
+                    let first = self.orphan_first_members.get(output).copied();
+                    let first_dependency = first.and_then(|first| {
+                        if self.sections[first].flags & section_flag::LINK_ORDER == 0 {
+                            return None;
+                        }
+                        self.sections[first]
+                            .link_order_dependency
+                            .and_then(|dependency| self.sections[dependency].output)
+                    });
+                    first_dependency == dependency_output
+                })
+            })
         } else {
             by_name.get(&name).and_then(|list| list.first().copied())
         };
@@ -42711,6 +42893,7 @@ impl<'s> Context<'s> {
                 let output = self.create_script_output(&name, "<internal>");
                 self.outputs[output].live = true;
                 self.record_script_section(output, section);
+                self.orphan_first_members.insert(output, section);
                 if kind != section_type::GROUP && flags & section_flag::GROUP == 0 {
                     by_name.entry(name).or_default().push(output);
                 }

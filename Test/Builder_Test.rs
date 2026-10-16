@@ -69577,6 +69577,12 @@ mod linker_lit {
             Some("ELF/x86-64-plt.s") => Some(
                 "the installed LLVM 18 llvm-readelf does not name the X86_64_PLT dynamic tags",
             ),
+            Some("ELF/aarch64-tlsdesc-zrel.s") => Some(
+                "the installed LLVM 18 llvm-readobj prints no blank line between the relocations and the hex dump",
+            ),
+            Some("ELF/aarch64-relocs.s") => Some(
+                "the installed LLVM 18 llvm-mc gives these AArch64 code sections alignment 1, which moves every address the test expects",
+            ),
             Some("ELF/openbsd-phdr.s" | "ELF/relro-openbsd.s") => Some(
                 "the installed LLVM 18 llvm-mc leaves EI_OSABI at System V for OpenBSD objects",
             ),
