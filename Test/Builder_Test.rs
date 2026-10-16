@@ -67564,6 +67564,7 @@ def op {
                         value: TableValue::Integer(-4),
                     },
                 ],
+                definition_order: 7,
             }],
         };
         let bytes = write_table(&table);
@@ -70933,5 +70934,453 @@ mod linker_lit {
     #[ignore]
     fn suite_lld_coff() {
         lld_suite("lld-coff", "COFF");
+    }
+}
+
+mod x86_assembly {
+    use crate::compilers::x86_64::{
+        target, Encoder, MachineInstruction, MachineOperand, Mode, PrintOptions, Printer, Syntax,
+        Target, NO_REGISTER,
+    };
+    use std::io::Write;
+    use std::process::{Command, Stdio};
+
+    pub(super) struct Random(u64);
+
+    impl Random {
+        pub(super) fn next(&mut self) -> u64 {
+            self.0 ^= self.0 << 13;
+            self.0 ^= self.0 >> 7;
+            self.0 ^= self.0 << 17;
+            self.0
+        }
+
+        pub(super) fn below(&mut self, limit: u64) -> u64 {
+            if limit == 0 {
+                0
+            } else {
+                self.next() % limit
+            }
+        }
+
+        pub(super) fn chance(&mut self, one_in: u64) -> bool {
+            self.below(one_in) == 0
+        }
+    }
+
+    fn pick_register_allowing(
+        target: &Target,
+        class: &str,
+        random: &mut Random,
+        extended: bool,
+    ) -> Option<u16> {
+        let members: Vec<u16> = target
+            .class(class)?
+            .members
+            .iter()
+            .copied()
+            .filter(|member| {
+                !matches!(
+                    target.registers[*member as usize].record.as_str(),
+                    "RIP" | "EIP" | "IP" | "RIZ" | "EIZ"
+                ) && (extended || !target.is_extended_apx(*member))
+            })
+            .collect();
+        if members.is_empty() {
+            return None;
+        }
+        Some(members[random.below(members.len() as u64) as usize])
+    }
+
+    fn pointer_class(mode: Mode, record: &str) -> &'static str {
+        let no_stack = record.contains("nosp");
+        match (mode, no_stack) {
+            (Mode::Bits64, false) => "GR64",
+            (Mode::Bits64, true) => "GR64_NOSP",
+            (_, false) => "GR32",
+            (_, true) => "GR32_NOSP",
+        }
+    }
+
+    fn immediate_for(target: &Target, record: &str, random: &mut Random) -> i64 {
+        let held = target.operand_records.get(record);
+        let class = held.map(|held| held.match_class.as_str()).unwrap_or("");
+        let print = held.map(|held| held.print_method.as_str()).unwrap_or("");
+        let value_type = target
+            .records
+            .get(record)
+            .map(|found| crate::compilers::x86_64::table_record_name(found, "Type"))
+            .unwrap_or_default();
+        if print == "printCondCode" || print == "printCondFlags" {
+            return random.below(16) as i64;
+        }
+        if print == "printRoundingControl" {
+            return random.below(4) as i64;
+        }
+        match class {
+            "ImmUnsignedi4AsmOperand" => return random.below(16) as i64,
+            "ImmUnsignedi6AsmOperand" => return random.below(64) as i64,
+            "ImmUnsignedi8AsmOperand" => return random.below(256) as i64,
+            "ImmSExti16i8AsmOperand" | "ImmSExti32i8AsmOperand" | "ImmSExti64i8AsmOperand" => {
+                return random.below(256) as i64 - 128
+            }
+            "ImmSExti64i32AsmOperand" => return random.below(1 << 32) as i64 - (1 << 31),
+            _ => {}
+        }
+        match value_type.as_str() {
+            "i8" => random.below(256) as i64 - 128,
+            "i16" => random.below(1 << 16) as i64,
+            "i32" => random.below(1 << 32) as i64,
+            _ => random.next() as i64,
+        }
+    }
+
+    pub(super) fn random_instruction(
+        target: &Target,
+        opcode: usize,
+        mode: Mode,
+        random: &mut Random,
+    ) -> Option<MachineInstruction> {
+        let description = &target.instructions[opcode];
+        let extended = mode == Mode::Bits64 && target.can_use_apx_extended_register(opcode);
+        let pick = |class: &str, random: &mut Random| {
+            pick_register_allowing(target, class, random, extended)
+        };
+        let mut instruction = MachineInstruction::new(opcode);
+        instruction.operands =
+            vec![MachineOperand::Register(NO_REGISTER); description.operand_count()];
+        for group in &description.groups {
+            if let Some(tied) = group.tied_to {
+                let source = description.groups[tied].first;
+                instruction.operands[group.first] = instruction.operands[source].clone();
+                continue;
+            }
+            let held = target.operand_records.get(&group.record);
+            let subs = held
+                .map(|held| held.sub_operands.clone())
+                .unwrap_or_default();
+            let operand_type = held.map(|held| held.operand_type.as_str()).unwrap_or("");
+            if let Some(class) = target.register_class_of_operand(&group.record) {
+                if target.class(&class).is_some() {
+                    instruction.operands[group.first] =
+                        MachineOperand::Register(pick(&class, random)?);
+                    continue;
+                }
+            }
+            if subs.len() == 5 {
+                let pointer = pointer_class(mode, "");
+                let mut base = pick(pointer, random)?;
+                let index_class = if subs[2].contains("ptr_rc") {
+                    pointer_class(mode, "nosp").to_string()
+                } else {
+                    target.register_class_of_operand(&subs[2])?
+                };
+                let vector_index = !subs[2].contains("ptr_rc");
+                let mut index = if vector_index || random.chance(2) {
+                    pick(&index_class, random)?
+                } else {
+                    NO_REGISTER
+                };
+                if !vector_index && random.chance(8) {
+                    base = NO_REGISTER;
+                }
+                if mode == Mode::Bits64 && !vector_index && random.chance(8) {
+                    base = target.register("RIP");
+                    index = NO_REGISTER;
+                }
+                let displacement = match random.below(4) {
+                    0 => 0,
+                    1 => random.below(256) as i64 - 128,
+                    2 => (random.below(64) as i64 - 32) * 64,
+                    _ => random.below(1 << 32) as i64 - (1 << 31),
+                };
+                let segment = if random.chance(6) {
+                    pick("SEGMENT_REG", random)?
+                } else {
+                    NO_REGISTER
+                };
+                let at = group.first;
+                instruction.operands[at] = MachineOperand::Register(base);
+                let scale = if index == NO_REGISTER {
+                    1
+                } else {
+                    1 << random.below(4)
+                };
+                instruction.operands[at + 1] = MachineOperand::Immediate(scale);
+                instruction.operands[at + 2] = MachineOperand::Register(index);
+                instruction.operands[at + 3] = MachineOperand::Immediate(displacement);
+                instruction.operands[at + 4] = MachineOperand::Register(segment);
+                continue;
+            }
+            if !subs.is_empty() {
+                for (offset, sub) in subs.iter().enumerate() {
+                    let at = group.first + offset;
+                    instruction.operands[at] = if sub.contains("ptr_rc") {
+                        let source = group.record.starts_with("src");
+                        let name = match (mode, source) {
+                            (Mode::Bits64, true) => "RSI",
+                            (Mode::Bits64, false) => "RDI",
+                            (_, true) => "ESI",
+                            (_, false) => "EDI",
+                        };
+                        MachineOperand::Register(target.register(name))
+                    } else if sub == "SEGMENT_REG" {
+                        MachineOperand::Register(NO_REGISTER)
+                    } else {
+                        let value = immediate_for(target, sub, random);
+                        MachineOperand::Immediate(if mode == Mode::Bits64 {
+                            value
+                        } else {
+                            value as i32 as i64
+                        })
+                    };
+                }
+                continue;
+            }
+            let value = if operand_type == "OPERAND_PCREL" {
+                random.below(256) as i64 - 128
+            } else {
+                immediate_for(target, &group.record, random)
+            };
+            instruction.operands[group.first] = MachineOperand::Immediate(value);
+        }
+        Some(instruction)
+    }
+
+    fn normalized(record: &str, text: &str) -> String {
+        let modulus: i128 = if record.contains("16") {
+            1 << 16
+        } else {
+            1 << 32
+        };
+        text.split_whitespace()
+            .map(|word| {
+                let (core, tail) = match word.find(',') {
+                    Some(at) => word.split_at(at),
+                    None => (word, ""),
+                };
+                match core
+                    .strip_prefix('$')
+                    .and_then(|number| number.parse::<i128>().ok())
+                {
+                    Some(value) if value.abs() < modulus => {
+                        format!("${}{tail}", value.rem_euclid(modulus))
+                    }
+                    _ => word.to_string(),
+                }
+            })
+            .collect::<Vec<_>>()
+            .join(" ")
+    }
+
+    pub(super) fn llvm_mc_disassemble(triple: &str, input: &str) -> Option<String> {
+        let mut child = Command::new("llvm-mc")
+            .args([
+                "--disassemble",
+                "--show-encoding",
+                &format!("--triple={triple}"),
+            ])
+            .stdin(Stdio::piped())
+            .stdout(Stdio::piped())
+            .stderr(Stdio::piped())
+            .spawn()
+            .ok()?;
+        child.stdin.take()?.write_all(input.as_bytes()).ok()?;
+        let output = child.wait_with_output().ok()?;
+        Some(String::from_utf8_lossy(&output.stdout).into_owned())
+    }
+
+    fn compare_with_llvm(mode: Mode, triple: &str, rounds: usize) -> (usize, usize, Vec<String>) {
+        let target = target().expect("the x86 tables load");
+        let encoder = Encoder::new(target, mode);
+        let printer = Printer::new(
+            target,
+            PrintOptions {
+                syntax: Syntax::Att,
+                mode,
+                hexadecimal_immediates: false,
+                branch_as_address: false,
+            },
+        );
+        let mut random = Random(0x9e37_79b9_7f4a_7c15);
+        let mut cases: Vec<(String, String, Vec<u8>)> = Vec::new();
+        for opcode in 0..target.instructions.len() {
+            let description = &target.instructions[opcode];
+            if description.pseudo
+                || crate::compilers::x86_64::form_of(description.flags) == 0
+                || !description.valid_in(mode)
+            {
+                continue;
+            }
+            for _ in 0..rounds {
+                let Some(instruction) = random_instruction(target, opcode, mode, &mut random)
+                else {
+                    continue;
+                };
+                let Ok(encoded) = encoder.encode(&instruction) else {
+                    continue;
+                };
+                if !encoded.fixups.is_empty() {
+                    continue;
+                }
+                let text = printer.print(&instruction, 0);
+                cases.push((description.record.clone(), text, encoded.bytes));
+            }
+        }
+        let mut input = String::new();
+        cases.retain(|(_, _, bytes)| bytes.as_slice() != [0xcc]);
+        for (_, _, bytes) in &cases {
+            input.push_str("[0xcc]\n[");
+            for byte in bytes {
+                input.push_str(&format!("0x{byte:02x} "));
+            }
+            input.push_str("]\n");
+        }
+        let Some(output) = llvm_mc_disassemble(triple, &input) else {
+            return (0, 0, vec!["llvm-mc is not on this machine".to_string()]);
+        };
+        let mut decoded: Vec<(String, Vec<u8>)> = Vec::new();
+        for line in output.lines() {
+            let Some((text, encoding)) = line.split_once("# encoding: [") else {
+                continue;
+            };
+            let bytes: Vec<u8> = encoding
+                .trim_end_matches(']')
+                .split(',')
+                .filter_map(|byte| {
+                    u8::from_str_radix(byte.trim().trim_start_matches("0x"), 16).ok()
+                })
+                .collect();
+            decoded.push((text.to_string(), bytes));
+        }
+        let mut groups: Vec<Vec<(String, Vec<u8>)>> = Vec::new();
+        for entry in decoded {
+            if entry.1.as_slice() == [0xcc] {
+                groups.push(Vec::new());
+            } else if let Some(last) = groups.last_mut() {
+                last.push(entry);
+            }
+        }
+        let mut agreed = 0;
+        let mut unknown = 0;
+        let mut differences = Vec::new();
+        for ((record, text, bytes), group) in cases.iter().zip(groups.iter()) {
+            if group.len() != 1 || &group[0].1 != bytes {
+                unknown += 1;
+                if !group.is_empty() {
+                    differences.push(format!(
+                        "{record}: ours `{text}` decoded as {group:?} bytes {bytes:02x?}"
+                    ));
+                }
+                continue;
+            }
+            let ours = normalized(record, text);
+            let theirs = normalized(record, &group[0].0).replace(",%riz)", ")");
+            if ours == theirs {
+                agreed += 1;
+            } else {
+                differences.push(format!(
+                    "{record}: ours `{ours}` theirs `{theirs}` bytes {bytes:02x?}"
+                ));
+            }
+        }
+        differences.push(format!("not decoded by the host llvm-mc: {unknown}"));
+        (agreed, cases.len(), differences)
+    }
+
+    fn instruction(
+        target: &Target,
+        record: &str,
+        operands: &[MachineOperand],
+    ) -> MachineInstruction {
+        let mut made = MachineInstruction::new(target.instruction(record).expect(record));
+        made.operands = operands.to_vec();
+        made
+    }
+
+    #[test]
+    fn the_encoder_reproduces_encodings_llvm_writes() {
+        let target = target().expect("the x86 tables load");
+        let register = |name: &str| MachineOperand::Register(target.register(name));
+        let immediate = MachineOperand::Immediate;
+        let none = MachineOperand::Register(NO_REGISTER);
+        let cases: Vec<(MachineInstruction, &str, &[u8])> = vec![
+            (
+                instruction(
+                    target,
+                    "ADC8mi",
+                    &[
+                        none.clone(),
+                        immediate(1),
+                        none.clone(),
+                        immediate(485498096),
+                        none.clone(),
+                        immediate(0),
+                    ],
+                ),
+                "\tadcb\t$0, 485498096",
+                &[0x80, 0x14, 0x25, 0xf0, 0x1c, 0xf0, 0x1c, 0x00],
+            ),
+            (
+                instruction(
+                    target,
+                    "VADDPDZrm",
+                    &[
+                        register("ZMM19"),
+                        register("ZMM19"),
+                        register("RDX"),
+                        immediate(4),
+                        register("RAX"),
+                        immediate(4096),
+                        none.clone(),
+                    ],
+                ),
+                "\tvaddpd\t4096(%rdx,%rax,4), %zmm19, %zmm19",
+                &[0x62, 0xe1, 0xe5, 0x40, 0x58, 0x5c, 0x82, 0x40],
+            ),
+            (
+                instruction(
+                    target,
+                    "ADD8ri_EVEX",
+                    &[register("BL"), register("BL"), immediate(123)],
+                ),
+                "\t{evex}\taddb\t$123, %bl",
+                &[0x62, 0xf4, 0x7c, 0x08, 0x80, 0xc3, 0x7b],
+            ),
+            (
+                instruction(
+                    target,
+                    "ADC8ri",
+                    &[register("R14B"), register("R14B"), immediate(0)],
+                ),
+                "\tadcb\t$0, %r14b",
+                &[0x41, 0x80, 0xd6, 0x00],
+            ),
+        ];
+        let encoder = Encoder::new(target, Mode::Bits64);
+        let printer = Printer::new(
+            target,
+            PrintOptions {
+                syntax: Syntax::Att,
+                mode: Mode::Bits64,
+                hexadecimal_immediates: false,
+                branch_as_address: false,
+            },
+        );
+        for (made, text, bytes) in cases {
+            let encoded = encoder.encode(&made).expect("the instruction encodes");
+            assert_eq!(encoded.bytes, bytes, "{text}");
+            assert_eq!(printer.print(&made, 0), text);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn the_encoder_and_printer_agree_with_llvm_mc_in_64_bit_mode() {
+        let (agreed, total, differences) = compare_with_llvm(Mode::Bits64, "x86_64", 2);
+        for line in &differences {
+            eprintln!("{line}");
+        }
+        eprintln!("agreed {agreed} of {total}");
     }
 }

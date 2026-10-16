@@ -35,6 +35,10 @@ pub mod compilers {
     pub mod rust;
     #[path = "Compilers/Compiler_Infrastructure/TableGen.rs"]
     pub mod table_gen;
+    #[path = "Compilers/Compiler_Infrastructure/X86.rs"]
+    pub mod x86;
+    #[path = "Compilers/Compiler_Infrastructure/X86_64.rs"]
+    pub mod x86_64;
 }
 
 pub const CORE_VERSION: &str = env!("CARGO_PKG_VERSION");

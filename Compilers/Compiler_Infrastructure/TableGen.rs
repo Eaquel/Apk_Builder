@@ -9633,7 +9633,7 @@ pub fn read_records<'a>(
     }
 }
 
-pub const TABLE_FORMAT_VERSION: u32 = 1;
+pub const TABLE_FORMAT_VERSION: u32 = 2;
 
 pub const TABLE_MAGIC: &[u8; 8] = b"OMNITBL\0";
 
@@ -9651,6 +9651,7 @@ const ROOT_CLASSES: &[&str] = &[
     "InstAlias",
     "InstrInfo",
     "Instruction",
+    "MnemonicAlias",
     "Operand",
     "Predicate",
     "Processor",
@@ -9662,6 +9663,7 @@ const ROOT_CLASSES: &[&str] = &[
     "SubRegIndex",
     "SubtargetFeature",
     "Target",
+    "TokenAlias",
 ];
 
 const EXCLUDED_FIELDS: &[&str] = &["Itinerary", "Pattern", "ProcItin", "SchedModel", "SchedRW"];
@@ -9701,6 +9703,7 @@ pub struct TableRecord {
     pub name: String,
     pub classes: Vec<String>,
     pub fields: Vec<TableField>,
+    pub definition_order: u64,
 }
 
 impl TableRecord {
@@ -9890,6 +9893,7 @@ impl RecordKeeper {
             name: self.record_name_text(index),
             classes,
             fields,
+            definition_order: record.identifier as u64,
         }
     }
 
@@ -10372,7 +10376,7 @@ pub fn write_table(table: &Table) -> Vec<u8> {
         encoder.string(&table.target),
         encoder.string(&table.selection),
     ];
-    let mut records: Vec<(u64, u64, u64, Vec<u64>)> = Vec::with_capacity(table.records.len());
+    let mut records: Vec<(u64, u64, u64, Vec<u64>, u64)> = Vec::with_capacity(table.records.len());
     for record in &table.records {
         let name = encoder.string(&record.name);
         let classes = encoder.class_list(record);
@@ -10382,14 +10386,14 @@ pub fn write_table(table: &Table) -> Vec<u8> {
             .iter()
             .map(|field| encoder.value(&field.value))
             .collect();
-        records.push((name, classes, shape, values));
+        records.push((name, classes, shape, values, record.definition_order));
     }
     let mut tallies: Vec<Vec<BTreeMap<u64, u64>>> = encoder
         .shapes
         .iter()
         .map(|shape| vec![BTreeMap::new(); shape.len() / 2])
         .collect();
-    for (_, _, shape, values) in &records {
+    for (_, _, shape, values, _) in &records {
         for (slot, value) in values.iter().enumerate() {
             *tallies[*shape as usize][slot].entry(*value).or_insert(0) += 1;
         }
@@ -10455,10 +10459,11 @@ pub fn write_table(table: &Table) -> Vec<u8> {
         }
     }
     put_number(&mut out, records.len() as u64);
-    for (name, classes, shape, values) in &records {
+    for (name, classes, shape, values, definition_order) in &records {
         put_number(&mut out, *name);
         put_number(&mut out, *classes);
         put_number(&mut out, *shape);
+        put_number(&mut out, *definition_order);
         let slots = &defaults[*shape as usize];
         let mut mask = vec![0u8; values.len().div_ceil(8)];
         for (slot, value) in values.iter().enumerate() {
@@ -10702,6 +10707,7 @@ fn decode_table(bytes: &[u8]) -> Decoded<Table> {
         let name_at = decoder.index(strings.len(), "a string index is out of range")?;
         let classes = decoder.index(class_lists.len(), "a class list index is out of range")?;
         let shape = decoder.index(shapes.len(), "a shape index is out of range")?;
+        let definition_order = decoder.number()?;
         let slots = &shapes[shape];
         let mask_start = decoder.at;
         let mask_end = mask_start
@@ -10727,6 +10733,7 @@ fn decode_table(bytes: &[u8]) -> Decoded<Table> {
             name: strings[name_at].clone(),
             classes: class_lists[classes].clone(),
             fields,
+            definition_order,
         });
     }
     if decoder.at != bytes.len() {
