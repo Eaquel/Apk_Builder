@@ -592,6 +592,7 @@ pub struct Options {
     pub unique: bool,
     pub gnu_unique: bool,
     pub force_group_allocation: bool,
+    pub enable_non_contiguous_regions: bool,
     pub dynamic_debug_relocatable: bool,
     pub gnu_stack: bool,
     pub mark_plt: bool,
@@ -786,6 +787,7 @@ impl Default for Options {
             unique: false,
             gnu_unique: true,
             force_group_allocation: false,
+            enable_non_contiguous_regions: false,
             dynamic_debug_relocatable: false,
             gnu_stack: true,
             mark_plt: false,
@@ -1974,6 +1976,7 @@ pub fn parse_command_line(arguments: &[String]) -> Result<Options, Diagnostic> {
             "--noinhibit-exec" => options.no_inhibit_executable = true,
             "--pic-veneer" => options.pic_veneer = true,
             "--unique" | "-unique" => options.unique = true,
+            "--enable-non-contiguous-regions" => options.enable_non_contiguous_regions = true,
             "--force-group-allocation" | "-force-group-allocation" => {
                 options.force_group_allocation = true
             }
@@ -2815,6 +2818,11 @@ pub struct SecureGatewayVeneer {
 const SECURE_SPECIAL_PREFIX: &str = "__acle_se_";
 
 const SECURE_GATEWAY_SIZE: u64 = 8;
+
+const OVERWRITE_NON_CONTIGUOUS: &str =
+    "OVERWRITE_SECTIONS cannot be used with --enable-non-contiguous-regions";
+
+const INSERT_NON_CONTIGUOUS: &str = "INSERT cannot be used with --enable-non-contiguous-regions";
 
 const DYNAMIC_DEBUG_TYPE: u32 = 0x6fff_4c10;
 
@@ -4068,6 +4076,7 @@ pub struct Context<'s> {
     pub erratum_patches: BTreeSet<SectionIndex>,
     erratum_patch_addresses: BTreeMap<SectionIndex, u64>,
     secure_import_library: BTreeMap<String, (u64, u64)>,
+    pending_spills: BTreeSet<SectionIndex>,
     has_dynamic_debug: bool,
     dynamic_debug_output: Option<Vec<u8>>,
     secure_entries: Vec<(SymbolIndex, SymbolIndex)>,
@@ -4225,6 +4234,7 @@ impl<'s> Context<'s> {
             erratum_patches: BTreeSet::new(),
             erratum_patch_addresses: BTreeMap::new(),
             secure_import_library: BTreeMap::new(),
+            pending_spills: BTreeSet::new(),
             has_dynamic_debug: false,
             dynamic_debug_output: None,
             secure_entries: Vec::new(),
@@ -12498,6 +12508,9 @@ impl<'s> Context<'s> {
                 let target = match found {
                     Some(target) => target,
                     None => {
+                        if let Some(list) = self.script.spill_lists.get(&member).cloned() {
+                            self.script.spill_lists.insert(self.sections.len(), list);
+                        }
                         let name = self.sections[member].name.clone();
                         let kind = self.sections[member].kind;
                         let index = self.sections.len();
@@ -12551,6 +12564,17 @@ impl<'s> Context<'s> {
                 }
             }
             for merge in merges {
+                if let Some(list) = self.script.spill_lists.get(&merge).cloned() {
+                    let alignment = self.sections[merge].alignment;
+                    for spill in list {
+                        let raised = self.sections[spill].alignment.max(alignment);
+                        self.sections[spill].alignment = raised;
+                        if let Some(parent) = self.sections[spill].output {
+                            let current = self.outputs[parent].alignment;
+                            self.outputs[parent].alignment = current.max(raised);
+                        }
+                    }
+                }
                 self.finalize_merge(merge);
             }
         }
@@ -24644,6 +24668,8 @@ impl<'s> Context<'s> {
             } else {
                 false
             };
+            let spilled = self.spill_sections();
+            changed |= spilled;
             pass += 1;
             if changed && pass >= 30 {
                 self.error(
@@ -24711,11 +24737,15 @@ impl<'s> Context<'s> {
                     }
                     break;
                 }
+            } else if spilled {
+                self.finalize_exception_index();
+                self.resolve_link_order();
             }
             if self.failed() {
                 break;
             }
         }
+        self.erase_potential_spill_sections();
         self.finalize_secure_gateways();
         self.finalize_symbol_table();
         self.finalize_synthetic_sizes();
@@ -41418,6 +41448,15 @@ impl Default for OutputScript {
 pub enum ScriptCommand {
     Assignment(usize),
     Output(OutputIndex),
+    Class(usize),
+}
+
+#[derive(Clone, Debug)]
+pub struct SectionClass {
+    pub name: String,
+    pub descriptions: Vec<usize>,
+    pub assigned: bool,
+    pub holder: OutputIndex,
 }
 
 #[derive(Clone, Debug)]
@@ -41473,6 +41512,9 @@ pub struct LinkerScript {
     pub referenced_symbols: Vec<String>,
     pub provide_map: Vec<(String, Vec<String>)>,
     pub kept_descriptions: Vec<usize>,
+    pub classes: Vec<SectionClass>,
+    pub spill_lists: BTreeMap<SectionIndex, Vec<SectionIndex>>,
+    pub spill_placeholders: BTreeSet<SectionIndex>,
     pub has_sections: bool,
     pub seen_data_align: bool,
     pub seen_relocation_read_only_end: bool,
@@ -42309,6 +42351,7 @@ impl<'s> Context<'s> {
             .filter_map(|command| match command {
                 ScriptCommand::Output(output) => Some(self.outputs[*output].name.clone()),
                 ScriptCommand::Assignment(_) => None,
+                ScriptCommand::Class(_) => None,
             })
             .collect();
         if !names.is_empty() {
@@ -42333,7 +42376,8 @@ impl<'s> Context<'s> {
             return;
         }
         if token == "CLASS" {
-            lexer.set_error("section classes are not supported");
+            let index = self.read_section_class_description(lexer);
+            commands.push(ScriptCommand::Class(index));
             return;
         }
         if token == "INCLUDE" {
@@ -42669,6 +42713,226 @@ impl<'s> Context<'s> {
         }
     }
 
+    fn read_section_class_name(&mut self, lexer: &mut LinkerScriptLexer) -> String {
+        lexer.expect("(");
+        let name = unquote(&lexer.next_token());
+        lexer.expect(")");
+        name
+    }
+
+    fn class_reference_description(
+        &mut self,
+        lexer: &mut LinkerScriptLexer,
+        with_flags: u64,
+        without_flags: u64,
+    ) -> usize {
+        let name = self.read_section_class_name(lexer);
+        let index = self.new_input_description("", with_flags, without_flags);
+        self.script.descriptions[index].class_reference = name;
+        index
+    }
+
+    fn read_section_class_description(&mut self, lexer: &mut LinkerScriptLexer) -> usize {
+        let name = self.read_section_class_name(lexer);
+        if self.script.classes.iter().any(|class| class.name == name) {
+            lexer.set_error(&format!("section class '{name}' already defined"));
+        }
+        let holder = self.outputs.len();
+        let mut output = OutputSection::new(&name);
+        output.live = false;
+        self.outputs.push(output);
+        let index = self.script.classes.len();
+        self.script.classes.push(SectionClass {
+            name: name.clone(),
+            descriptions: Vec::new(),
+            assigned: false,
+            holder,
+        });
+        lexer.expect("{");
+        while let Some(token) = lexer.till("}") {
+            if token == "(" || token == ")" {
+                lexer.set_error("expected filename pattern");
+            } else if lexer.peek() == "(" {
+                let description = self.read_input_section_description(lexer, &token);
+                let reference = self.script.descriptions[description]
+                    .class_reference
+                    .clone();
+                if !reference.is_empty() {
+                    lexer.set_error(&format!(
+                        "section class '{name}' references class '{reference}'"
+                    ));
+                }
+                self.script.classes[index].descriptions.push(description);
+            }
+            if lexer.failed() {
+                break;
+            }
+        }
+        index
+    }
+
+    fn is_class_holder(&self, output: Option<OutputIndex>) -> bool {
+        output.is_some_and(|output| {
+            self.script
+                .classes
+                .iter()
+                .any(|class| class.holder == output)
+        })
+    }
+
+    fn create_spill_placeholder(&mut self, source: SectionIndex) -> SectionIndex {
+        let data = &self.sections[source];
+        let mut placeholder = InputSection::synthetic(
+            &data.name.clone(),
+            data.kind,
+            data.flags,
+            data.alignment,
+            Synthetic::Padding,
+        );
+        placeholder.synthetic = None;
+        placeholder.file = data.file;
+        placeholder.size = 0;
+        placeholder.live = true;
+        let index = self.sections.len();
+        self.sections.push(placeholder);
+        self.script.spill_placeholders.insert(index);
+        self.script
+            .spill_lists
+            .entry(source)
+            .or_default()
+            .push(index);
+        index
+    }
+
+    fn region_overflowed(&mut self, region: Option<usize>) -> bool {
+        let Some(region) = region else {
+            return false;
+        };
+        let origin_expression = self.script.regions[region].origin.clone();
+        let length_expression = self.script.regions[region].length.clone();
+        let origin = self.evaluate_value(&origin_expression);
+        let length = self.evaluate_value(&length_expression);
+        self.script.regions[region].position.wrapping_sub(origin) > length
+    }
+
+    pub fn spill_sections(&mut self) -> bool {
+        if self.script.spill_lists.is_empty() {
+            return false;
+        }
+        let mut skipped: BTreeSet<SectionIndex> = BTreeSet::new();
+        let mut spilled = false;
+        for output in self.order.clone().into_iter().rev() {
+            let Some(region) = self.outputs[output].script.memory_region else {
+                continue;
+            };
+            let load_region = self.outputs[output].script.load_region;
+            let commands = self.outputs[output].script.commands.clone();
+            for command in commands.iter().rev() {
+                if !self.region_overflowed(Some(region)) && !self.region_overflowed(load_region) {
+                    break;
+                }
+                let OutputCommand::Input(description) = command else {
+                    continue;
+                };
+                let members: Vec<SectionIndex> = self.outputs[output]
+                    .members
+                    .iter()
+                    .copied()
+                    .filter(|member| self.sections[*member].description == *description)
+                    .collect();
+                let mut moved: BTreeSet<SectionIndex> = BTreeSet::new();
+                for section in members.into_iter().rev() {
+                    if self.script.spill_placeholders.contains(&section) {
+                        continue;
+                    }
+                    if !self.script.spill_lists.contains_key(&section) {
+                        break;
+                    }
+                    let memory_overflowed = self.region_overflowed(Some(region));
+                    let load_overflowed = self.region_overflowed(load_region);
+                    let mut chosen = None;
+                    while let Some(list) = self.script.spill_lists.get_mut(&section) {
+                        if list.is_empty() {
+                            self.script.spill_lists.remove(&section);
+                            break;
+                        }
+                        let spill = list.remove(0);
+                        if list.is_empty() {
+                            self.script.spill_lists.remove(&section);
+                        }
+                        let target = self.sections[spill].output;
+                        let blocked = target.is_some_and(|target| {
+                            (memory_overflowed
+                                && self.outputs[target].script.memory_region == Some(region))
+                                || (load_overflowed
+                                    && self.outputs[target].script.load_region == load_region)
+                        });
+                        if !blocked {
+                            chosen = Some(spill);
+                            break;
+                        }
+                        skipped.insert(spill);
+                    }
+                    let Some(spill) = chosen else {
+                        continue;
+                    };
+                    moved.insert(section);
+                    let target = self.sections[spill].output;
+                    if let Some(target) = target {
+                        if let Some(slot) = self.outputs[target]
+                            .members
+                            .iter()
+                            .position(|member| *member == spill)
+                        {
+                            self.outputs[target].members[slot] = section;
+                        }
+                    }
+                    let size = self.sections[section].size;
+                    self.sections[section].output = target;
+                    self.sections[section].description = self.sections[spill].description;
+                    self.sections[section].alignment = self.sections[spill].alignment;
+                    self.script.regions[region].position =
+                        self.script.regions[region].position.wrapping_sub(size);
+                    if let Some(load) = load_region {
+                        self.script.regions[load].position =
+                            self.script.regions[load].position.wrapping_sub(size);
+                    }
+                    if !self.region_overflowed(Some(region)) && !self.region_overflowed(load_region)
+                    {
+                        break;
+                    }
+                }
+                if !moved.is_empty() {
+                    spilled = true;
+                    self.outputs[output]
+                        .members
+                        .retain(|member| !moved.contains(member));
+                }
+            }
+        }
+        if !skipped.is_empty() {
+            for output in 0..self.outputs.len() {
+                self.outputs[output]
+                    .members
+                    .retain(|member| !skipped.contains(member));
+            }
+        }
+        spilled
+    }
+
+    pub fn erase_potential_spill_sections(&mut self) {
+        if self.script.spill_lists.is_empty() {
+            return;
+        }
+        let placeholders = std::mem::take(&mut self.script.spill_placeholders);
+        for output in 0..self.outputs.len() {
+            self.outputs[output]
+                .members
+                .retain(|member| !placeholders.contains(member));
+        }
+        self.script.spill_lists.clear();
+    }
+
     fn new_input_description(
         &mut self,
         file_pattern: &str,
@@ -42895,10 +43159,11 @@ impl<'s> Context<'s> {
                 (with_flags, without_flags) = self.read_input_section_flags(lexer);
             }
             let next = lexer.next_token();
-            if next == "CLASS" {
-                lexer.set_error("section classes are not supported");
-            }
-            let index = self.read_input_section_rules(lexer, &next, with_flags, without_flags);
+            let index = if next == "CLASS" {
+                self.class_reference_description(lexer, with_flags, without_flags)
+            } else {
+                self.read_input_section_rules(lexer, &next, with_flags, without_flags)
+            };
             lexer.expect(")");
             self.script.kept_descriptions.push(index);
             return index;
@@ -42908,7 +43173,7 @@ impl<'s> Context<'s> {
             token = lexer.next_token();
         }
         if token == "CLASS" {
-            lexer.set_error("section classes are not supported");
+            return self.class_reference_description(lexer, with_flags, without_flags);
         }
         self.read_input_section_rules(lexer, &token, with_flags, without_flags)
     }
@@ -43947,6 +44212,7 @@ impl<'s> Context<'s> {
         for command in self.script.commands.clone() {
             match command {
                 ScriptCommand::Assignment(assignment) => self.declare_script_symbol(assignment),
+                ScriptCommand::Class(_) => {}
                 ScriptCommand::Output(output) => {
                     if self.outputs[output].script.constraint != OutputConstraint::None {
                         continue;
@@ -44047,6 +44313,7 @@ impl<'s> Context<'s> {
         for command in self.script.commands.clone() {
             match command {
                 ScriptCommand::Assignment(assignment) => self.add_script_symbol(assignment),
+                ScriptCommand::Class(_) => {}
                 ScriptCommand::Output(output) => {
                     for inner in self.outputs[output].script.commands.clone() {
                         if let OutputCommand::Assignment(assignment) = inner {
@@ -44226,7 +44493,112 @@ impl<'s> Context<'s> {
         &mut self,
         description: usize,
         candidates: &[SectionIndex],
+        output: OutputIndex,
     ) -> Vec<SectionIndex> {
+        let reference = self.script.descriptions[description]
+            .class_reference
+            .clone();
+        if !reference.is_empty() {
+            return self.compute_class_sections(description, &reference, output);
+        }
+        let mut result = self.compute_matching_sections(description, candidates, output);
+        self.replace_spills(&mut result);
+        result
+    }
+
+    fn replace_spills(&mut self, result: &mut [SectionIndex]) {
+        let spills = std::mem::take(&mut self.pending_spills);
+        if spills.is_empty() {
+            return;
+        }
+        for slot in result.iter_mut() {
+            if spills.contains(slot) {
+                *slot = self.create_spill_placeholder(*slot);
+            }
+        }
+    }
+
+    fn compute_class_sections(
+        &mut self,
+        description: usize,
+        reference: &str,
+        output: OutputIndex,
+    ) -> Vec<SectionIndex> {
+        let mut result = Vec::new();
+        let Some(class) = self
+            .script
+            .classes
+            .iter()
+            .position(|class| class.name == reference)
+        else {
+            self.error(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context(format!("Reason: undefined section class '{reference}'")),
+            );
+            return result;
+        };
+        if !self.script.classes[class].assigned {
+            let name = self.outputs[output].name.clone();
+            self.error(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context(format!(
+                    "Reason: section class '{reference}' referenced by '{name}' before class definition"
+                )),
+            );
+            return result;
+        }
+        let with_flags = self.script.descriptions[description].with_flags;
+        let without_flags = self.script.descriptions[description].without_flags;
+        let discard = self.outputs[output].name == "/DISCARD/";
+        let mut spills = BTreeSet::new();
+        for member in self.script.classes[class].descriptions.clone() {
+            for section in self.script.descriptions[member].bases.clone() {
+                let flags = self.sections[section].flags;
+                if flags & with_flags != with_flags || flags & without_flags != 0 {
+                    continue;
+                }
+                let parent = self.sections[section].output;
+                let is_spill = parent.is_some() && !self.is_class_holder(parent);
+                if parent.is_none() || (is_spill && discard) {
+                    let name = self.sections[section].name.clone();
+                    self.error(
+                        problem(
+                            "EI263",
+                            "A linker script places sections in a way the linker cannot carry out.",
+                        )
+                        .with_context(format!(
+                            "Reason: section '{name}' cannot spill from/to /DISCARD/"
+                        )),
+                    );
+                    continue;
+                }
+                if is_spill {
+                    spills.insert(section);
+                }
+                result.push(section);
+            }
+        }
+        self.pending_spills = spills;
+        self.replace_spills(&mut result);
+        result
+    }
+
+    fn compute_matching_sections(
+        &mut self,
+        description: usize,
+        candidates: &[SectionIndex],
+        output: OutputIndex,
+    ) -> Vec<SectionIndex> {
+        let non_contiguous = self.options.enable_non_contiguous_regions;
+        let discard = self.outputs[output].name == "/DISCARD/";
+        let output_is_class = self.is_class_holder(Some(output));
+        let mut spills: BTreeSet<SectionIndex> = BTreeSet::new();
         let mut result: Vec<SectionIndex> = Vec::new();
         let mut positions: Vec<usize> = Vec::new();
         let mut seen: BTreeSet<usize> = BTreeSet::new();
@@ -44262,7 +44634,7 @@ impl<'s> Context<'s> {
             for (position, section) in candidates.iter().enumerate() {
                 let data = &self.sections[*section];
                 if !data.live
-                    || data.output.is_some()
+                    || (!non_contiguous && data.output.is_some())
                     || seen.contains(&position)
                     || data.relocated_section.is_some()
                 {
@@ -44289,6 +44661,14 @@ impl<'s> Context<'s> {
                 }
                 if data.flags & with_flags != with_flags || data.flags & without_flags != 0 {
                     continue;
+                }
+                if data.output.is_some() {
+                    if discard {
+                        continue;
+                    }
+                    if !output_is_class && !self.is_class_holder(data.output) {
+                        spills.insert(*section);
+                    }
                 }
                 result.push(*section);
                 positions.push(position);
@@ -44322,6 +44702,7 @@ impl<'s> Context<'s> {
             size_after_previous_sort,
             end,
         );
+        self.pending_spills = spills;
         result
     }
 
@@ -44348,7 +44729,7 @@ impl<'s> Context<'s> {
         let candidates = self.input_order.clone();
         for command in self.outputs[output].script.commands.clone() {
             if let OutputCommand::Input(description) = command {
-                let bases = self.compute_input_sections(description, &candidates);
+                let bases = self.compute_input_sections(description, &candidates, output);
                 for section in &bases {
                     self.sections[*section].output = Some(output);
                 }
@@ -44369,7 +44750,7 @@ impl<'s> Context<'s> {
             if !absorbed.is_empty() {
                 for command in self.outputs[output].script.commands.clone() {
                     if let OutputCommand::Input(description) = command {
-                        for section in self.compute_input_sections(description, &absorbed) {
+                        for section in self.compute_input_sections(description, &absorbed, output) {
                             self.discard_script_section(section);
                         }
                     }
@@ -44405,6 +44786,16 @@ impl<'s> Context<'s> {
     }
 
     pub fn process_section_commands(&mut self) {
+        if self.options.enable_non_contiguous_regions && !self.script.overwrite_sections.is_empty()
+        {
+            self.error_always(
+                problem(
+                    "EI263",
+                    "A linker script places sections in a way the linker cannot carry out.",
+                )
+                .with_context(format!("Reason: {OVERWRITE_NON_CONTIGUOUS}")),
+            );
+        }
         let mut overwrite: BTreeMap<String, OutputIndex> = BTreeMap::new();
         let mut index = 0u32;
         let mut used_overwrite: BTreeSet<OutputIndex> = BTreeSet::new();
@@ -44450,8 +44841,12 @@ impl<'s> Context<'s> {
                     self.outputs[output].script.section_index = index;
                     index += 1;
                 }
+            } else if let ScriptCommand::Class(class) = *command {
+                self.process_section_class(class);
             }
         }
+        self.check_spills_against_inserts();
+        self.check_unreferenced_classes();
         for output in self.script.overwrite_sections.clone() {
             if self.outputs[output].script.created
                 && self.outputs[output].script.section_index == u32::MAX
@@ -44461,6 +44856,84 @@ impl<'s> Context<'s> {
             }
         }
         self.script.commands = commands;
+    }
+
+    fn process_section_class(&mut self, class: usize) {
+        let holder = self.script.classes[class].holder;
+        let candidates = self.input_order.clone();
+        for description in self.script.classes[class].descriptions.clone() {
+            let bases = self.compute_input_sections(description, &candidates, holder);
+            for section in &bases {
+                if self.sections[*section].output.is_none() {
+                    self.sections[*section].output = Some(holder);
+                }
+            }
+            self.script.descriptions[description].bases = bases;
+        }
+        self.script.classes[class].assigned = true;
+    }
+
+    fn check_spills_against_inserts(&mut self) {
+        if self.script.spill_lists.is_empty() {
+            return;
+        }
+        let names: BTreeSet<String> = self
+            .script
+            .inserts
+            .iter()
+            .flat_map(|insert| insert.names.iter().cloned())
+            .collect();
+        for command in self.script.commands.clone() {
+            let ScriptCommand::Output(output) = command else {
+                continue;
+            };
+            let name = self.outputs[output].name.clone();
+            if !names.contains(&name) {
+                continue;
+            }
+            for item in self.outputs[output].script.commands.clone() {
+                let OutputCommand::Input(description) = item else {
+                    continue;
+                };
+                for section in self.script.descriptions[description].bases.clone() {
+                    if self.script.spill_placeholders.contains(&section)
+                        || self.script.spill_lists.contains_key(&section)
+                    {
+                        let section_name = self.sections[section].name.clone();
+                        self.error(
+                            problem(
+                                "EI263",
+                                "A linker script places sections in a way the linker cannot carry out.",
+                            )
+                            .with_context(format!(
+                                "Reason: section '{section_name}' cannot spill from/to INSERT section '{name}'"
+                            )),
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn check_unreferenced_classes(&mut self) {
+        for class in self.script.classes.clone() {
+            let unreferenced = class.descriptions.iter().any(|description| {
+                self.script.descriptions[*description]
+                    .bases
+                    .iter()
+                    .any(|section| self.sections[*section].output == Some(class.holder))
+            });
+            if unreferenced {
+                let name = class.name.clone();
+                self.error(
+                    problem(
+                        "EI263",
+                        "A linker script places sections in a way the linker cannot carry out.",
+                    )
+                    .with_context(format!("Reason: section class '{name}' is unreferenced")),
+                );
+            }
+        }
     }
 
     fn record_script_section(&mut self, output: OutputIndex, section: SectionIndex) {
@@ -44704,6 +45177,7 @@ impl<'s> Context<'s> {
             .filter_map(|command| match command {
                 ScriptCommand::Output(output) => Some(*output),
                 ScriptCommand::Assignment(_) => None,
+                ScriptCommand::Class(_) => None,
             })
             .collect();
         for output in self.order.clone() {
@@ -44727,6 +45201,15 @@ impl<'s> Context<'s> {
     pub fn process_insert_commands(&mut self) {
         let inserts = self.script.inserts.clone();
         for insert in inserts {
+            if self.options.enable_non_contiguous_regions {
+                self.error_always(
+                    problem(
+                        "EI263",
+                        "A linker script places sections in a way the linker cannot carry out.",
+                    )
+                    .with_context(format!("Reason: {INSERT_NON_CONTIGUOUS}")),
+                );
+            }
             let mut moves: Vec<ScriptCommand> = Vec::new();
             for name in &insert.names {
                 let found = self.script.commands.iter().position(|command| {
@@ -44882,6 +45365,7 @@ impl<'s> Context<'s> {
                 self.script.assignments[assignment].name != "."
             }
             ScriptCommand::Output(_) => false,
+            ScriptCommand::Class(_) => false,
         }
     }
 
@@ -44910,6 +45394,7 @@ impl<'s> Context<'s> {
             let other_rank = match *command {
                 ScriptCommand::Output(other) => self.outputs[other].rank,
                 ScriptCommand::Assignment(_) => u32::MAX,
+                ScriptCommand::Class(_) => u32::MAX,
             };
             if proximity > maximum
                 || (proximity == maximum
@@ -44926,12 +45411,14 @@ impl<'s> Context<'s> {
         let with_inputs = |command: ScriptCommand| match command {
             ScriptCommand::Output(other) => self.outputs[other].has_input_sections,
             ScriptCommand::Assignment(_) => false,
+            ScriptCommand::Class(_) => false,
         };
         let must_after =
             !self.script.program_header_commands.is_empty() || !self.script.regions.is_empty();
         let chosen_rank = match commands[chosen] {
             ScriptCommand::Output(other) => self.outputs[other].rank,
             ScriptCommand::Assignment(_) => u32::MAX,
+            ScriptCommand::Class(_) => u32::MAX,
         };
         let mut position = chosen;
         if chosen_rank <= self.outputs[output].rank || must_after {
@@ -45130,6 +45617,7 @@ impl<'s> Context<'s> {
                 match command {
                     ScriptCommand::Output(_) => outputs.push(command),
                     ScriptCommand::Assignment(_) => others.push(command),
+                    ScriptCommand::Class(_) => others.push(command),
                 }
             }
             outputs.sort_by(|left, right| match (left, right) {
@@ -45162,6 +45650,7 @@ impl<'s> Context<'s> {
             .filter_map(|command| match command {
                 ScriptCommand::Output(output) => Some(*output),
                 ScriptCommand::Assignment(_) => None,
+                ScriptCommand::Class(_) => None,
             })
             .collect();
     }
@@ -45417,6 +45906,7 @@ impl<'s> Context<'s> {
                         }
                     }
                 }
+                ScriptCommand::Class(_) => {}
             }
         }
         self.script.state_output = None;
@@ -49942,6 +50432,7 @@ impl<'s> Context<'s> {
                     continue;
                 }
                 ScriptCommand::Output(output) => *output,
+                ScriptCommand::Class(_) => continue,
             };
             if !self.order.contains(&output) {
                 continue;

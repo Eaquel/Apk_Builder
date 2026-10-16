@@ -69802,6 +69802,15 @@ mod linker_lit {
             }
             verdict
         });
+        let mut listing = String::new();
+        for (path, verdict) in &outcomes {
+            if let super::reference::Verdict::OutOfScope(reason) = verdict {
+                listing.push_str(&format!("{path}\t{reason}\n"));
+            }
+        }
+        let folder = super::reference::repository().join("Tests").join("suites");
+        let _ = std::fs::create_dir_all(&folder);
+        let _ = std::fs::write(folder.join(format!("{name}-out-of-scope.txt")), listing);
         let report = SuiteReport {
             name: name.to_string(),
             outcomes,
