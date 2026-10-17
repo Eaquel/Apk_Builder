@@ -86,6 +86,7 @@ pub struct LanguageOptions {
     pub char_is_signed: bool,
     pub preprocessed_output: bool,
     pub header_file: bool,
+    pub declspec_keyword: bool,
 }
 
 impl LanguageOptions {
@@ -120,6 +121,7 @@ impl LanguageOptions {
             char_is_signed: true,
             preprocessed_output: false,
             header_file: false,
+            declspec_keyword: false,
         })
     }
 
@@ -144,6 +146,7 @@ impl Default for LanguageOptions {
             char_is_signed: true,
             preprocessed_output: false,
             header_file: false,
+            declspec_keyword: false,
         })
     }
 }
@@ -1240,6 +1243,7 @@ impl Lexer {
         self.handle_comment(start, at);
         if self.keep_comments {
             let token = self.form(start, at, TokenKind::Comment, *flags);
+            self.at_physical_start_of_line = token.has(PHYSICAL_START_OF_LINE);
             return Ok(Some(token));
         }
         if !self.at_end(at) && is_horizontal_space(self.byte(at)) {
@@ -1998,7 +2002,17 @@ impl Lexer {
             return token;
         }
         self.position = self.bytes.len();
-        let mut token = Token::marker(TokenKind::EndOfFile, self.place(self.bytes.len()));
+        let mut end = self.bytes.len();
+        if end > 0 && matches!(self.bytes[end - 1], b'\n' | b'\r') {
+            end -= 1;
+            if end > 0
+                && matches!(self.bytes[end - 1], b'\n' | b'\r')
+                && self.bytes[end - 1] != self.bytes[end]
+            {
+                end -= 1;
+            }
+        }
+        let mut token = Token::marker(TokenKind::EndOfFile, self.place(end));
         token.flags = flags;
         token
     }
@@ -2155,6 +2169,7 @@ pub enum Message {
     DisabledMacroExpansion,
     MacroNotUsed,
     UndefIdentifier,
+    UndefPrefixIdentifier,
     UndefTrueIdentifier,
     MacroHidesKeyword,
     MacroReservedIdentifier,
@@ -2275,6 +2290,11 @@ pub enum Message {
     UnknownWarningOption,
     TooManyErrors,
     UnterminatedMicrosoftPragma,
+    AuditSyntax,
+    AuditDoubleBegin,
+    AuditUnmatchedEnd,
+    AuditInclude,
+    AuditEndOfFile,
     PragmaEnteredHere,
     AmbiguousMacro,
     OperatorUsedAsMacroName,
@@ -2479,6 +2499,9 @@ impl Message {
             ),
             Message::MacroNotUsed => (WarningOff, "unused-macros", "macro is not used"),
             Message::UndefIdentifier => (WarningOff, "undef", "%0 is not defined, evaluates to 0"),
+            Message::UndefPrefixIdentifier => {
+                (WarningOff, "undef-prefix", "%0 is not defined, evaluates to 0")
+            }
             Message::UndefTrueIdentifier => {
                 (Warning, "undef-true", "'true' is not defined, evaluates to 0")
             }
@@ -2810,6 +2833,15 @@ impl Message {
             Message::EmbedCannotOpen => (Fatal, "", "'%0' file not found"),
             Message::TooManyErrors => (Fatal, "", "too many errors emitted, stopping now"),
             Message::UnterminatedMicrosoftPragma => (Error, "", "missing terminating ')' character"),
+            Message::AuditSyntax => (Error, "", "expected 'begin' or 'end'"),
+            Message::AuditDoubleBegin => (Error, "", "already inside '#pragma clang %0'"),
+            Message::AuditUnmatchedEnd => (Error, "", "not currently inside '#pragma clang %0'"),
+            Message::AuditInclude => (
+                Error,
+                "",
+                "cannot %select{#include files|import headers}0 inside '#pragma clang %1'",
+            ),
+            Message::AuditEndOfFile => (Error, "", "'#pragma clang %0' was not ended within this file"),
             Message::UnknownWarningOption => {
                 (Warning, "unknown-warning-option", "unknown warning option '%0'")
             }
@@ -4164,6 +4196,7 @@ pub struct WarningOptions {
     pub fatal_errors: bool,
     pub show_in_system_headers: bool,
     pub error_limit: usize,
+    pub undef_prefixes: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
@@ -4878,6 +4911,7 @@ pub struct PreprocessorOptions {
     pub no_inline: bool,
     pub pic_level: u32,
     pub pie: bool,
+    pub embed_directories: Vec<String>,
 }
 
 impl Default for PreprocessorOptions {
@@ -4910,6 +4944,7 @@ impl Default for PreprocessorOptions {
             no_inline: false,
             pic_level: 0,
             pie: false,
+            embed_directories: Vec::new(),
         }
     }
 }
@@ -4971,6 +5006,16 @@ struct SearchOrigin {
     found_by_relative: bool,
 }
 
+#[derive(Default)]
+struct EmbedParameters {
+    limit: Option<u64>,
+    offset: Option<u64>,
+    prefix: Option<Vec<Token>>,
+    suffix: Option<Vec<Token>>,
+    if_empty: Option<Vec<Token>>,
+    unrecognized: usize,
+}
+
 type FoundFile = (String, Rc<[u8]>, Option<usize>, bool, FileCharacter);
 
 type MacroParameters = (Vec<Rc<[u8]>>, bool, bool);
@@ -5006,6 +5051,9 @@ pub struct Preprocessor<'files> {
     include_guards: BTreeMap<String, Rc<[u8]>>,
     pragma_site: Option<Place>,
     defined_state: Option<(bool, Rc<[u8]>)>,
+    evaluated_defined: bool,
+    assume_nonnull: Option<Place>,
+    arc_cf_audited: Option<Place>,
     directive_read_before: bool,
     last_expression_simple: bool,
 }
@@ -5074,6 +5122,9 @@ impl<'files> Preprocessor<'files> {
             include_guards: BTreeMap::new(),
             pragma_site: None,
             defined_state: None,
+            evaluated_defined: false,
+            assume_nonnull: None,
+            arc_cf_audited: None,
             directive_read_before: true,
             last_expression_simple: false,
         };
@@ -5186,6 +5237,10 @@ impl<'files> Preprocessor<'files> {
         }
         let option = if message == Message::TooManyErrors {
             Some("-ferror-limit=".to_string())
+        } else if message == Message::UndefPrefixIdentifier {
+            self.engine
+                .option_text(message, severity, as_error)
+                .map(|text| format!("{text}={}", self.options.warnings.undef_prefixes.join(",")))
         } else if message.is_warning_like() {
             self.engine.option_text(message, severity, as_error)
         } else {
@@ -5537,7 +5592,8 @@ impl<'files> Preprocessor<'files> {
     }
 
     fn handle_identifier(&mut self, token: &mut Token, from_file: bool) -> Option<Token> {
-        if from_file && self.poisoned.contains(&token.spelling) {
+        let raw = matches!(self.stack.last(), Some(Source::File(file)) if file.lexer.raw);
+        if from_file && !raw && self.poisoned.contains(&token.spelling) {
             self.report_poisoned(token);
         }
         let Some(definition) = self.macros.get(&token.spelling).cloned() else {
@@ -5581,12 +5637,11 @@ impl<'files> Preprocessor<'files> {
         let mut arguments = None;
         let mut end_site = identifier.site;
         if definition.function_like {
-            let saved_in_args = self.in_macro_arguments;
-            let saved_name = self.argument_macro_name.replace(identifier.clone());
+            self.argument_macro_name = Some(identifier.clone());
             self.in_macro_arguments = true;
             let read = self.read_macro_arguments(&identifier, &definition, &mut end_site);
-            self.in_macro_arguments = saved_in_args;
-            self.argument_macro_name = saved_name;
+            self.in_macro_arguments = false;
+            self.argument_macro_name = None;
             match read {
                 Ok(read) => arguments = Some(read),
                 Err(Some(replacement)) => return Some(replacement),
@@ -6582,6 +6637,20 @@ impl<'files> Preprocessor<'files> {
                 );
             }
         }
+        if let Some(place) = self.arc_cf_audited.take() {
+            self.report(
+                Message::AuditEndOfFile,
+                place,
+                vec!["arc_cf_code_audited".to_string()],
+            );
+        }
+        if let Some(place) = self.assume_nonnull.take() {
+            self.report(
+                Message::AuditEndOfFile,
+                place,
+                vec!["assume_nonnull".to_string()],
+            );
+        }
         if top == 0 {
             let unused = std::mem::take(&mut self.unused_macros);
             for place in unused {
@@ -6822,6 +6891,7 @@ impl<'files> Preprocessor<'files> {
                         return self.handle_user_diagnostic(&directive, true);
                     }
                     "pragma" => return self.handle_pragma_directive(&hash),
+                    "embed" => return self.handle_embed(&hash, &directive),
                     "ident" | "sccs" => return self.handle_ident(&directive),
                     "assert" | "unassert" => {}
                     _ => {}
@@ -7738,6 +7808,356 @@ impl<'files> Preprocessor<'files> {
         }
     }
 
+    fn evaluate_embed_expression(&mut self) -> (Option<ExpressionValue>, Token) {
+        let saved_if = self.parsing_if_directive;
+        let saved_disable = self.disable_expansion;
+        self.parsing_if_directive = true;
+        self.disable_expansion = false;
+        let mut token = self.lex_non_comment();
+        let result = match self.evaluate_value(&mut token, true) {
+            Err(()) => {
+                if token.kind != TokenKind::EndOfDirective {
+                    token = self.discard_until_end_of_directive();
+                }
+                None
+            }
+            Ok(mut value) => {
+                if token.kind == TokenKind::EndOfDirective {
+                    Some(value)
+                } else if self
+                    .evaluate_subexpression(
+                        &mut value,
+                        precedence(TokenKind::Question),
+                        &mut token,
+                        true,
+                    )
+                    .is_err()
+                {
+                    if token.kind != TokenKind::EndOfDirective {
+                        token = self.discard_until_end_of_directive();
+                    }
+                    None
+                } else {
+                    Some(value)
+                }
+            }
+        };
+        self.parsing_if_directive = saved_if;
+        self.disable_expansion = saved_disable;
+        (result, token)
+    }
+
+    fn skip_to_end_of_directive(&mut self, current: &Token) -> Token {
+        if current.kind == TokenKind::EndOfDirective {
+            current.clone()
+        } else {
+            self.discard_until_end_of_directive()
+        }
+    }
+
+    fn expect_embed_token(&mut self, current: &mut Token, kind: TokenKind, text: &str) -> bool {
+        if current.kind == kind {
+            return true;
+        }
+        self.report_token(Message::Expected, current, vec![text.to_string()]);
+        *current = self.skip_to_end_of_directive(current);
+        false
+    }
+
+    fn embed_integer(&mut self, current: &mut Token, end_kind: TokenKind) -> Option<u64> {
+        if !self.expect_embed_token(current, TokenKind::LeftParen, "'('") {
+            return None;
+        }
+        self.evaluated_defined = false;
+        let (value, token) = self.evaluate_embed_expression();
+        *current = token;
+        let value = value?;
+        if !self.expect_embed_token(current, TokenKind::RightParen, "')'") {
+            return None;
+        }
+        *current = self.lex_non_comment();
+        if self.evaluated_defined {
+            self.report_token(Message::DefinedInEmbed, current, Vec::new());
+            *current = self.skip_to_end_of_directive(current);
+            return None;
+        }
+        if value.is_negative() {
+            let text = (value.bits as i64).to_string();
+            self.report_token(
+                Message::RequiresPositiveValue,
+                current,
+                vec![text, "0".to_string()],
+            );
+            if current.kind != end_kind {
+                *current = self.skip_to_end_of_directive(current);
+            }
+            return None;
+        }
+        Some(value.bits)
+    }
+
+    fn embed_token_soup(&mut self, current: &mut Token, tokens: &mut Vec<Token>) -> bool {
+        if !self.expect_embed_token(current, TokenKind::LeftParen, "'('") {
+            return false;
+        }
+        *current = self.lex_non_comment();
+        let mut brackets: Vec<Token> = Vec::new();
+        let mut waiting_for_inner = false;
+        while current.kind != TokenKind::EndOfDirective
+            && (waiting_for_inner || current.kind != TokenKind::RightParen)
+        {
+            match current.kind {
+                TokenKind::LeftParen => {
+                    waiting_for_inner = true;
+                    brackets.push(current.clone());
+                }
+                TokenKind::LeftBrace | TokenKind::LeftSquare => brackets.push(current.clone()),
+                TokenKind::RightParen | TokenKind::RightBrace | TokenKind::RightSquare => {
+                    if current.kind == TokenKind::RightParen {
+                        waiting_for_inner = false;
+                    }
+                    let Some(open) = brackets.last().cloned() else {
+                        self.expect_embed_token(current, TokenKind::RightParen, "')'");
+                        return false;
+                    };
+                    let (matching, text) = match open.kind {
+                        TokenKind::LeftParen => (TokenKind::RightParen, "')'"),
+                        TokenKind::LeftBrace => (TokenKind::RightBrace, "'}'"),
+                        _ => (TokenKind::RightSquare, "']'"),
+                    };
+                    if current.kind != matching {
+                        self.report_token(Message::Expected, current, vec![text.to_string()]);
+                        let opener = format!("'{}'", open.text());
+                        self.report_token(Message::ToMatch, &open, vec![opener]);
+                        *current = self.skip_to_end_of_directive(current);
+                        return false;
+                    }
+                    brackets.pop();
+                }
+                _ => {}
+            }
+            tokens.push(current.clone());
+            *current = self.lex_non_comment();
+        }
+        if !self.expect_embed_token(current, TokenKind::RightParen, "')'") {
+            return false;
+        }
+        *current = self.lex_non_comment();
+        true
+    }
+
+    fn lex_embed_parameters(&mut self, for_has_embed: bool) -> (Option<EmbedParameters>, Token) {
+        let end_kind = if for_has_embed {
+            TokenKind::RightParen
+        } else {
+            TokenKind::EndOfDirective
+        };
+        let mut result = EmbedParameters::default();
+        let mut current = self.lex_non_comment();
+        while current.kind != end_kind && current.kind != TokenKind::EndOfDirective {
+            let start = current.clone();
+            if !self.expect_embed_token(&mut current, TokenKind::Identifier, "identifier") {
+                return (None, current);
+            }
+            let mut name = current.text().to_string();
+            current = self.lex_non_comment();
+            if current.kind == TokenKind::ColonColon {
+                current = self.lex_non_comment();
+                if !self.expect_embed_token(&mut current, TokenKind::Identifier, "identifier") {
+                    return (None, current);
+                }
+                name = format!("{name}::{}", current.text());
+                current = self.lex_non_comment();
+            }
+            let parameter = if name.len() > 4 && name.starts_with("__") && name.ends_with("__") {
+                name[2..name.len() - 2].to_string()
+            } else {
+                name.clone()
+            };
+            match parameter.as_str() {
+                "limit" | "clang::offset" => {
+                    let held = if parameter == "limit" {
+                        result.limit.is_some()
+                    } else {
+                        result.offset.is_some()
+                    };
+                    if held {
+                        self.report_token(
+                            Message::EmbedDuplicateParameter,
+                            &current,
+                            vec![parameter.clone()],
+                        );
+                    }
+                    let Some(value) = self.embed_integer(&mut current, end_kind) else {
+                        return (None, current);
+                    };
+                    if parameter == "limit" {
+                        result.limit = Some(value);
+                    } else {
+                        result.offset = Some(value);
+                    }
+                }
+                "prefix" | "suffix" | "if_empty" => {
+                    let held = match parameter.as_str() {
+                        "prefix" => result.prefix.is_some(),
+                        "suffix" => result.suffix.is_some(),
+                        _ => result.if_empty.is_some(),
+                    };
+                    if held {
+                        self.report_token(
+                            Message::EmbedDuplicateParameter,
+                            &current,
+                            vec![parameter.clone()],
+                        );
+                    }
+                    let mut tokens = Vec::new();
+                    if !self.embed_token_soup(&mut current, &mut tokens) {
+                        return (None, current);
+                    }
+                    match parameter.as_str() {
+                        "prefix" => result.prefix = Some(tokens),
+                        "suffix" => result.suffix = Some(tokens),
+                        _ => result.if_empty = Some(tokens),
+                    }
+                }
+                _ => {
+                    result.unrecognized += 1;
+                    if current.kind == TokenKind::LeftParen {
+                        let mut ignored = Vec::new();
+                        if !self.embed_token_soup(&mut current, &mut ignored) {
+                            return (None, current);
+                        }
+                    }
+                    if !for_has_embed {
+                        self.report_token(
+                            Message::UnknownParameter,
+                            &start,
+                            vec!["1".to_string(), parameter],
+                        );
+                        if current.kind != end_kind {
+                            current = self.skip_to_end_of_directive(&current);
+                        }
+                        return (None, current);
+                    }
+                }
+            }
+        }
+        (Some(result), current)
+    }
+
+    fn lookup_embed_file(&mut self, name: &str, angled: bool) -> Option<Rc<[u8]>> {
+        if name.starts_with('/') {
+            return self.read_file(name);
+        }
+        let mut candidates = Vec::new();
+        if !angled {
+            if let Some(index) = self.real_file_index() {
+                if let Source::File(file) = &self.stack[index] {
+                    if self.sources.buffer(file.buffer).kind == BufferKind::File {
+                        candidates.push(Self::join_path(&file.directory, name));
+                    }
+                }
+            }
+            if !self.options.working_directory.is_empty() {
+                candidates.push(Self::join_path(&self.options.working_directory, name));
+            }
+        }
+        for directory in &self.options.embed_directories {
+            candidates.push(Self::join_path(directory, name));
+        }
+        for candidate in candidates {
+            let full = if candidate.starts_with('/') || self.options.working_directory.is_empty() {
+                candidate
+            } else {
+                Self::join_path(&self.options.working_directory, &candidate)
+            };
+            if name.is_empty() || full.ends_with('/') {
+                continue;
+            }
+            if let Some(bytes) = self.read_file(&full) {
+                return Some(bytes);
+            }
+        }
+        None
+    }
+
+    fn handle_embed(&mut self, hash: &Token, directive: &Token) {
+        if self.language.at_least(CStandard::C23) {
+            self.report_token(Message::EmbedDirectiveCompatibility, directive, Vec::new());
+        } else {
+            self.report_token(
+                Message::EmbedDirectiveExtension,
+                directive,
+                vec!["0".to_string()],
+            );
+        }
+        let Ok(filename) = self.lex_header_name(true) else {
+            return;
+        };
+        if filename.kind != TokenKind::HeaderName {
+            self.report_token(Message::ExpectsFilename, &filename, Vec::new());
+            if filename.kind != TokenKind::EndOfDirective {
+                self.discard_until_end_of_directive();
+            }
+            return;
+        }
+        let (parameters, _) = self.lex_embed_parameters(false);
+        let Some(parameters) = parameters else {
+            return;
+        };
+        let Some((name, angled)) = Self::include_filename(&filename) else {
+            return;
+        };
+        if name.is_empty() {
+            self.report_token(Message::EmptyFilename, &filename, Vec::new());
+            return;
+        }
+        let Some(bytes) = self.lookup_embed_file(&name, angled) else {
+            self.report_token(Message::FileNotFound, &filename, vec![name]);
+            return;
+        };
+        let mut contents: &[u8] = &bytes;
+        if let Some(offset) = parameters.offset {
+            contents = &contents[(offset.min(contents.len() as u64)) as usize..];
+        }
+        if let Some(limit) = parameters.limit {
+            contents = &contents[..(limit.min(contents.len() as u64)) as usize];
+        }
+        let mut tokens: Vec<Token> = Vec::new();
+        if contents.is_empty() {
+            match parameters.if_empty {
+                Some(empty) => tokens = empty,
+                None => return,
+            }
+        } else {
+            if let Some(prefix) = parameters.prefix {
+                tokens.extend(prefix);
+            }
+            let text = contents
+                .iter()
+                .map(|byte| byte.to_string())
+                .collect::<Vec<_>>()
+                .join(", ");
+            tokens.push(self.make_token(
+                TokenKind::Embed,
+                text.into_bytes(),
+                (hash.site, hash.site),
+            ));
+            if let Some(suffix) = parameters.suffix {
+                tokens.extend(suffix);
+            }
+        }
+        if tokens.is_empty() {
+            return;
+        }
+        if let Some(index) = self.real_file_index() {
+            if let Source::File(file) = &mut self.stack[index] {
+                file.lexer.at_start_of_line = false;
+            }
+        }
+        self.push_tokens(tokens, true);
+    }
+
     fn evaluate_directive_expression(&mut self) -> bool {
         let saved_if = self.parsing_if_directive;
         let saved_disable = self.disable_expansion;
@@ -7788,6 +8208,7 @@ impl<'files> Preprocessor<'files> {
     }
 
     fn evaluate_defined(&mut self, token: &mut Token, live: bool) -> Result<ExpressionValue, ()> {
+        self.evaluated_defined = true;
         let begin = token.clone();
         let mut peek = self.lex_unexpanded_non_comment();
         let mut left_paren: Option<Token> = None;
@@ -7874,6 +8295,21 @@ impl<'files> Preprocessor<'files> {
                         Message::UndefIdentifier
                     };
                     self.report_token(message, &current, vec![quoted(&current.spelling)]);
+                    if message == Message::UndefIdentifier
+                        && self.message_ignored(Message::UndefIdentifier, current.site)
+                        && self
+                            .options
+                            .warnings
+                            .undef_prefixes
+                            .iter()
+                            .any(|prefix| current.spelling.starts_with(prefix.as_bytes()))
+                    {
+                        self.report_token(
+                            Message::UndefPrefixIdentifier,
+                            &current,
+                            vec![quoted(&current.spelling)],
+                        );
+                    }
                 }
                 *token = self.lex_non_comment();
                 let mut value = ExpressionValue::signed(0);
@@ -8958,86 +9394,1334 @@ const ALWAYS_EXTENSIONS: &[&str] = &[
     "statement_attributes_with_gnu_syntax",
 ];
 
-const GNU_ATTRIBUTES: &[&str] = &[
-    "alias",
-    "aligned",
-    "alloc_align",
-    "alloc_size",
-    "always_inline",
-    "annotate",
-    "artificial",
-    "assume_aligned",
-    "availability",
-    "blocks",
-    "cleanup",
-    "cold",
-    "common",
-    "const",
-    "constructor",
-    "deprecated",
-    "destructor",
-    "diagnose_if",
-    "enable_if",
-    "error",
-    "external_source_symbol",
-    "fallthrough",
-    "flag_enum",
-    "flatten",
-    "format",
-    "format_arg",
-    "gnu_inline",
-    "hot",
-    "ifunc",
-    "leaf",
-    "malloc",
-    "may_alias",
-    "mode",
-    "naked",
-    "no_instrument_function",
-    "no_sanitize",
-    "no_stack_protector",
-    "nocommon",
-    "noduplicate",
-    "noinline",
-    "nonnull",
-    "noreturn",
-    "nothrow",
-    "objc_boxable",
-    "optnone",
-    "overloadable",
-    "packed",
-    "pass_object_size",
-    "pure",
-    "regparm",
-    "retain",
-    "returns_nonnull",
-    "returns_twice",
-    "section",
-    "sentinel",
-    "transparent_union",
-    "unavailable",
-    "uninitialized",
-    "unused",
-    "used",
-    "vector_size",
-    "visibility",
-    "warn_unused_result",
-    "warning",
-    "weak",
-    "weakref",
-    "zero_call_used_regs",
-];
+const ATTRIBUTE_SPELLINGS: &str = "\
+C23 - _Noreturn 202202:-\n\
+C23 - deprecated 201904:-\n\
+C23 - fallthrough 201910:-\n\
+C23 - maybe_unused 202106:-\n\
+C23 - nodiscard 202003:-\n\
+C23 - noreturn 202202:-\n\
+C23 clang NSObject 1:-\n\
+C23 clang __clang_arm_builtin_alias 1:a=arm,thumb,armeb,thumbeb,aarch64,aarch64_be,aarch64_32\n\
+C23 clang __clang_arm_mve_strict_polymorphism 1:a=arm,thumb,armeb,thumbeb\n\
+C23 clang aarch64_sve_pcs 1:-\n\
+C23 clang aarch64_vector_pcs 1:-\n\
+C23 clang acquire_handle 1:-\n\
+C23 clang address_space 1:-\n\
+C23 clang allocating 1:-\n\
+C23 clang always_inline 1:-\n\
+C23 clang amdgpu_av 1:a=amdgpu,r600\n\
+C23 clang amdgpu_kernel 1:-\n\
+C23 clang annotate 1:-\n\
+C23 clang annotate_type 1:-\n\
+C23 clang argument_with_type_tag 1:-\n\
+C23 clang assume 1:-\n\
+C23 clang atomic 1:-\n\
+C23 clang availability 1:-\n\
+C23 clang available_only_in_default_eval_method 1:-\n\
+C23 clang blocking 1:-\n\
+C23 clang blocks 1:-\n\
+C23 clang bpf_fastcall 1:a=bpfel,bpfeb\n\
+C23 clang btf_decl_tag 1:-\n\
+C23 clang btf_type_tag 1:-\n\
+C23 clang builtin_alias 1:-\n\
+C23 clang callback 1:-\n\
+C23 clang called_once 1:-\n\
+C23 clang cf_audited_transfer 1:-\n\
+C23 clang cf_consumed 1:-\n\
+C23 clang cf_returns_not_retained 1:-\n\
+C23 clang cf_returns_retained 1:-\n\
+C23 clang cf_unknown_transfer 1:-\n\
+C23 clang cfi_canonical_jump_table 1:-\n\
+C23 clang cfi_salt 1:-\n\
+C23 clang cfi_unchecked_callee 1:-\n\
+C23 clang clspv_libclc_builtin 1:-\n\
+C23 clang code_align 1:-\n\
+C23 clang convergent 1:-\n\
+C23 clang coro_await_elidable 1:-\n\
+C23 clang coro_await_elidable_argument 1:-\n\
+C23 clang coro_disable_lifetimebound 1:-\n\
+C23 clang coro_lifetimebound 1:-\n\
+C23 clang coro_only_destroy_when_complete 1:-\n\
+C23 clang coro_return_type 1:-\n\
+C23 clang coro_wrapper 1:-\n\
+C23 clang counted_by 1:-\n\
+C23 clang counted_by_or_null 1:-\n\
+C23 clang cpu_dispatch 1:-\n\
+C23 clang cpu_specific 1:-\n\
+C23 clang device_kernel 1:-\n\
+C23 clang diagnose_as_builtin 1:-\n\
+C23 clang disable_sanitizer_instrumentation 1:-\n\
+C23 clang disable_tail_calls 1:-\n\
+C23 clang enforce_read_only_placement 1:-\n\
+C23 clang enforce_tcb 1:-\n\
+C23 clang enforce_tcb_leaf 1:-\n\
+C23 clang enum_extensibility 1:-\n\
+C23 clang exclude_from_explicit_instantiation 1:-\n\
+C23 clang export_name 1:a=wasm32,wasm64\n\
+C23 clang ext_vector_type 1:-\n\
+C23 clang external_source_symbol 20230206:-\n\
+C23 clang flag_enum 1:-\n\
+C23 clang guard 1:o=Win32\n\
+C23 clang hybrid_patchable 1:c=arm64ec\n\
+C23 clang ibaction 1:-\n\
+C23 clang iboutlet 1:-\n\
+C23 clang iboutletcollection 1:-\n\
+C23 clang import_module 1:a=wasm32,wasm64\n\
+C23 clang import_name 1:a=wasm32,wasm64\n\
+C23 clang internal_linkage 1:-\n\
+C23 clang lifetime_capture_by 1:-\n\
+C23 clang lifetime_capture_by_global 1:-\n\
+C23 clang lifetime_capture_by_this 1:-\n\
+C23 clang lifetime_capture_by_unknown 1:-\n\
+C23 clang lifetimebound 1:-\n\
+C23 clang likely 1:-\n\
+C23 clang loader_uninitialized 1:-\n\
+C23 clang lto_visibility_public 1:-\n\
+C23 clang m68k_rtd 1:-\n\
+C23 clang malloc_span 1:-\n\
+C23 clang matrix_type 1:-\n\
+C23 clang maybe_undef 1:-\n\
+C23 clang mig_server_routine 1:-\n\
+C23 clang min_vector_width 1:-\n\
+C23 clang minsize 1:-\n\
+C23 clang modular_format 1:-\n\
+C23 clang musttail 1:c=musttail\n\
+C23 clang neon_polyvector_type 1:-\n\
+C23 clang neon_vector_type 1:-\n\
+C23 clang no_builtin 1:-\n\
+C23 clang no_field_protection 1:-\n\
+C23 clang no_outline 1:-\n\
+C23 clang no_sanitize 1:-\n\
+C23 clang no_sanitize_memory 1:-\n\
+C23 clang no_speculative_load_hardening 1:-\n\
+C23 clang no_stack_protector 1:-\n\
+C23 clang no_thread_safety_analysis 1:-\n\
+C23 clang noconvergent 1:-\n\
+C23 clang noderef 1:-\n\
+C23 clang noduplicate 1:-\n\
+C23 clang noescape 1:-\n\
+C23 clang noinline 1:-\n\
+C23 clang nomerge 1:-\n\
+C23 clang nonallocating 1:-\n\
+C23 clang nonblocking 1:-\n\
+C23 clang not_tail_called 1:-\n\
+C23 clang nouwtable 1:-\n\
+C23 clang ns_consumed 1:-\n\
+C23 clang ns_consumes_self 1:-\n\
+C23 clang ns_returns_autoreleased 1:-\n\
+C23 clang ns_returns_not_retained 1:-\n\
+C23 clang ns_returns_retained 1:-\n\
+C23 clang nvptx_kernel 1:-\n\
+C23 clang objc_arc_weak_reference_unavailable 1:-\n\
+C23 clang objc_boxable 1:-\n\
+C23 clang objc_bridge 1:-\n\
+C23 clang objc_bridge_mutable 1:-\n\
+C23 clang objc_bridge_related 1:-\n\
+C23 clang objc_class_stub 1:-\n\
+C23 clang objc_designated_initializer 1:-\n\
+C23 clang objc_direct 1:-\n\
+C23 clang objc_direct_members 1:-\n\
+C23 clang objc_exception 1:-\n\
+C23 clang objc_externally_retained 1:-\n\
+C23 clang objc_gc 1:-\n\
+C23 clang objc_independent_class 1:-\n\
+C23 clang objc_method_family 1:-\n\
+C23 clang objc_non_runtime_protocol 1:-\n\
+C23 clang objc_nonlazy_class 1:-\n\
+C23 clang objc_ownership 1:-\n\
+C23 clang objc_precise_lifetime 1:-\n\
+C23 clang objc_protocol_requires_explicit_implementation 1:-\n\
+C23 clang objc_requires_property_definitions 1:-\n\
+C23 clang objc_requires_super 1:-\n\
+C23 clang objc_returns_inner_pointer 1:-\n\
+C23 clang objc_root_class 1:-\n\
+C23 clang objc_runtime_name 1:-\n\
+C23 clang objc_runtime_visible 1:-\n\
+C23 clang objc_subclassing_restricted 1:-\n\
+C23 clang opencl_constant 1:-\n\
+C23 clang opencl_generic 1:-\n\
+C23 clang opencl_global 1:-\n\
+C23 clang opencl_global_device 1:-\n\
+C23 clang opencl_global_host 1:-\n\
+C23 clang opencl_local 1:-\n\
+C23 clang opencl_private 1:-\n\
+C23 clang optnone 1:-\n\
+C23 clang os_consumed 1:-\n\
+C23 clang os_consumes_this 1:-\n\
+C23 clang os_returns_not_retained 1:-\n\
+C23 clang os_returns_retained 1:-\n\
+C23 clang os_returns_retained_on_non_zero 1:-\n\
+C23 clang os_returns_retained_on_zero 1:-\n\
+C23 clang overflow_behavior 1:-\n\
+C23 clang overloadable 1:-\n\
+C23 clang ownership_holds 1:-\n\
+C23 clang ownership_returns 1:-\n\
+C23 clang ownership_takes 1:-\n\
+C23 clang pascal 1:-\n\
+C23 clang pass_dynamic_object_size 1:-\n\
+C23 clang pass_object_size 1:-\n\
+C23 clang personality 1:-\n\
+C23 clang pointer_field_protection 1:-\n\
+C23 clang pointer_with_type_tag 1:-\n\
+C23 clang preferred_type 1:-\n\
+C23 clang preserve_access_index 1:a=bpfel,bpfeb\n\
+C23 clang preserve_all 1:-\n\
+C23 clang preserve_most 1:-\n\
+C23 clang preserve_none 1:a=aarch64,aarch64_be,aarch64_32,x86,x86_64\n\
+C23 clang preserve_static_offset 1:a=bpfel,bpfeb\n\
+C23 clang ptrauth_vtable_pointer 1:-\n\
+C23 clang reentrant_capability 1:-\n\
+C23 clang release_handle 1:-\n\
+C23 clang require_explicit_initialization 1:-\n\
+C23 clang riscv_vector_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+C23 clang riscv_vls_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+C23 clang sized_by 1:-\n\
+C23 clang sized_by_or_null 1:-\n\
+C23 clang speculative_load_hardening 1:-\n\
+C23 clang stack_protector_ignore 1:-\n\
+C23 clang suppress 1:-\n\
+C23 clang swift_async 1:-\n\
+C23 clang swift_async_context 1:-\n\
+C23 clang swift_async_error 1:-\n\
+C23 clang swift_context 1:-\n\
+C23 clang swift_error_result 1:-\n\
+C23 clang swift_indirect_result 1:-\n\
+C23 clang swiftasynccall 1:-\n\
+C23 clang swiftcall 1:-\n\
+C23 clang sycl_kernel 1:-\n\
+C23 clang sycl_special_class 1:-\n\
+C23 clang type_tag_for_datatype 1:-\n\
+C23 clang type_visibility 1:-\n\
+C23 clang unavailable 1:-\n\
+C23 clang unlikely 1:-\n\
+C23 clang unsafe_buffer_usage 1:-\n\
+C23 clang use_handle 1:-\n\
+C23 clang vectorcall 1:-\n\
+C23 clang weak_import 1:-\n\
+C23 clang xray_always_instrument 1:-\n\
+C23 clang xray_log_args 1:-\n\
+C23 clang xray_never_instrument 1:-\n\
+C23 gnu __const 1:-\n\
+C23 gnu alias 1:-\n\
+C23 gnu aligned 1:-\n\
+C23 gnu alloc_align 1:-\n\
+C23 gnu alloc_size 1:-\n\
+C23 gnu always_inline 1:-\n\
+C23 gnu artificial 1:-\n\
+C23 gnu assume_aligned 1:-\n\
+C23 gnu cdecl 1:-\n\
+C23 gnu cleanup 1:-\n\
+C23 gnu cold 1:-\n\
+C23 gnu common 1:-\n\
+C23 gnu const 1:-\n\
+C23 gnu constructor 1:-\n\
+C23 gnu deprecated 1:-\n\
+C23 gnu destructor 1:-\n\
+C23 gnu dllexport 1:c=dllimport\n\
+C23 gnu dllimport 1:c=dllimport\n\
+C23 gnu error 1:-\n\
+C23 gnu fallthrough 1:-\n\
+C23 gnu far 1:a=mips,mipsel,mips64,mips64el\n\
+C23 gnu fastcall 1:-\n\
+C23 gnu flag_enum 1:-\n\
+C23 gnu flatten 1:-\n\
+C23 gnu force_align_arg_pointer 1:a=x86,x86_64\n\
+C23 gnu format 1:-\n\
+C23 gnu format_arg 1:-\n\
+C23 gnu format_matches 1:-\n\
+C23 gnu function_return 1:a=x86,x86_64\n\
+C23 gnu gcc_struct 1:-\n\
+C23 gnu gnu_inline 1:-\n\
+C23 gnu hot 1:-\n\
+C23 gnu ifunc 1:c=ifunc\n\
+C23 gnu interrupt 1:a=arm,thumb,armeb,thumbeb 1:a=avr 1:a=x86,x86_64 1:a=msp430 1:a=mips,mipsel 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+C23 gnu leaf 1:-\n\
+C23 gnu long_call 1:a=mips,mipsel,mips64,mips64el\n\
+C23 gnu malloc 1:-\n\
+C23 gnu may_alias 1:-\n\
+C23 gnu micromips 1:a=mips,mipsel\n\
+C23 gnu mips16 1:a=mips,mipsel\n\
+C23 gnu mode 1:-\n\
+C23 gnu model 1:a=loongarch32,loongarch64,x86_64,nvptx,nvptx64,amdgpu,r600,spirv,spirv32,spirv64\n\
+C23 gnu ms_abi 1:-\n\
+C23 gnu ms_struct 1:-\n\
+C23 gnu naked 1:-\n\
+C23 gnu near 1:a=mips,mipsel,mips64,mips64el\n\
+C23 gnu no_address_safety_analysis 1:-\n\
+C23 gnu no_caller_saved_registers 1:a=x86,x86_64\n\
+C23 gnu no_instrument_function 1:-\n\
+C23 gnu no_profile_instrument_function 1:-\n\
+C23 gnu no_randomize_layout 1:-\n\
+C23 gnu no_sanitize 1:-\n\
+C23 gnu no_sanitize_address 1:-\n\
+C23 gnu no_sanitize_thread 1:-\n\
+C23 gnu no_split_stack 1:-\n\
+C23 gnu no_stack_protector 1:-\n\
+C23 gnu nocf_check 1:a=x86,x86_64\n\
+C23 gnu nocommon 1:-\n\
+C23 gnu nodebug 1:-\n\
+C23 gnu noinline 1:-\n\
+C23 gnu nomicromips 1:a=mips,mipsel\n\
+C23 gnu nomips16 1:a=mips,mipsel\n\
+C23 gnu nonnull 1:-\n\
+C23 gnu nonstring 1:-\n\
+C23 gnu noreturn 1:-\n\
+C23 gnu nothrow 1:-\n\
+C23 gnu packed 1:-\n\
+C23 gnu patchable_function_entry 1:a=aarch64,aarch64_be,loongarch32,loongarch64,riscv32,riscv64,x86,x86_64,ppc,ppc64,ppc64le,systemz\n\
+C23 gnu pcs 1:-\n\
+C23 gnu pure 1:-\n\
+C23 gnu randomize_layout 1:-\n\
+C23 gnu regcall 1:-\n\
+C23 gnu regparm 1:-\n\
+C23 gnu retain 1:-\n\
+C23 gnu returns_nonnull 1:-\n\
+C23 gnu returns_twice 1:-\n\
+C23 gnu section 1:-\n\
+C23 gnu selectany 1:-\n\
+C23 gnu sentinel 1:-\n\
+C23 gnu short_call 1:a=mips,mipsel,mips64,mips64el\n\
+C23 gnu signal 1:a=avr\n\
+C23 gnu stdcall 1:-\n\
+C23 gnu sysv_abi 1:-\n\
+C23 gnu target 1:-\n\
+C23 gnu target_clones 1:-\n\
+C23 gnu target_version 1:a=aarch64,aarch64_be,aarch64_32,riscv32,riscv64,riscv32be,riscv64be\n\
+C23 gnu thiscall 1:-\n\
+C23 gnu tls_model 1:-\n\
+C23 gnu transparent_union 1:-\n\
+C23 gnu unused 1:-\n\
+C23 gnu used 1:-\n\
+C23 gnu vector_size 1:-\n\
+C23 gnu visibility 1:-\n\
+C23 gnu warn_unused 1:-\n\
+C23 gnu warn_unused_result 1:-\n\
+C23 gnu warning 1:-\n\
+C23 gnu weak 1:-\n\
+C23 gnu weakref 1:-\n\
+C23 gnu zero_call_used_regs 1:-\n\
+C23 msvc forceinline 1:-\n\
+C23 msvc forceinline_calls 1:-\n\
+C23 msvc noinline 1:-\n\
+C23 riscv vector_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+C23 riscv vls_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 - assume 202207:-\n\
+CXX11 - deprecated 201309:-\n\
+CXX11 - fallthrough 201603:-\n\
+CXX11 - likely 201803:-\n\
+CXX11 - maybe_unused 201603:-\n\
+CXX11 - no_unique_address 201803:c=itanium\n\
+CXX11 - nodiscard 201907:-\n\
+CXX11 - noreturn 200809:-\n\
+CXX11 - unlikely 201803:-\n\
+CXX11 clang NSObject 1:-\n\
+CXX11 clang __clang_arm_builtin_alias 1:a=arm,thumb,armeb,thumbeb,aarch64,aarch64_be,aarch64_32\n\
+CXX11 clang __clang_arm_mve_strict_polymorphism 1:a=arm,thumb,armeb,thumbeb\n\
+CXX11 clang aarch64_sve_pcs 1:-\n\
+CXX11 clang aarch64_vector_pcs 1:-\n\
+CXX11 clang acquire_capability 1:-\n\
+CXX11 clang acquire_handle 1:-\n\
+CXX11 clang acquire_shared_capability 1:-\n\
+CXX11 clang address_space 1:-\n\
+CXX11 clang allocating 1:-\n\
+CXX11 clang always_destroy 1:-\n\
+CXX11 clang always_inline 1:-\n\
+CXX11 clang amdgpu_av 1:a=amdgpu,r600\n\
+CXX11 clang amdgpu_flat_work_group_size 1:-\n\
+CXX11 clang amdgpu_kernel 1:-\n\
+CXX11 clang amdgpu_max_num_work_groups 1:-\n\
+CXX11 clang amdgpu_num_sgpr 1:-\n\
+CXX11 clang amdgpu_num_vgpr 1:-\n\
+CXX11 clang amdgpu_waves_per_eu 1:-\n\
+CXX11 clang annotate 1:-\n\
+CXX11 clang annotate_type 1:-\n\
+CXX11 clang argument_with_type_tag 1:-\n\
+CXX11 clang assert_capability 1:-\n\
+CXX11 clang assert_shared_capability 1:-\n\
+CXX11 clang assume 1:-\n\
+CXX11 clang atomic 1:-\n\
+CXX11 clang availability 1:-\n\
+CXX11 clang available_only_in_default_eval_method 1:-\n\
+CXX11 clang blocking 1:-\n\
+CXX11 clang blocks 1:-\n\
+CXX11 clang bpf_fastcall 1:a=bpfel,bpfeb\n\
+CXX11 clang btf_decl_tag 1:-\n\
+CXX11 clang btf_type_tag 1:-\n\
+CXX11 clang builtin_alias 1:-\n\
+CXX11 clang callable_when 1:-\n\
+CXX11 clang callback 1:-\n\
+CXX11 clang called_once 1:-\n\
+CXX11 clang capability 1:-\n\
+CXX11 clang cf_audited_transfer 1:-\n\
+CXX11 clang cf_consumed 1:-\n\
+CXX11 clang cf_returns_not_retained 1:-\n\
+CXX11 clang cf_returns_retained 1:-\n\
+CXX11 clang cf_unknown_transfer 1:-\n\
+CXX11 clang cfi_canonical_jump_table 1:-\n\
+CXX11 clang cfi_salt 1:-\n\
+CXX11 clang cfi_unchecked_callee 1:-\n\
+CXX11 clang clspv_libclc_builtin 1:-\n\
+CXX11 clang code_align 1:-\n\
+CXX11 clang consumable 1:-\n\
+CXX11 clang consumable_auto_cast_state 1:-\n\
+CXX11 clang consumable_set_state_on_read 1:-\n\
+CXX11 clang convergent 1:-\n\
+CXX11 clang coro_await_elidable 1:-\n\
+CXX11 clang coro_await_elidable_argument 1:-\n\
+CXX11 clang coro_disable_lifetimebound 1:-\n\
+CXX11 clang coro_lifetimebound 1:-\n\
+CXX11 clang coro_only_destroy_when_complete 1:-\n\
+CXX11 clang coro_return_type 1:-\n\
+CXX11 clang coro_wrapper 1:-\n\
+CXX11 clang counted_by 1:-\n\
+CXX11 clang counted_by_or_null 1:-\n\
+CXX11 clang cpu_dispatch 1:-\n\
+CXX11 clang cpu_specific 1:-\n\
+CXX11 clang device_kernel 1:-\n\
+CXX11 clang diagnose_as_builtin 1:-\n\
+CXX11 clang disable_sanitizer_instrumentation 1:-\n\
+CXX11 clang disable_tail_calls 1:-\n\
+CXX11 clang enforce_read_only_placement 1:-\n\
+CXX11 clang enforce_tcb 1:-\n\
+CXX11 clang enforce_tcb_leaf 1:-\n\
+CXX11 clang enum_extensibility 1:-\n\
+CXX11 clang exclude_from_explicit_instantiation 1:-\n\
+CXX11 clang exclusive_locks_required 1:-\n\
+CXX11 clang export_name 1:a=wasm32,wasm64\n\
+CXX11 clang ext_vector_type 1:-\n\
+CXX11 clang external_source_symbol 20230206:-\n\
+CXX11 clang fallthrough 1:-\n\
+CXX11 clang flag_enum 1:-\n\
+CXX11 clang guard 1:o=Win32\n\
+CXX11 clang guarded_var 1:-\n\
+CXX11 clang hybrid_patchable 1:c=arm64ec\n\
+CXX11 clang ibaction 1:-\n\
+CXX11 clang iboutlet 1:-\n\
+CXX11 clang iboutletcollection 1:-\n\
+CXX11 clang import_module 1:a=wasm32,wasm64\n\
+CXX11 clang import_name 1:a=wasm32,wasm64\n\
+CXX11 clang intel_ocl_bicc 1:-\n\
+CXX11 clang internal_linkage 1:-\n\
+CXX11 clang lifetime_capture_by 1:-\n\
+CXX11 clang lifetime_capture_by_global 1:-\n\
+CXX11 clang lifetime_capture_by_this 1:-\n\
+CXX11 clang lifetime_capture_by_unknown 1:-\n\
+CXX11 clang lifetimebound 1:-\n\
+CXX11 clang loader_uninitialized 1:-\n\
+CXX11 clang lto_visibility_public 1:-\n\
+CXX11 clang m68k_rtd 1:-\n\
+CXX11 clang malloc_span 1:-\n\
+CXX11 clang matrix_type 1:-\n\
+CXX11 clang maybe_undef 1:-\n\
+CXX11 clang mig_server_routine 1:-\n\
+CXX11 clang min_vector_width 1:-\n\
+CXX11 clang minsize 1:-\n\
+CXX11 clang modular_format 1:-\n\
+CXX11 clang musttail 1:c=musttail\n\
+CXX11 clang neon_polyvector_type 1:-\n\
+CXX11 clang neon_vector_type 1:-\n\
+CXX11 clang no_builtin 1:-\n\
+CXX11 clang no_destroy 1:-\n\
+CXX11 clang no_field_protection 1:-\n\
+CXX11 clang no_outline 1:-\n\
+CXX11 clang no_sanitize 1:-\n\
+CXX11 clang no_sanitize_memory 1:-\n\
+CXX11 clang no_specializations 1:-\n\
+CXX11 clang no_speculative_load_hardening 1:-\n\
+CXX11 clang no_stack_protector 1:-\n\
+CXX11 clang no_thread_safety_analysis 1:-\n\
+CXX11 clang noconvergent 1:-\n\
+CXX11 clang noderef 1:-\n\
+CXX11 clang noduplicate 1:-\n\
+CXX11 clang noescape 1:-\n\
+CXX11 clang noinline 1:-\n\
+CXX11 clang nomerge 1:-\n\
+CXX11 clang nonallocating 1:-\n\
+CXX11 clang nonblocking 1:-\n\
+CXX11 clang not_tail_called 1:-\n\
+CXX11 clang nouwtable 1:-\n\
+CXX11 clang ns_consumed 1:-\n\
+CXX11 clang ns_consumes_self 1:-\n\
+CXX11 clang ns_returns_autoreleased 1:-\n\
+CXX11 clang ns_returns_not_retained 1:-\n\
+CXX11 clang ns_returns_retained 1:-\n\
+CXX11 clang nvptx_kernel 1:-\n\
+CXX11 clang objc_arc_weak_reference_unavailable 1:-\n\
+CXX11 clang objc_boxable 1:-\n\
+CXX11 clang objc_bridge 1:-\n\
+CXX11 clang objc_bridge_mutable 1:-\n\
+CXX11 clang objc_bridge_related 1:-\n\
+CXX11 clang objc_class_stub 1:-\n\
+CXX11 clang objc_designated_initializer 1:-\n\
+CXX11 clang objc_direct 1:-\n\
+CXX11 clang objc_direct_members 1:-\n\
+CXX11 clang objc_exception 1:-\n\
+CXX11 clang objc_externally_retained 1:-\n\
+CXX11 clang objc_gc 1:-\n\
+CXX11 clang objc_independent_class 1:-\n\
+CXX11 clang objc_method_family 1:-\n\
+CXX11 clang objc_non_runtime_protocol 1:-\n\
+CXX11 clang objc_nonlazy_class 1:-\n\
+CXX11 clang objc_ownership 1:-\n\
+CXX11 clang objc_precise_lifetime 1:-\n\
+CXX11 clang objc_protocol_requires_explicit_implementation 1:-\n\
+CXX11 clang objc_requires_property_definitions 1:-\n\
+CXX11 clang objc_requires_super 1:-\n\
+CXX11 clang objc_returns_inner_pointer 1:-\n\
+CXX11 clang objc_root_class 1:-\n\
+CXX11 clang objc_runtime_name 1:-\n\
+CXX11 clang objc_runtime_visible 1:-\n\
+CXX11 clang objc_subclassing_restricted 1:-\n\
+CXX11 clang opencl_constant 1:-\n\
+CXX11 clang opencl_generic 1:-\n\
+CXX11 clang opencl_global 1:-\n\
+CXX11 clang opencl_global_device 1:-\n\
+CXX11 clang opencl_global_host 1:-\n\
+CXX11 clang opencl_local 1:-\n\
+CXX11 clang opencl_private 1:-\n\
+CXX11 clang optnone 1:-\n\
+CXX11 clang os_consumed 1:-\n\
+CXX11 clang os_consumes_this 1:-\n\
+CXX11 clang os_returns_not_retained 1:-\n\
+CXX11 clang os_returns_retained 1:-\n\
+CXX11 clang os_returns_retained_on_non_zero 1:-\n\
+CXX11 clang os_returns_retained_on_zero 1:-\n\
+CXX11 clang overflow_behavior 1:-\n\
+CXX11 clang overloadable 1:-\n\
+CXX11 clang ownership_holds 1:-\n\
+CXX11 clang ownership_returns 1:-\n\
+CXX11 clang ownership_takes 1:-\n\
+CXX11 clang param_typestate 1:-\n\
+CXX11 clang pascal 1:-\n\
+CXX11 clang pass_dynamic_object_size 1:-\n\
+CXX11 clang pass_object_size 1:-\n\
+CXX11 clang personality 1:-\n\
+CXX11 clang pointer_field_protection 1:-\n\
+CXX11 clang pointer_with_type_tag 1:-\n\
+CXX11 clang preferred_name 1:-\n\
+CXX11 clang preferred_type 1:-\n\
+CXX11 clang preserve_access_index 1:a=bpfel,bpfeb\n\
+CXX11 clang preserve_all 1:-\n\
+CXX11 clang preserve_most 1:-\n\
+CXX11 clang preserve_none 1:a=aarch64,aarch64_be,aarch64_32,x86,x86_64\n\
+CXX11 clang preserve_static_offset 1:a=bpfel,bpfeb\n\
+CXX11 clang pt_guarded_var 1:-\n\
+CXX11 clang ptrauth_vtable_pointer 1:-\n\
+CXX11 clang reentrant_capability 1:-\n\
+CXX11 clang reinitializes 1:-\n\
+CXX11 clang release_capability 1:-\n\
+CXX11 clang release_generic_capability 1:-\n\
+CXX11 clang release_handle 1:-\n\
+CXX11 clang release_shared_capability 1:-\n\
+CXX11 clang require_constant_initialization 1:-\n\
+CXX11 clang require_explicit_initialization 1:-\n\
+CXX11 clang requires_capability 1:-\n\
+CXX11 clang requires_shared_capability 1:-\n\
+CXX11 clang return_typestate 1:-\n\
+CXX11 clang riscv_vector_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 clang riscv_vls_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 clang scoped_lockable 1:-\n\
+CXX11 clang set_typestate 1:-\n\
+CXX11 clang shared_capability 1:-\n\
+CXX11 clang shared_locks_required 1:-\n\
+CXX11 clang sized_by 1:-\n\
+CXX11 clang sized_by_or_null 1:-\n\
+CXX11 clang speculative_load_hardening 1:-\n\
+CXX11 clang stack_protector_ignore 1:-\n\
+CXX11 clang standalone_debug 1:-\n\
+CXX11 clang suppress 1:-\n\
+CXX11 clang swift_async 1:-\n\
+CXX11 clang swift_async_context 1:-\n\
+CXX11 clang swift_async_error 1:-\n\
+CXX11 clang swift_context 1:-\n\
+CXX11 clang swift_error_result 1:-\n\
+CXX11 clang swift_indirect_result 1:-\n\
+CXX11 clang swiftasynccall 1:-\n\
+CXX11 clang swiftcall 1:-\n\
+CXX11 clang sycl_constant 1:-\n\
+CXX11 clang sycl_external 1:-\n\
+CXX11 clang sycl_generic 1:-\n\
+CXX11 clang sycl_global 1:-\n\
+CXX11 clang sycl_kernel 1:-\n\
+CXX11 clang sycl_kernel_entry_point 1:-\n\
+CXX11 clang sycl_local 1:-\n\
+CXX11 clang sycl_private 1:-\n\
+CXX11 clang sycl_special_class 1:-\n\
+CXX11 clang test_typestate 1:-\n\
+CXX11 clang trivial_abi 1:-\n\
+CXX11 clang try_acquire_capability 1:-\n\
+CXX11 clang try_acquire_shared_capability 1:-\n\
+CXX11 clang type_tag_for_datatype 1:-\n\
+CXX11 clang type_visibility 1:-\n\
+CXX11 clang unavailable 1:-\n\
+CXX11 clang uninitialized 1:-\n\
+CXX11 clang unlock_function 1:-\n\
+CXX11 clang unsafe_buffer_usage 1:-\n\
+CXX11 clang use_handle 1:-\n\
+CXX11 clang using_if_exists 1:-\n\
+CXX11 clang vecreturn 1:-\n\
+CXX11 clang vectorcall 1:-\n\
+CXX11 clang warn_unused_result 1:-\n\
+CXX11 clang weak_import 1:-\n\
+CXX11 clang xray_always_instrument 1:-\n\
+CXX11 clang xray_log_args 1:-\n\
+CXX11 clang xray_never_instrument 1:-\n\
+CXX11 gnu __const 1:-\n\
+CXX11 gnu abi_tag 1:-\n\
+CXX11 gnu alias 1:-\n\
+CXX11 gnu aligned 1:-\n\
+CXX11 gnu alloc_align 1:-\n\
+CXX11 gnu alloc_size 1:-\n\
+CXX11 gnu always_inline 1:-\n\
+CXX11 gnu artificial 1:-\n\
+CXX11 gnu assume_aligned 1:-\n\
+CXX11 gnu cdecl 1:-\n\
+CXX11 gnu cleanup 1:-\n\
+CXX11 gnu cold 1:-\n\
+CXX11 gnu common 1:-\n\
+CXX11 gnu const 1:-\n\
+CXX11 gnu constructor 1:-\n\
+CXX11 gnu deprecated 1:-\n\
+CXX11 gnu destructor 1:-\n\
+CXX11 gnu dllexport 1:c=dllimport\n\
+CXX11 gnu dllimport 1:c=dllimport\n\
+CXX11 gnu error 1:-\n\
+CXX11 gnu fallthrough 1:-\n\
+CXX11 gnu far 1:a=mips,mipsel,mips64,mips64el\n\
+CXX11 gnu fastcall 1:-\n\
+CXX11 gnu flag_enum 1:-\n\
+CXX11 gnu flatten 1:-\n\
+CXX11 gnu force_align_arg_pointer 1:a=x86,x86_64\n\
+CXX11 gnu format 1:-\n\
+CXX11 gnu format_arg 1:-\n\
+CXX11 gnu format_matches 1:-\n\
+CXX11 gnu function_return 1:a=x86,x86_64\n\
+CXX11 gnu gcc_struct 1:-\n\
+CXX11 gnu gnu_inline 1:-\n\
+CXX11 gnu hot 1:-\n\
+CXX11 gnu ifunc 1:c=ifunc\n\
+CXX11 gnu init_priority 1:-\n\
+CXX11 gnu interrupt 1:a=arm,thumb,armeb,thumbeb 1:a=avr 1:a=x86,x86_64 1:a=msp430 1:a=mips,mipsel 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 gnu leaf 1:-\n\
+CXX11 gnu long_call 1:a=mips,mipsel,mips64,mips64el\n\
+CXX11 gnu malloc 1:-\n\
+CXX11 gnu may_alias 1:-\n\
+CXX11 gnu micromips 1:a=mips,mipsel\n\
+CXX11 gnu mips16 1:a=mips,mipsel\n\
+CXX11 gnu mode 1:-\n\
+CXX11 gnu model 1:a=loongarch32,loongarch64,x86_64,nvptx,nvptx64,amdgpu,r600,spirv,spirv32,spirv64\n\
+CXX11 gnu ms_abi 1:-\n\
+CXX11 gnu ms_struct 1:-\n\
+CXX11 gnu naked 1:-\n\
+CXX11 gnu near 1:a=mips,mipsel,mips64,mips64el\n\
+CXX11 gnu no_address_safety_analysis 1:-\n\
+CXX11 gnu no_caller_saved_registers 1:a=x86,x86_64\n\
+CXX11 gnu no_instrument_function 1:-\n\
+CXX11 gnu no_profile_instrument_function 1:-\n\
+CXX11 gnu no_randomize_layout 1:-\n\
+CXX11 gnu no_sanitize 1:-\n\
+CXX11 gnu no_sanitize_address 1:-\n\
+CXX11 gnu no_sanitize_thread 1:-\n\
+CXX11 gnu no_split_stack 1:-\n\
+CXX11 gnu no_stack_protector 1:-\n\
+CXX11 gnu nocf_check 1:a=x86,x86_64\n\
+CXX11 gnu nocommon 1:-\n\
+CXX11 gnu nodebug 1:-\n\
+CXX11 gnu noinline 1:-\n\
+CXX11 gnu nomicromips 1:a=mips,mipsel\n\
+CXX11 gnu nomips16 1:a=mips,mipsel\n\
+CXX11 gnu nonnull 1:-\n\
+CXX11 gnu nonstring 1:-\n\
+CXX11 gnu noreturn 1:-\n\
+CXX11 gnu nothrow 1:-\n\
+CXX11 gnu packed 1:-\n\
+CXX11 gnu patchable_function_entry 1:a=aarch64,aarch64_be,loongarch32,loongarch64,riscv32,riscv64,x86,x86_64,ppc,ppc64,ppc64le,systemz\n\
+CXX11 gnu pcs 1:-\n\
+CXX11 gnu pure 1:-\n\
+CXX11 gnu randomize_layout 1:-\n\
+CXX11 gnu regcall 1:-\n\
+CXX11 gnu regparm 1:-\n\
+CXX11 gnu retain 1:-\n\
+CXX11 gnu returns_nonnull 1:-\n\
+CXX11 gnu returns_twice 1:-\n\
+CXX11 gnu section 1:-\n\
+CXX11 gnu selectany 1:-\n\
+CXX11 gnu sentinel 1:-\n\
+CXX11 gnu short_call 1:a=mips,mipsel,mips64,mips64el\n\
+CXX11 gnu signal 1:a=avr\n\
+CXX11 gnu stdcall 1:-\n\
+CXX11 gnu sysv_abi 1:-\n\
+CXX11 gnu target 1:-\n\
+CXX11 gnu target_clones 1:-\n\
+CXX11 gnu target_version 1:a=aarch64,aarch64_be,aarch64_32,riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 gnu thiscall 1:-\n\
+CXX11 gnu tls_model 1:-\n\
+CXX11 gnu transparent_union 1:-\n\
+CXX11 gnu unused 1:-\n\
+CXX11 gnu used 1:-\n\
+CXX11 gnu vector_size 1:-\n\
+CXX11 gnu visibility 1:-\n\
+CXX11 gnu warn_unused 1:-\n\
+CXX11 gnu warn_unused_result 1:-\n\
+CXX11 gnu warning 1:-\n\
+CXX11 gnu weak 1:-\n\
+CXX11 gnu weakref 1:-\n\
+CXX11 gnu zero_call_used_regs 1:-\n\
+CXX11 gsl Owner 1:-\n\
+CXX11 gsl Pointer 1:-\n\
+CXX11 gsl suppress 1:-\n\
+CXX11 hlsl contained_type 1:-\n\
+CXX11 hlsl dimension 1:-\n\
+CXX11 hlsl is_array 1:-\n\
+CXX11 hlsl is_counter 1:-\n\
+CXX11 hlsl is_ms 1:-\n\
+CXX11 hlsl is_rov 1:-\n\
+CXX11 hlsl raw_buffer 1:-\n\
+CXX11 hlsl resource_class 1:-\n\
+CXX11 msvc constexpr 1:-\n\
+CXX11 msvc forceinline 1:-\n\
+CXX11 msvc forceinline_calls 1:-\n\
+CXX11 msvc no_unique_address 201803:a=x86,x86_64,arm,thumb,aarch64,amdgpu,nvptx,nvptx64,spirv,spirv32,spirv64/c=msrecord\n\
+CXX11 msvc noinline 1:-\n\
+CXX11 omp assume 1:-\n\
+CXX11 riscv vector_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 riscv vls_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+CXX11 vk binding 1:-\n\
+CXX11 vk constant_id 1:-\n\
+CXX11 vk ext_builtin_input 1:-\n\
+CXX11 vk ext_builtin_output 1:-\n\
+CXX11 vk location 1:-\n\
+CXX11 vk push_constant 1:-\n\
+Declspec - __constant__ 1:-\n\
+Declspec - __cudart_builtin__ 1:-\n\
+Declspec - __device__ 1:-\n\
+Declspec - __device_builtin__ 1:-\n\
+Declspec - __device_builtin_surface_type__ 1:-\n\
+Declspec - __device_builtin_texture_type__ 1:-\n\
+Declspec - __global__ 1:-\n\
+Declspec - __grid_constant__ 1:-\n\
+Declspec - __host__ 1:-\n\
+Declspec - __launch_bounds__ 1:-\n\
+Declspec - __managed__ 1:-\n\
+Declspec - __shared__ 1:-\n\
+Declspec - align 1:-\n\
+Declspec - allocate 1:-\n\
+Declspec - allocator 1:-\n\
+Declspec - code_seg 1:-\n\
+Declspec - cpu_dispatch 1:-\n\
+Declspec - cpu_specific 1:-\n\
+Declspec - deprecated 1:-\n\
+Declspec - dllexport 1:c=dllimport\n\
+Declspec - dllimport 1:c=dllimport\n\
+Declspec - empty_bases 1:a=x86,x86_64,arm,thumb,aarch64,amdgpu,nvptx,nvptx64,spirv,spirv32,spirv64/c=msrecord\n\
+Declspec - guard 1:o=Win32\n\
+Declspec - hybrid_patchable 1:c=arm64ec\n\
+Declspec - layout_version 1:a=x86,x86_64,arm,thumb,aarch64,amdgpu,nvptx,nvptx64,spirv,spirv32,spirv64/c=msrecord\n\
+Declspec - naked 1:-\n\
+Declspec - no_init_all 1:-\n\
+Declspec - noalias 1:-\n\
+Declspec - noconvergent 1:-\n\
+Declspec - noinline 1:-\n\
+Declspec - noreturn 1:-\n\
+Declspec - nothrow 1:-\n\
+Declspec - novtable 1:a=x86,x86_64,arm,thumb,aarch64/c=msabi\n\
+Declspec - property 1:-\n\
+Declspec - restrict 1:-\n\
+Declspec - safebuffers 1:-\n\
+Declspec - selectany 1:-\n\
+Declspec - strict_gs_check 1:-\n\
+Declspec - thread 1:-\n\
+Declspec - uuid 1:-\n\
+GNU - NSObject 1:-\n\
+GNU - __clang_arm_builtin_alias 1:a=arm,thumb,armeb,thumbeb,aarch64,aarch64_be,aarch64_32\n\
+GNU - __clang_arm_mve_strict_polymorphism 1:a=arm,thumb,armeb,thumbeb\n\
+GNU - __const 1:-\n\
+GNU - aarch64_sve_pcs 1:-\n\
+GNU - aarch64_vector_pcs 1:-\n\
+GNU - abi_tag 1:-\n\
+GNU - acquire_capability 1:-\n\
+GNU - acquire_handle 1:-\n\
+GNU - acquire_shared_capability 1:-\n\
+GNU - acquired_after 1:-\n\
+GNU - acquired_before 1:-\n\
+GNU - address_space 1:-\n\
+GNU - alias 1:-\n\
+GNU - align_value 1:-\n\
+GNU - aligned 1:-\n\
+GNU - alloc_align 1:-\n\
+GNU - alloc_size 1:-\n\
+GNU - allocating 1:-\n\
+GNU - always_destroy 1:-\n\
+GNU - always_inline 1:-\n\
+GNU - amdgpu_av 1:a=amdgpu,r600\n\
+GNU - amdgpu_flat_work_group_size 1:-\n\
+GNU - amdgpu_kernel 1:-\n\
+GNU - amdgpu_max_num_work_groups 1:-\n\
+GNU - amdgpu_num_sgpr 1:-\n\
+GNU - amdgpu_num_vgpr 1:-\n\
+GNU - amdgpu_waves_per_eu 1:-\n\
+GNU - analyzer_noreturn 1:-\n\
+GNU - annotate 1:-\n\
+GNU - argument_with_type_tag 1:-\n\
+GNU - arm_sve_vector_bits 1:-\n\
+GNU - artificial 1:-\n\
+GNU - assert_capability 1:-\n\
+GNU - assert_exclusive_lock 1:-\n\
+GNU - assert_shared_capability 1:-\n\
+GNU - assert_shared_lock 1:-\n\
+GNU - assume 1:-\n\
+GNU - assume_aligned 1:-\n\
+GNU - atomic 1:-\n\
+GNU - availability 1:-\n\
+GNU - available_only_in_default_eval_method 1:-\n\
+GNU - blocking 1:-\n\
+GNU - blocks 1:-\n\
+GNU - bounded 1:-\n\
+GNU - bpf_fastcall 1:a=bpfel,bpfeb\n\
+GNU - btf_decl_tag 1:-\n\
+GNU - btf_type_tag 1:-\n\
+GNU - callable_when 1:-\n\
+GNU - callback 1:-\n\
+GNU - called_once 1:-\n\
+GNU - capability 1:-\n\
+GNU - cdecl 1:-\n\
+GNU - cf_audited_transfer 1:-\n\
+GNU - cf_consumed 1:-\n\
+GNU - cf_returns_not_retained 1:-\n\
+GNU - cf_returns_retained 1:-\n\
+GNU - cf_unknown_transfer 1:-\n\
+GNU - cfi_canonical_jump_table 1:-\n\
+GNU - cfi_salt 1:-\n\
+GNU - cfi_unchecked_callee 1:-\n\
+GNU - clang_builtin_alias 1:-\n\
+GNU - cleanup 1:-\n\
+GNU - clspv_libclc_builtin 1:-\n\
+GNU - cluster_dims 1:-\n\
+GNU - cmse_nonsecure_call 1:a=arm,thumb,armeb,thumbeb\n\
+GNU - cmse_nonsecure_entry 1:a=arm,thumb,armeb,thumbeb\n\
+GNU - code_align 1:-\n\
+GNU - cold 1:-\n\
+GNU - common 1:-\n\
+GNU - const 1:-\n\
+GNU - constant 1:-\n\
+GNU - constructor 1:-\n\
+GNU - consumable 1:-\n\
+GNU - consumable_auto_cast_state 1:-\n\
+GNU - consumable_set_state_on_read 1:-\n\
+GNU - convergent 1:-\n\
+GNU - coro_await_elidable 1:-\n\
+GNU - coro_await_elidable_argument 1:-\n\
+GNU - coro_disable_lifetimebound 1:-\n\
+GNU - coro_lifetimebound 1:-\n\
+GNU - coro_only_destroy_when_complete 1:-\n\
+GNU - coro_return_type 1:-\n\
+GNU - coro_wrapper 1:-\n\
+GNU - counted_by 1:-\n\
+GNU - counted_by_or_null 1:-\n\
+GNU - cpu_dispatch 1:-\n\
+GNU - cpu_specific 1:-\n\
+GNU - cudart_builtin 1:-\n\
+GNU - deprecated 1:-\n\
+GNU - destructor 1:-\n\
+GNU - device 1:-\n\
+GNU - device_builtin 1:-\n\
+GNU - device_builtin_surface_type 1:-\n\
+GNU - device_builtin_texture_type 1:-\n\
+GNU - device_kernel 1:-\n\
+GNU - diagnose_as_builtin 1:-\n\
+GNU - diagnose_if 1:-\n\
+GNU - disable_sanitizer_instrumentation 1:-\n\
+GNU - disable_tail_calls 1:-\n\
+GNU - dllexport 1:c=dllimport\n\
+GNU - dllimport 1:c=dllimport\n\
+GNU - enable_if 1:-\n\
+GNU - enforce_read_only_placement 1:-\n\
+GNU - enforce_tcb 1:-\n\
+GNU - enforce_tcb_leaf 1:-\n\
+GNU - enum_extensibility 1:-\n\
+GNU - error 1:-\n\
+GNU - exclude_from_explicit_instantiation 1:-\n\
+GNU - exclusive_lock_function 1:-\n\
+GNU - exclusive_locks_required 1:-\n\
+GNU - exclusive_trylock_function 1:-\n\
+GNU - export_name 1:a=wasm32,wasm64\n\
+GNU - ext_vector_type 1:-\n\
+GNU - external_source_symbol 20230206:-\n\
+GNU - fallthrough 1:-\n\
+GNU - far 1:a=mips,mipsel,mips64,mips64el\n\
+GNU - fastcall 1:-\n\
+GNU - flag_enum 1:-\n\
+GNU - flatten 1:-\n\
+GNU - force_align_arg_pointer 1:a=x86,x86_64\n\
+GNU - format 1:-\n\
+GNU - format_arg 1:-\n\
+GNU - format_matches 1:-\n\
+GNU - function_return 1:a=x86,x86_64\n\
+GNU - gcc_struct 1:-\n\
+GNU - global 1:-\n\
+GNU - gnu_inline 1:-\n\
+GNU - grid_constant 1:-\n\
+GNU - guard 1:o=Win32\n\
+GNU - guarded_by 1:-\n\
+GNU - guarded_var 1:-\n\
+GNU - host 1:-\n\
+GNU - hot 1:-\n\
+GNU - hybrid_patchable 1:c=arm64ec\n\
+GNU - ibaction 1:-\n\
+GNU - iboutlet 1:-\n\
+GNU - iboutletcollection 1:-\n\
+GNU - ifunc 1:c=ifunc\n\
+GNU - import_module 1:a=wasm32,wasm64\n\
+GNU - import_name 1:a=wasm32,wasm64\n\
+GNU - init_priority 1:-\n\
+GNU - intel_ocl_bicc 1:-\n\
+GNU - intel_reqd_sub_group_size 1:-\n\
+GNU - internal_linkage 1:-\n\
+GNU - interrupt 1:a=arm,thumb,armeb,thumbeb 1:a=avr 1:a=x86,x86_64 1:a=m68k 1:a=msp430 1:a=mips,mipsel 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+GNU - interrupt_save_fp 1:a=arm,thumb,armeb,thumbeb\n\
+GNU - launch_bounds 1:-\n\
+GNU - leaf 1:-\n\
+GNU - lifetime_capture_by 1:-\n\
+GNU - lifetime_capture_by_global 1:-\n\
+GNU - lifetime_capture_by_this 1:-\n\
+GNU - lifetime_capture_by_unknown 1:-\n\
+GNU - lifetimebound 1:-\n\
+GNU - loader_uninitialized 1:-\n\
+GNU - lock_returned 1:-\n\
+GNU - lockable 1:-\n\
+GNU - locks_excluded 1:-\n\
+GNU - long_call 1:a=mips,mipsel,mips64,mips64el\n\
+GNU - lto_visibility_public 1:-\n\
+GNU - m68k_rtd 1:-\n\
+GNU - malloc 1:-\n\
+GNU - malloc_span 1:-\n\
+GNU - managed 1:-\n\
+GNU - matrix_type 1:-\n\
+GNU - may_alias 1:-\n\
+GNU - maybe_undef 1:-\n\
+GNU - micromips 1:a=mips,mipsel\n\
+GNU - mig_server_routine 1:-\n\
+GNU - min_vector_width 1:-\n\
+GNU - minsize 1:-\n\
+GNU - mips16 1:a=mips,mipsel\n\
+GNU - mode 1:-\n\
+GNU - model 1:a=loongarch32,loongarch64,x86_64,nvptx,nvptx64,amdgpu,r600,spirv,spirv32,spirv64\n\
+GNU - modular_format 1:-\n\
+GNU - ms_abi 1:-\n\
+GNU - ms_struct 1:-\n\
+GNU - musttail 1:c=musttail\n\
+GNU - naked 1:-\n\
+GNU - near 1:a=mips,mipsel,mips64,mips64el\n\
+GNU - neon_polyvector_type 1:-\n\
+GNU - neon_vector_type 1:-\n\
+GNU - no_address_safety_analysis 1:-\n\
+GNU - no_builtin 1:-\n\
+GNU - no_caller_saved_registers 1:a=x86,x86_64\n\
+GNU - no_cluster 1:-\n\
+GNU - no_destroy 1:-\n\
+GNU - no_field_protection 1:-\n\
+GNU - no_instrument_function 1:-\n\
+GNU - no_outline 1:-\n\
+GNU - no_profile_instrument_function 1:-\n\
+GNU - no_randomize_layout 1:-\n\
+GNU - no_sanitize 1:-\n\
+GNU - no_sanitize_address 1:-\n\
+GNU - no_sanitize_memory 1:-\n\
+GNU - no_sanitize_thread 1:-\n\
+GNU - no_specializations 1:-\n\
+GNU - no_speculative_load_hardening 1:-\n\
+GNU - no_split_stack 1:-\n\
+GNU - no_stack_protector 1:-\n\
+GNU - no_thread_safety_analysis 1:-\n\
+GNU - nocf_check 1:a=x86,x86_64\n\
+GNU - nocommon 1:-\n\
+GNU - noconvergent 1:-\n\
+GNU - nodebug 1:-\n\
+GNU - noderef 1:-\n\
+GNU - noduplicate 1:-\n\
+GNU - noescape 1:-\n\
+GNU - noinline 1:-\n\
+GNU - nomerge 1:-\n\
+GNU - nomicromips 1:a=mips,mipsel\n\
+GNU - nomips16 1:a=mips,mipsel\n\
+GNU - nonallocating 1:-\n\
+GNU - nonblocking 1:-\n\
+GNU - nonnull 1:-\n\
+GNU - nonstring 1:-\n\
+GNU - noreturn 1:-\n\
+GNU - nosvm 1:-\n\
+GNU - not_tail_called 1:-\n\
+GNU - nothrow 1:-\n\
+GNU - nouwtable 1:-\n\
+GNU - ns_consumed 1:-\n\
+GNU - ns_consumes_self 1:-\n\
+GNU - ns_error_domain 1:-\n\
+GNU - ns_returns_autoreleased 1:-\n\
+GNU - ns_returns_not_retained 1:-\n\
+GNU - ns_returns_retained 1:-\n\
+GNU - nv_weak 1:-\n\
+GNU - nvptx_kernel 1:-\n\
+GNU - objc_arc_weak_reference_unavailable 1:-\n\
+GNU - objc_boxable 1:-\n\
+GNU - objc_bridge 1:-\n\
+GNU - objc_bridge_mutable 1:-\n\
+GNU - objc_bridge_related 1:-\n\
+GNU - objc_class_stub 1:-\n\
+GNU - objc_designated_initializer 1:-\n\
+GNU - objc_direct 1:-\n\
+GNU - objc_direct_members 1:-\n\
+GNU - objc_exception 1:-\n\
+GNU - objc_externally_retained 1:-\n\
+GNU - objc_gc 1:-\n\
+GNU - objc_independent_class 1:-\n\
+GNU - objc_method_family 1:-\n\
+GNU - objc_non_runtime_protocol 1:-\n\
+GNU - objc_nonlazy_class 1:-\n\
+GNU - objc_ownership 1:-\n\
+GNU - objc_precise_lifetime 1:-\n\
+GNU - objc_protocol_requires_explicit_implementation 1:-\n\
+GNU - objc_requires_property_definitions 1:-\n\
+GNU - objc_requires_super 1:-\n\
+GNU - objc_returns_inner_pointer 1:-\n\
+GNU - objc_root_class 1:-\n\
+GNU - objc_runtime_name 1:-\n\
+GNU - objc_runtime_visible 1:-\n\
+GNU - objc_subclassing_restricted 1:-\n\
+GNU - opencl_constant 1:-\n\
+GNU - opencl_generic 1:-\n\
+GNU - opencl_global 1:-\n\
+GNU - opencl_global_device 1:-\n\
+GNU - opencl_global_host 1:-\n\
+GNU - opencl_local 1:-\n\
+GNU - opencl_private 1:-\n\
+GNU - opencl_unroll_hint 1:-\n\
+GNU - optnone 1:-\n\
+GNU - os_consumed 1:-\n\
+GNU - os_consumes_this 1:-\n\
+GNU - os_returns_not_retained 1:-\n\
+GNU - os_returns_retained 1:-\n\
+GNU - os_returns_retained_on_non_zero 1:-\n\
+GNU - os_returns_retained_on_zero 1:-\n\
+GNU - overflow_behavior 1:-\n\
+GNU - overloadable 1:-\n\
+GNU - ownership_holds 1:-\n\
+GNU - ownership_returns 1:-\n\
+GNU - ownership_takes 1:-\n\
+GNU - packed 1:-\n\
+GNU - param_typestate 1:-\n\
+GNU - pascal 1:-\n\
+GNU - pass_dynamic_object_size 1:-\n\
+GNU - pass_object_size 1:-\n\
+GNU - patchable_function_entry 1:a=aarch64,aarch64_be,loongarch32,loongarch64,riscv32,riscv64,x86,x86_64,ppc,ppc64,ppc64le,systemz\n\
+GNU - pcs 1:-\n\
+GNU - personality 1:-\n\
+GNU - pointer_field_protection 1:-\n\
+GNU - pointer_with_type_tag 1:-\n\
+GNU - preferred_name 1:-\n\
+GNU - preferred_type 1:-\n\
+GNU - preserve_access_index 1:a=bpfel,bpfeb\n\
+GNU - preserve_all 1:-\n\
+GNU - preserve_most 1:-\n\
+GNU - preserve_none 1:a=aarch64,aarch64_be,aarch64_32,x86,x86_64\n\
+GNU - preserve_static_offset 1:a=bpfel,bpfeb\n\
+GNU - pt_guarded_by 1:-\n\
+GNU - pt_guarded_var 1:-\n\
+GNU - ptrauth_vtable_pointer 1:-\n\
+GNU - pure 1:-\n\
+GNU - randomize_layout 1:-\n\
+GNU - reentrant_capability 1:-\n\
+GNU - regcall 1:-\n\
+GNU - regparm 1:-\n\
+GNU - reinitializes 1:-\n\
+GNU - release_capability 1:-\n\
+GNU - release_generic_capability 1:-\n\
+GNU - release_handle 1:-\n\
+GNU - release_shared_capability 1:-\n\
+GNU - reqd_work_group_size 1:-\n\
+GNU - require_constant_initialization 1:-\n\
+GNU - require_explicit_initialization 1:-\n\
+GNU - requires_capability 1:-\n\
+GNU - requires_shared_capability 1:-\n\
+GNU - retain 1:-\n\
+GNU - return_typestate 1:-\n\
+GNU - returns_nonnull 1:-\n\
+GNU - returns_twice 1:-\n\
+GNU - riscv_rvv_vector_bits 1:-\n\
+GNU - riscv_vector_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+GNU - riscv_vls_cc 1:a=riscv32,riscv64,riscv32be,riscv64be\n\
+GNU - scoped_lockable 1:-\n\
+GNU - section 1:-\n\
+GNU - selectany 1:-\n\
+GNU - sentinel 1:-\n\
+GNU - set_typestate 1:-\n\
+GNU - shared 1:-\n\
+GNU - shared_capability 1:-\n\
+GNU - shared_lock_function 1:-\n\
+GNU - shared_locks_required 1:-\n\
+GNU - shared_trylock_function 1:-\n\
+GNU - short_call 1:a=mips,mipsel,mips64,mips64el\n\
+GNU - signal 1:a=avr\n\
+GNU - sized_by 1:-\n\
+GNU - sized_by_or_null 1:-\n\
+GNU - speculative_load_hardening 1:-\n\
+GNU - stack_protector_ignore 1:-\n\
+GNU - standalone_debug 1:-\n\
+GNU - stdcall 1:-\n\
+GNU - suppress 1:-\n\
+GNU - swift_async 1:-\n\
+GNU - swift_async_context 1:-\n\
+GNU - swift_async_error 1:-\n\
+GNU - swift_async_name 1:-\n\
+GNU - swift_attr 1:-\n\
+GNU - swift_bridge 1:-\n\
+GNU - swift_bridged_typedef 1:-\n\
+GNU - swift_context 1:-\n\
+GNU - swift_error 1:-\n\
+GNU - swift_error_result 1:-\n\
+GNU - swift_indirect_result 1:-\n\
+GNU - swift_name 1:-\n\
+GNU - swift_newtype 1:-\n\
+GNU - swift_objc_members 1:-\n\
+GNU - swift_private 1:-\n\
+GNU - swift_wrapper 1:-\n\
+GNU - swiftasynccall 1:-\n\
+GNU - swiftcall 1:-\n\
+GNU - sycl_kernel 1:-\n\
+GNU - sycl_special_class 1:-\n\
+GNU - sysv_abi 1:-\n\
+GNU - target 1:-\n\
+GNU - target_clones 1:-\n\
+GNU - target_version 1:a=aarch64,aarch64_be,aarch64_32,riscv32,riscv64,riscv32be,riscv64be\n\
+GNU - test_typestate 1:-\n\
+GNU - thiscall 1:-\n\
+GNU - tls_model 1:-\n\
+GNU - transparent_union 1:-\n\
+GNU - trivial_abi 1:-\n\
+GNU - try_acquire_capability 1:-\n\
+GNU - try_acquire_shared_capability 1:-\n\
+GNU - type_tag_for_datatype 1:-\n\
+GNU - type_visibility 1:-\n\
+GNU - unavailable 1:-\n\
+GNU - uninitialized 1:-\n\
+GNU - unlock_function 1:-\n\
+GNU - unsafe_buffer_usage 1:-\n\
+GNU - unused 1:-\n\
+GNU - use_handle 1:-\n\
+GNU - used 1:-\n\
+GNU - using_if_exists 1:-\n\
+GNU - vec_type_hint 1:-\n\
+GNU - vecreturn 1:-\n\
+GNU - vector_size 1:-\n\
+GNU - vectorcall 1:-\n\
+GNU - visibility 1:-\n\
+GNU - warn_unused 1:-\n\
+GNU - warn_unused_result 1:-\n\
+GNU - warning 1:-\n\
+GNU - weak 1:-\n\
+GNU - weak_import 1:-\n\
+GNU - weakref 1:-\n\
+GNU - work_group_size_hint 1:-\n\
+GNU - xray_always_instrument 1:-\n\
+GNU - xray_log_args 1:-\n\
+GNU - xray_never_instrument 1:-\n\
+GNU - zero_call_used_regs 1:-\n\
+HLSLAnnotation - packoffset 1:-\n\
+HLSLAnnotation - register 1:-\n\
+Microsoft - RootSignature 1:-\n\
+Microsoft - WaveSize 1:-\n\
+Microsoft - branch 1:-\n\
+Microsoft - flatten 1:-\n\
+Microsoft - loop 1:-\n\
+Microsoft - numthreads 1:-\n\
+Microsoft - shader 1:-\n\
+Microsoft - unroll 1:-\n\
+Microsoft - uuid 1:-\n\
+Pragma - init_seg 1:-\n\
+Pragma - nounroll 1:-\n\
+Pragma - nounroll_and_jam 1:-\n\
+Pragma - unroll 1:-\n\
+Pragma - unroll_and_jam 1:-\n\
+Pragma acc routine 1:-\n\
+Pragma clang loop 1:-\n\
+Pragma omp declare simd 1:-\n\
+Pragma omp declare target 1:-\n\
+Pragma omp declare variant 1:-\n\
+";
 
-const C23_ATTRIBUTES: &[(&str, &str)] = &[
-    ("_Noreturn", "202202"),
-    ("deprecated", "201904"),
-    ("fallthrough", "201910"),
-    ("maybe_unused", "202106"),
-    ("nodiscard", "202003"),
-    ("noreturn", "202202"),
-    ("reproducible", "202207"),
-    ("unsequenced", "202207"),
-];
+type AttributeKey = (&'static str, &'static str, &'static str);
+
+type AttributeTable = BTreeMap<AttributeKey, Vec<(u64, &'static str)>>;
+
+fn attribute_table() -> &'static AttributeTable {
+    static TABLE: std::sync::OnceLock<AttributeTable> = std::sync::OnceLock::new();
+    TABLE.get_or_init(|| {
+        let mut table = BTreeMap::new();
+        for line in ATTRIBUTE_SPELLINGS.lines() {
+            let mut words = line.split(' ');
+            let (Some(variety), Some(scope), Some(name)) =
+                (words.next(), words.next(), words.next())
+            else {
+                continue;
+            };
+            let alternatives = words
+                .filter_map(|word| word.split_once(':'))
+                .map(|(version, condition)| (version.parse().unwrap_or(1), condition))
+                .collect();
+            table.insert((variety, scope, name), alternatives);
+        }
+        table
+    })
+}
+
+fn llvm_architecture(target: &TargetInfo) -> String {
+    let architecture = target.architecture.as_str();
+    match architecture {
+        "amd64" => "x86_64".to_string(),
+        "i386" | "i486" | "i586" | "i686" => "x86".to_string(),
+        "arm64" => "aarch64".to_string(),
+        _ if architecture.starts_with("armeb") => "armeb".to_string(),
+        _ if architecture.starts_with("thumbeb") => "thumbeb".to_string(),
+        _ if architecture.starts_with("arm") && architecture != "arm64ec" => "arm".to_string(),
+        _ if architecture.starts_with("thumb") => "thumb".to_string(),
+        _ => architecture.to_string(),
+    }
+}
+
+fn environment_kind(name: &str) -> &'static str {
+    const KINDS: &[&str] = &[
+        "eabihf",
+        "eabi",
+        "gnuabin32",
+        "gnuabi64",
+        "gnueabihft64",
+        "gnueabihf",
+        "gnueabit64",
+        "gnueabi",
+        "gnuf32",
+        "gnuf64",
+        "gnusf",
+        "gnux32",
+        "gnu_ilp32",
+        "code16",
+        "gnut64",
+        "gnu",
+        "android",
+        "muslabin32",
+        "muslabi64",
+        "musleabihf",
+        "musleabi",
+        "muslf32",
+        "muslsf",
+        "muslx32",
+        "muslwali",
+        "musl",
+        "msvc",
+        "itanium",
+        "cygnus",
+        "coreclr",
+        "simulator",
+        "macabi",
+        "pixel",
+        "vertex",
+        "geometry",
+        "hull",
+        "domain",
+        "compute",
+        "library",
+        "raygeneration",
+        "intersection",
+        "anyhit",
+        "closesthit",
+        "miss",
+        "callable",
+        "mesh",
+        "amplification",
+        "rootsignature",
+        "opencl",
+        "ohos",
+        "pauthtest",
+        "llvm",
+        "mlibc",
+    ];
+    KINDS
+        .iter()
+        .find(|kind| name.starts_with(**kind))
+        .copied()
+        .unwrap_or("unknown")
+}
+
+fn object_format(target: &TargetInfo) -> &'static str {
+    let system = target.system.as_str();
+    if target.is_windows() {
+        "COFF"
+    } else if system.starts_with("darwin")
+        || system.starts_with("macos")
+        || system.starts_with("ios")
+    {
+        "MachO"
+    } else {
+        "ELF"
+    }
+}
+
+fn target_condition_holds(condition: &str, target: &TargetInfo) -> bool {
+    if condition == "-" {
+        return true;
+    }
+    let architecture = llvm_architecture(target);
+    let microsoft = target.is_windows() && !target.environment.starts_with("gnu");
+    condition.split('/').all(|part| match part.split_once('=') {
+        Some(("a", list)) => list.split(',').any(|item| item == architecture),
+        Some(("o", list)) => list
+            .split(',')
+            .any(|item| item == "Win32" && target.is_windows()),
+        Some(("f", list)) => list.split(',').any(|item| item == object_format(target)),
+        Some(("c", "msrecord")) | Some(("c", "msabi")) => microsoft,
+        Some(("c", "itanium")) => !microsoft,
+        Some(("c", "dllimport")) => target.is_windows() || target.system.starts_with("ps"),
+        Some(("c", "arm64ec")) => architecture == "arm64ec",
+        Some(("c", "musttail")) => true,
+        Some(("c", "ifunc")) => {
+            object_format(target) == "MachO"
+                || (target.is_windows() && architecture == "aarch64")
+                || architecture == "avr"
+                || (object_format(target) == "ELF"
+                    && ((target.system == "linux" && !target.environment.starts_with("musl"))
+                        || target.system.starts_with("freebsd")))
+        }
+        _ => false,
+    })
+}
+
+fn attribute_value(variety: &str, scope: &str, name: &str, target: &TargetInfo) -> u64 {
+    let scope = match scope {
+        "__gnu__" => "gnu",
+        "_Clang" => "clang",
+        "" => "-",
+        other => other,
+    };
+    let name = if name.len() >= 4 && name.starts_with("__") && name.ends_with("__") {
+        &name[2..name.len() - 2]
+    } else {
+        name
+    };
+    let Some(alternatives) = attribute_table().get(&(variety, scope, name)) else {
+        return 0;
+    };
+    if let [(version, condition)] = alternatives.as_slice() {
+        return if target_condition_holds(condition, target) {
+            *version
+        } else {
+            0
+        };
+    }
+    u64::from(
+        alternatives
+            .iter()
+            .any(|(_, condition)| target_condition_holds(condition, target)),
+    )
+}
 
 const PARSER_PRAGMAS: &[&str] = &[
     "align",
@@ -9205,7 +10889,7 @@ fn evaluate_string_literal(spelling: &[u8]) -> Option<Vec<u8>> {
 }
 
 impl<'files> Preprocessor<'files> {
-    fn lex_header_name(&mut self, allow_expansion: bool) -> Option<Token> {
+    fn lex_header_name(&mut self, allow_expansion: bool) -> Result<Token, Token> {
         let top_is_file = self.top_is_file();
         if top_is_file {
             if let Some(Source::File(file)) = self.stack.last_mut() {
@@ -9231,7 +10915,7 @@ impl<'files> Preprocessor<'files> {
                 if matches!(token.kind, TokenKind::EndOfDirective | TokenKind::EndOfFile) {
                     self.report_token(Message::Expected, &token, vec!["'>'".to_string()]);
                     self.report_token(Message::ToMatch, &open, vec!["'<'".to_string()]);
-                    return Some(token);
+                    return Err(token);
                 }
                 if token.has_leading_space() {
                     buffer.push(b' ');
@@ -9241,7 +10925,7 @@ impl<'files> Preprocessor<'files> {
             let mut header = self.make_token(TokenKind::HeaderName, buffer, (open.site, open.site));
             header.set(START_OF_LINE, open.at_start_of_line());
             header.set(LEADING_SPACE, open.has_leading_space());
-            return Some(header);
+            return Ok(header);
         }
         if token.kind == TokenKind::String(LiteralPrefix::Plain)
             && allow_expansion
@@ -9249,7 +10933,7 @@ impl<'files> Preprocessor<'files> {
         {
             token.kind = TokenKind::HeaderName;
         }
-        Some(token)
+        Ok(token)
     }
 
     fn include_filename(token: &Token) -> Option<(String, bool)> {
@@ -9266,8 +10950,8 @@ impl<'files> Preprocessor<'files> {
         Some((String::from_utf8_lossy(inner).into_owned(), angled))
     }
 
-    fn handle_include(&mut self, _hash: &Token, directive: &Token, kind: IncludeKind) {
-        let Some(filename_token) = self.lex_header_name(true) else {
+    fn handle_include(&mut self, hash: &Token, directive: &Token, kind: IncludeKind) {
+        let Ok(filename_token) = self.lex_header_name(true) else {
             return;
         };
         if filename_token.kind != TokenKind::HeaderName {
@@ -9289,6 +10973,22 @@ impl<'files> Preprocessor<'files> {
         if name.is_empty() {
             self.report_token(Message::EmptyFilename, &filename_token, Vec::new());
             return;
+        }
+        if let Some(place) = self.arc_cf_audited.take() {
+            self.report_token(
+                Message::AuditInclude,
+                hash,
+                vec!["0".to_string(), "arc_cf_code_audited".to_string()],
+            );
+            self.report(Message::PragmaEnteredHere, place, Vec::new());
+        }
+        if let Some(place) = self.assume_nonnull.take() {
+            self.report_token(
+                Message::AuditInclude,
+                hash,
+                vec!["0".to_string(), "assume_nonnull".to_string()],
+            );
+            self.report(Message::PragmaEnteredHere, place, Vec::new());
         }
         let mut start_index = None;
         let mut include_next = false;
@@ -9744,11 +11444,12 @@ impl<'files> Preprocessor<'files> {
                     "warning" if name == "GCC" => self.pragma_message(&second, 1, "GCC"),
                     "error" if name == "GCC" => self.pragma_message(&second, 2, "GCC"),
                     "__debug" if name == "clang" => self.pragma_debug(&second),
+                    "assume_nonnull" | "arc_cf_code_audited" if name == "clang" => {
+                        self.pragma_audit(&second)
+                    }
                     "deprecated"
                     | "restrict_expansion"
                     | "final"
-                    | "assume_nonnull"
-                    | "arc_cf_code_audited"
                     | "unsafe_buffer_usage"
                     | "module"
                     | "__set_pp_state"
@@ -9826,6 +11527,68 @@ impl<'files> Preprocessor<'files> {
         }
     }
 
+    fn pragma_audit(&mut self, name: &Token) {
+        let kind = name.text().to_string();
+        let token = self.lex_unexpanded();
+        let begin = if token.is_identifier("begin") {
+            true
+        } else if token.is_identifier("end") {
+            false
+        } else {
+            self.report_token(Message::AuditSyntax, &token, Vec::new());
+            if token.kind != TokenKind::EndOfDirective && self.in_directive() {
+                self.discard_until_end_of_directive();
+            }
+            return;
+        };
+        let after = self.lex_unexpanded();
+        if after.kind != TokenKind::EndOfDirective {
+            self.report_token(
+                Message::ExtraTokensAtEndOfDirective,
+                &after,
+                vec!["pragma".to_string()],
+            );
+            if self.in_directive() {
+                self.discard_until_end_of_directive();
+            }
+        }
+        let held = if kind == "assume_nonnull" {
+            self.assume_nonnull
+        } else {
+            self.arc_cf_audited
+        };
+        let replacement = if begin {
+            if let Some(previous) = held {
+                self.report_token(Message::AuditDoubleBegin, name, vec![kind.clone()]);
+                self.report(Message::PragmaEnteredHere, previous, Vec::new());
+            }
+            Some(name.site)
+        } else {
+            if held.is_none() {
+                self.report_token(Message::AuditUnmatchedEnd, name, vec![kind.clone()]);
+                return;
+            }
+            None
+        };
+        if kind == "assume_nonnull" {
+            self.assume_nonnull = replacement;
+            if self.printer.is_some() {
+                self.printer_move_to_line(name.site, true);
+                if let Some(printer) = &mut self.printer {
+                    let text = if begin {
+                        "#pragma clang assume_nonnull begin"
+                    } else {
+                        "#pragma clang assume_nonnull end"
+                    };
+                    printer.out.extend_from_slice(text.as_bytes());
+                    printer.directive_on_line = true;
+                }
+            }
+        } else {
+            self.arc_cf_audited = replacement;
+        }
+    }
+
     fn pragma_once(&mut self, token: &Token) {
         if self.in_primary_file() && !self.language.header_file {
             self.report_token(Message::PragmaOnceInMainFile, token, Vec::new());
@@ -9883,7 +11646,7 @@ impl<'files> Preprocessor<'files> {
     }
 
     fn pragma_dependency(&mut self) {
-        let Some(token) = self.lex_header_name(false) else {
+        let Ok(token) = self.lex_header_name(false) else {
             return;
         };
         if token.kind != TokenKind::HeaderName {
@@ -10400,6 +12163,9 @@ impl<'files> Preprocessor<'files> {
         let mut already = false;
         loop {
             if !already {
+                if matches!(token.kind, TokenKind::EndOfFile | TokenKind::EndOfDirective) {
+                    return (None, token);
+                }
                 token = if expand_arguments {
                     self.lex()
                 } else {
@@ -10585,8 +12351,10 @@ impl<'files> Preprocessor<'files> {
             Builtin::HasInclude | Builtin::HasIncludeNext => {
                 let (value, end) =
                     self.evaluate_has_include(&identifier, builtin == Builtin::HasIncludeNext);
-                let Some(value) = value else {
-                    return Some(end);
+                let value = match value {
+                    Some(value) => value,
+                    None if end.kind == TokenKind::RightParen => false,
+                    None => return Some(end),
                 };
                 last = end;
                 text = if value { b"1".to_vec() } else { b"0".to_vec() };
@@ -10712,65 +12480,37 @@ impl<'files> Preprocessor<'files> {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
-                let trimmed = if name.len() > 4 && name.starts_with("__") && name.ends_with("__") {
-                    &name[2..name.len() - 2]
-                } else {
-                    name.as_str()
-                };
-                u64::from(GNU_ATTRIBUTES.contains(&trimmed))
+                attribute_value("GNU", "", &name, &self.options.target)
             }
             Builtin::HasDeclspecAttribute => {
-                let _ = self.expect_feature_identifier(token);
-                0
+                let Some(name) = self.expect_feature_identifier(token) else {
+                    return 0;
+                };
+                u64::from(
+                    self.language.declspec_keyword
+                        && attribute_value("Declspec", "", &name, &self.options.target) != 0,
+                )
             }
             Builtin::HasCAttribute => {
                 let Some(first) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
                 let next = self.lex_unexpanded();
-                let mut scope: Option<String> = None;
+                let mut scope = String::new();
                 let mut name = first;
                 if next.kind != TokenKind::ColonColon {
                     *token = next;
                     *lexed = true;
                 } else {
-                    scope = Some(name.clone());
+                    scope = name.clone();
                     let after = self.lex();
+                    *token = after.clone();
                     let Some(attribute) = self.expect_feature_identifier(&after) else {
                         return 0;
                     };
                     name = attribute;
                 }
-                let trimmed = if name.len() > 4 && name.starts_with("__") && name.ends_with("__") {
-                    name[2..name.len() - 2].to_string()
-                } else {
-                    name.clone()
-                };
-                match scope.as_deref() {
-                    None => C23_ATTRIBUTES
-                        .iter()
-                        .find(|(held, _)| *held == trimmed)
-                        .and_then(|(_, value)| value.parse().ok())
-                        .unwrap_or(0),
-                    Some("gnu") | Some("__gnu__") => {
-                        u64::from(GNU_ATTRIBUTES.contains(&trimmed.as_str()))
-                    }
-                    Some("clang") | Some("_Clang") => u64::from(matches!(
-                        trimmed.as_str(),
-                        "fallthrough"
-                            | "nodiscard"
-                            | "unsequenced"
-                            | "reproducible"
-                            | "overloadable"
-                            | "noderef"
-                            | "annotate"
-                            | "always_inline"
-                            | "noinline"
-                            | "flag_enum"
-                            | "enum_extensibility"
-                    )),
-                    _ => 0,
-                }
+                attribute_value("C23", &scope, &name, &self.options.target)
             }
             Builtin::IsTargetArchitecture => {
                 let Some(name) = self.expect_feature_identifier(token) else {
@@ -10802,7 +12542,11 @@ impl<'files> Preprocessor<'files> {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
-                u64::from(self.options.target.environment.eq_ignore_ascii_case(&name))
+                let wanted = environment_kind(&name.to_ascii_lowercase());
+                if wanted == "unknown" && !name.eq_ignore_ascii_case("unknown") {
+                    return 0;
+                }
+                u64::from(environment_kind(&self.options.target.environment) == wanted)
             }
             Builtin::IsTargetVariantSystem | Builtin::IsTargetVariantEnvironment => {
                 let _ = self.expect_feature_identifier(token);
@@ -10819,14 +12563,6 @@ impl<'files> Preprocessor<'files> {
     }
 
     fn evaluate_has_include(&mut self, identifier: &Token, next: bool) -> (Option<bool>, Token) {
-        if !self.parsing_if_directive {
-            self.report_token(
-                Message::DirectiveRequired,
-                identifier,
-                vec![quoted(&identifier.spelling)],
-            );
-            return (None, identifier.clone());
-        }
         let mut start = None;
         let mut include_next = false;
         if next {
@@ -10848,12 +12584,23 @@ impl<'files> Preprocessor<'files> {
                 }
             }
         }
-        let mut token = match self.lex_header_name(false) {
-            Some(token) => token,
-            None => return (None, identifier.clone()),
+        if !self.parsing_if_directive {
+            self.report_token(
+                Message::DirectiveRequired,
+                identifier,
+                vec![quoted(&identifier.spelling)],
+            );
+            return (None, identifier.clone());
+        }
+        let mut token = match self.lex_header_name(true) {
+            Ok(token) => token,
+            Err(end) => return (None, end),
         };
         while token.kind == TokenKind::Comment {
-            token = self.lex_header_name(false).unwrap_or(token);
+            token = match self.lex_header_name(true) {
+                Ok(token) => token,
+                Err(end) => return (None, end),
+            };
         }
         let open;
         if token.kind != TokenKind::LeftParen {
@@ -10869,8 +12616,8 @@ impl<'files> Preprocessor<'files> {
         } else {
             open = token.clone();
             token = match self.lex_header_name(true) {
-                Some(token) => token,
-                None => return (None, open),
+                Ok(token) => token,
+                Err(end) => return (None, end),
             };
         }
         if token.kind != TokenKind::HeaderName {
@@ -10892,6 +12639,7 @@ impl<'files> Preprocessor<'files> {
             return (Some(false), close);
         };
         if name.is_empty() {
+            self.report_token(Message::EmptyFilename, &filename, Vec::new());
             return (Some(false), close);
         }
         let found = self
@@ -10918,76 +12666,55 @@ impl<'files> Preprocessor<'files> {
             );
             return (None, open);
         }
-        let Some(filename) = self.lex_header_name(true) else {
-            return (None, open);
+        let filename = match self.lex_header_name(true) {
+            Ok(filename) => filename,
+            Err(end) => return (None, end),
         };
         if filename.kind != TokenKind::HeaderName {
             self.report_token(Message::ExpectsFilename, &filename, Vec::new());
             return (None, filename);
         }
-        let mut token = self.lex();
-        let mut depth = 0usize;
-        let mut unrecognized = false;
-        let mut limit: Option<u64> = None;
-        while !(token.kind == TokenKind::RightParen && depth == 0) {
-            match token.kind {
-                TokenKind::EndOfDirective | TokenKind::EndOfFile => {
-                    self.report_token(
-                        Message::MissingAfter,
-                        &filename,
-                        vec![quoted(&identifier.spelling), "')'".to_string()],
-                    );
-                    self.report_token(Message::ToMatch, &open, vec!["'('".to_string()]);
-                    return (None, token);
-                }
-                TokenKind::LeftParen => depth += 1,
-                TokenKind::RightParen => depth -= 1,
-                TokenKind::Identifier if depth == 0 => {
-                    let name = token.text().to_string();
-                    let plain = name.trim_matches('_');
-                    if plain == "limit" {
-                        let next = self.lex();
-                        if next.kind == TokenKind::LeftParen {
-                            let value = self.lex();
-                            if value.kind == TokenKind::Number {
-                                limit = value.text().parse().ok();
-                            }
-                            token = self.lex();
-                            continue;
-                        }
-                        token = next;
-                        continue;
-                    }
-                    if !matches!(plain, "prefix" | "suffix" | "if_empty") && !name.contains("::") {
-                        unrecognized = true;
-                    }
-                }
-                _ => {}
+        let (parameters, current) = self.lex_embed_parameters(true);
+        let Some(parameters) = parameters else {
+            return (None, current);
+        };
+        if current.kind != TokenKind::RightParen {
+            let mut end = filename.clone();
+            if end.site == end.place {
+                end.site.offset = end.site.offset.wrapping_add(filename.length);
             }
-            token = self.lex();
+            self.report_token(
+                Message::MissingAfter,
+                &end,
+                vec![quoted(&identifier.spelling), "')'".to_string()],
+            );
+            self.report_token(Message::ToMatch, &open, vec!["'('".to_string()]);
+            let current = self.skip_to_end_of_directive(&current);
+            return (None, current);
         }
-        if unrecognized {
-            return (Some(0), token);
+        if parameters.unrecognized > 0 {
+            return (Some(0), current);
         }
         let Some((name, angled)) = Self::include_filename(&filename) else {
-            return (Some(0), token);
+            return (Some(0), current);
         };
         if name.is_empty() {
-            return (Some(2), token);
+            self.report_token(Message::EmptyFilename, &filename, Vec::new());
         }
-        match self.lookup_file(&name, angled, None, false) {
-            None => (Some(0), token),
-            Some((_, bytes, _, _, _)) => {
-                let mut size = bytes.len() as u64;
-                if let Some(limit) = limit {
-                    size = size.min(limit);
-                }
-                if size == 0 {
-                    (Some(2), token)
-                } else {
-                    (Some(1), token)
-                }
-            }
+        let Some(bytes) = self.lookup_embed_file(&name, angled) else {
+            return (Some(0), current);
+        };
+        let mut size = bytes.len() as u64;
+        if let Some(offset) = parameters.offset {
+            size = size.saturating_sub(offset);
+        }
+        if let Some(limit) = parameters.limit {
+            size = if limit > size { 0 } else { limit };
+        }
+        if size == 0 {
+            (Some(2), current)
+        } else {
+            (Some(1), current)
         }
     }
 }
@@ -12449,6 +14176,7 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     let mut dollars: Option<bool> = None;
     let mut signed_char: Option<bool> = None;
     let mut microsoft = false;
+    let mut declspec: Option<bool> = None;
     let mut traditional = false;
     let mut after_directories: Vec<SearchDirectory> = Vec::new();
     let options = &mut invocation.preprocessor;
@@ -12491,6 +14219,8 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
             "-Wsystem-headers" => options.warnings.show_in_system_headers = true,
             "-ffreestanding" => options.freestanding = true,
             "-fms-extensions" => microsoft = true,
+            "-fdeclspec" => declspec = Some(true),
+            "-fno-declspec" => declspec = Some(false),
             "-fdollars-in-identifiers" => dollars = Some(true),
             "-fno-dollars-in-identifiers" => dollars = Some(false),
             "-ftrigraphs" | "-trigraphs" => trigraphs = Some(true),
@@ -12606,8 +14336,8 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
                     invocation.output = take_value(&mut index, "-o", rest);
                 } else if let Some(rest) = argument.strip_prefix("-std=") {
                     standard = Some(rest.to_string());
-                } else if argument == "-x" {
-                    let value = take_value(&mut index, "-x", "").unwrap_or_default();
+                } else if let Some(rest) = argument.strip_prefix("-x") {
+                    let value = take_value(&mut index, "-x", rest).unwrap_or_default();
                     invocation.language_kind = Some(match value.as_str() {
                         "c" => InputLanguage::C,
                         "c-header" => InputLanguage::CHeader,
@@ -12626,6 +14356,8 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
                     if let Some(value) = take_value(&mut index, argument, "") {
                         options.target = TargetInfo::from_triple(&value);
                     }
+                } else if let Some(rest) = argument.strip_prefix("--embed-dir=") {
+                    options.embed_directories.push(rest.to_string());
                 } else if let Some(rest) = argument.strip_prefix("-triple=") {
                     options.target = TargetInfo::from_triple(rest);
                 } else if let Some(rest) = argument.strip_prefix("--target=") {
@@ -12667,8 +14399,14 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
                     || argument.starts_with("-fmessage-length=")
                     || argument.starts_with("-fdiagnostics-")
                     || argument.starts_with("-g")
-                    || argument.starts_with("-Wundef-prefix=")
                 {
+                } else if let Some(rest) = argument.strip_prefix("-Wundef-prefix=") {
+                    options.warnings.flags.push("undef-prefix".to_string());
+                    options.warnings.undef_prefixes.extend(
+                        rest.split(',')
+                            .filter(|item| !item.is_empty())
+                            .map(str::to_string),
+                    );
                 } else if let Some(rest) = argument.strip_prefix("-W") {
                     if !rest.is_empty() {
                         options.warnings.flags.push(rest.to_string());
@@ -12711,6 +14449,7 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
         language.dollar_identifiers = value;
     }
     language.microsoft_extensions = microsoft;
+    language.declspec_keyword = declspec.unwrap_or(microsoft);
     language.traditional = traditional;
     language.char_is_signed = signed_char.unwrap_or(target_char_signed);
     language.preprocessed_output = invocation.action == FrontendAction::PreprocessOnly

@@ -7,9 +7,9 @@
       "total": 605473
     },
     "clang-c-preprocessor": {
-      "failed": 34,
-      "out_of_scope": 263,
-      "passed": 98,
+      "failed": 18,
+      "out_of_scope": 261,
+      "passed": 116,
       "total": 395
     },
     "filecheck": {

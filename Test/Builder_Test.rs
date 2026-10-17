@@ -72977,6 +72977,35 @@ mod c_front_end {
     }
 
     #[test]
+    fn embed_writes_the_bytes_and_has_embed_reports_their_presence() {
+        let source = "#if __has_embed(\"data.bin\") == __STDC_EMBED_FOUND__ && __has_embed(\"data.bin\" limit(0)) == 2 && !__has_embed(\"missing.bin\")\nint ok;\n#endif\nchar a[] = {\n#embed \"data.bin\" limit(2) prefix(9,) suffix(,8)\n};\nchar b[] = {\n#embed \"empty.bin\" if_empty(7)\n};\n";
+        let (output, stderr, status) = preprocess(
+            &["-E", "-std=c23", "main.c"],
+            &[("main.c", source), ("data.bin", "ABC"), ("empty.bin", "")],
+        );
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(
+            body(&output),
+            "int ok;\nchar a[] = {9,65, 66 ,8};\nchar b[] = {7};"
+        );
+    }
+
+    #[test]
+    fn attribute_checks_follow_the_attribute_table_and_the_target() {
+        let source = "#if __has_attribute(interrupt)\nint interrupt;\n#endif\n#if __has_c_attribute(nodiscard) == 202003L && __has_c_attribute(clang::likely) && __has_attribute(__always_inline__)\nint standard;\n#endif\n";
+        let (arm, stderr, _) = preprocess(
+            &["-E", "-triple", "arm-unknown-linux", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(body(&arm), "int interrupt;\nint standard;", "{stderr}");
+        let (aarch64, _, _) = preprocess(
+            &["-E", "-triple", "aarch64-unknown-linux", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(body(&aarch64), "int standard;");
+    }
+
+    #[test]
     fn every_warning_option_named_by_a_message_exists() {
         for name in [
             "undef",
