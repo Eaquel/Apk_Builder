@@ -151,8 +151,9 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 ## 9. Güncel durum
 
 - Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
-- Claude-A: x86 assembler ve disassembler tamam: `mc-x86` 513/642 (kapsam içi %100, 129 kapsam dışı),
-  `mc-x86-disassembler` 188/188. Sıradaki adım assembler'dan ELF/COFF nesne dosyası çıktısı.
+- Claude-A: x86 assembler ve disassembler tamam, Beta'da (`cd229b1`): `mc-x86` 513/642 (kapsam içi %100,
+  129 kapsam dışı), `mc-x86-disassembler` 188/188. Sıradaki adımlar: assembler'dan ELF nesne dosyası çıktısı ve
+  bizim bağlayıcıyla çalıştırma testi, sonra Omni IR → x86_64 arka ucu, sonra ARMv8.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
