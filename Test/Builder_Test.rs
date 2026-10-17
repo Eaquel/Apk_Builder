@@ -71866,8 +71866,8 @@ mod c_front_end {
     use super::table_gen::publish_with_scope;
     use crate::compilers::cpp::{
         parse_compiler_arguments, render_diagnostic, BufferKind, CDiagnostic, CSeverity,
-        FrontendAction, InputLanguage, Place, PreprocessOutcome, Preprocessor, SourceFiles,
-        SourceMap,
+        DiagnosticRenderer, FrontendAction, InputLanguage, Place, PreprocessOutcome, Preprocessor,
+        SourceFiles, SourceMap,
     };
     use std::collections::BTreeMap;
 
@@ -71996,8 +71996,9 @@ mod c_front_end {
             }
             None => {
                 let mut stderr = String::new();
+                let mut renderer = DiagnosticRenderer::default();
                 for diagnostic in &outcome.diagnostics {
-                    stderr.push_str(&render_diagnostic(
+                    stderr.push_str(&renderer.render(
                         diagnostic,
                         &outcome.sources,
                         invocation.show_source,
@@ -73260,15 +73261,9 @@ mod c_front_end {
         );
     }
 
-    #[test]
-    #[ignore]
-    fn suite_clang_c_preprocessor() {
-        let tree = Tree::of(&[
-            "Test_08_Clang_OpenMP_Sema_LLD",
-            "Beta_02_LLVM_MLIR_Clang_Frontend",
-        ])
-        .expect("the Clang preprocessor tests are present");
-        let root = "llvm-project/clang/test/Preprocessor/";
+    fn run_clang_c_suite(name: &str, bundle: &str, root: &str) {
+        let tree = Tree::of(&[bundle, "Beta_02_LLVM_MLIR_Clang_Frontend"])
+            .expect("the Clang tests are present");
         let tests = lit_tests(
             &tree,
             root,
@@ -73322,10 +73317,99 @@ mod c_front_end {
             };
         let outcomes = run_parallel(tests, &|path| suite.run_test(path));
         let report = SuiteReport {
-            name: "clang-c-preprocessor".to_string(),
+            name: name.to_string(),
             outcomes,
         };
         publish_with_scope(&report);
+    }
+
+    #[test]
+    fn keyword_table_follows_the_language_mode() {
+        let source = "#if __is_identifier(asm)\nasm_is_identifier\n#endif\n#if __is_identifier(bool)\nbool_is_identifier\n#endif\n#if __is_identifier(restrict)\nrestrict_is_identifier\n#endif\n#if __is_identifier(__wchar_t)\nwchar_is_identifier\n#endif\n";
+        let run = |arguments: &[&str]| {
+            let mut owned = arguments.to_vec();
+            owned.extend(["-E", "main.c"]);
+            body(&preprocess(&owned, &[("main.c", source)]).0)
+        };
+        assert_eq!(
+            run(&["-std=c99"]),
+            "asm_is_identifier\nbool_is_identifier\nwchar_is_identifier"
+        );
+        assert_eq!(
+            run(&["-std=gnu89"]),
+            "bool_is_identifier\nrestrict_is_identifier\nwchar_is_identifier"
+        );
+        assert_eq!(run(&["-std=c23", "-fms-extensions"]), "asm_is_identifier");
+        assert_eq!(
+            run(&["-std=gnu89", "-fno-gnu-keywords"]),
+            "asm_is_identifier\nbool_is_identifier\nrestrict_is_identifier\nwchar_is_identifier"
+        );
+    }
+
+    #[test]
+    fn macro_annotations_warn_where_clang_warns() {
+        let source = "#define Foo 1\n#pragma clang final(Foo)\n#undef Foo\n#define Foo 2\n#define Old 1\n#pragma clang deprecated(Old, \"use New\")\n#if Old\n#endif\n#pragma clang final(Missing)\n#pragma clang final Foo\n";
+        let (_, stderr, status) = preprocess(&["-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 1);
+        for message in [
+            "macro 'Foo' has been marked as final and should not be undefined",
+            "macro 'Foo' has been marked as final and should not be redefined",
+            "macro marked 'final' here",
+            "macro 'Old' has been marked as deprecated: use New",
+            "macro marked 'deprecated' here",
+            "no macro named 'Missing'",
+            "expected (",
+        ] {
+            assert!(stderr.contains(message), "missing {message}\n{stderr}");
+        }
+    }
+
+    #[test]
+    fn the_renderer_names_an_include_stack_once() {
+        let files = [
+            ("main.c", "#include \"inner.h\"\n"),
+            ("inner.h", "#warning first\n#warning second\n"),
+        ];
+        let owned: Vec<String> = ["-E", "main.c"]
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+        let invocation = parse_compiler_arguments(&owned);
+        let mut store = BTreeMap::new();
+        for (name, text) in files {
+            store.insert(name.to_string(), text.as_bytes().to_vec());
+        }
+        let bytes = store["main.c"].clone();
+        let memory = MemoryFiles { files: store };
+        let outcome =
+            Preprocessor::new(&memory, invocation.preprocessor.clone()).run("main.c", bytes);
+        let mut renderer = DiagnosticRenderer::default();
+        let mut text = String::new();
+        for diagnostic in &outcome.diagnostics {
+            text.push_str(&renderer.render(diagnostic, &outcome.sources, true));
+        }
+        assert_eq!(text.matches("In file included from").count(), 1, "{text}");
+        assert!(text.contains("#warning second"), "{text}");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_clang_c_preprocessor() {
+        run_clang_c_suite(
+            "clang-c-preprocessor",
+            "Test_08_Clang_OpenMP_Sema_LLD",
+            "llvm-project/clang/test/Preprocessor/",
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_clang_c_lexer() {
+        run_clang_c_suite(
+            "clang-c-lexer",
+            "Test_07_Clang_CodeGen_OpenMP",
+            "llvm-project/clang/test/Lexer/",
+        );
     }
 
     #[test]

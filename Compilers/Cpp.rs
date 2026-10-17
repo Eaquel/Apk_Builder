@@ -87,6 +87,7 @@ pub struct LanguageOptions {
     pub preprocessed_output: bool,
     pub header_file: bool,
     pub declspec_keyword: bool,
+    pub gnu_keywords: bool,
 }
 
 impl LanguageOptions {
@@ -122,6 +123,7 @@ impl LanguageOptions {
             preprocessed_output: false,
             header_file: false,
             declspec_keyword: false,
+            gnu_keywords: gnu,
         })
     }
 
@@ -147,6 +149,7 @@ impl Default for LanguageOptions {
             preprocessed_output: false,
             header_file: false,
             declspec_keyword: false,
+            gnu_keywords: true,
         })
     }
 }
@@ -1574,7 +1577,7 @@ impl Lexer {
             let kind: TokenKind;
             match character {
                 0 => {
-                    if self.at_end(start) {
+                    if self.at_end(start) || after > self.bytes.len() {
                         return self.lex_end_of_buffer(start, flags);
                     }
                     self.report(Message::NullInFile, start, Vec::new());
@@ -2138,10 +2141,12 @@ enum MessageClass {
     Fatal,
     Warning,
     WarningOff,
+    WarningOffInSystemHeaders,
     WarningNoWerror,
     WarningInSystemHeaders,
     Extension,
     ExtWarn,
+    ExtWarnInSystemHeaders,
     ExtWarnError,
     Note,
 }
@@ -2302,6 +2307,12 @@ pub enum Message {
     PragmaCommentUnknownKind,
     PragmaCommentIgnored,
     PragmaCommentOnce,
+    PragmaDeprecatedMacroUse,
+    PragmaRestrictExpansionMacroUse,
+    MacroAnnotationNote,
+    PragmaFinalMacro,
+    VisibilityNonMacro,
+    NanInfinityDisabled,
     DefinedMacroName,
     DefinedInEmbed,
     PasteAtStart,
@@ -2830,6 +2841,32 @@ impl Message {
                 "pragma comment requires parenthesized identifier and optional string",
             ),
             Message::PragmaCommentUnknownKind => (Error, "", "unknown kind of pragma comment"),
+            Message::PragmaDeprecatedMacroUse => (
+                ExtWarn,
+                "deprecated-pragma",
+                "macro %0 has been marked as deprecated%select{|: %2}1",
+            ),
+            Message::PragmaRestrictExpansionMacroUse => (
+                ExtWarn,
+                "restrict-expansion",
+                "macro %0 has been marked as unsafe for use in headers%select{|: %2}1",
+            ),
+            Message::MacroAnnotationNote => (
+                Note,
+                "",
+                "macro marked '%select{deprecated|restrict_expansion|final}0' here",
+            ),
+            Message::PragmaFinalMacro => (
+                ExtWarnInSystemHeaders,
+                "final-macro",
+                "macro %0 has been marked as final and should not be %select{undefined|redefined}1",
+            ),
+            Message::VisibilityNonMacro => (Error, "", "no macro named %0"),
+            Message::NanInfinityDisabled => (
+                Warning,
+                "nan-infinity-disabled",
+                "use of %select{infinity|NaN}0%select{| via a macro}1 is undefined behavior due to the currently enabled floating-point options",
+            ),
             Message::PragmaCommentIgnored => {
                 (Warning, "ignored-pragmas", "'#pragma comment %0' ignored")
             }
@@ -2897,7 +2934,7 @@ impl Message {
                 "C requires #line number to be less than %0, allowed as extension",
             ),
             Message::DateTime => (
-                WarningOff,
+                WarningOffInSystemHeaders,
                 "date-time",
                 "expansion of date or time macro is not reproducible",
             ),
@@ -3022,7 +3059,10 @@ impl Message {
     fn is_extension(self) -> bool {
         matches!(
             self.class(),
-            MessageClass::Extension | MessageClass::ExtWarn | MessageClass::ExtWarnError
+            MessageClass::Extension
+                | MessageClass::ExtWarn
+                | MessageClass::ExtWarnInSystemHeaders
+                | MessageClass::ExtWarnError
         )
     }
 
@@ -4521,8 +4561,11 @@ impl DiagnosticEngine {
             MessageClass::Warning
             | MessageClass::WarningNoWerror
             | MessageClass::WarningInSystemHeaders
-            | MessageClass::ExtWarn => CSeverity::Warning,
-            MessageClass::WarningOff | MessageClass::Extension => CSeverity::Ignored,
+            | MessageClass::ExtWarn
+            | MessageClass::ExtWarnInSystemHeaders => CSeverity::Warning,
+            MessageClass::WarningOff
+            | MessageClass::WarningOffInSystemHeaders
+            | MessageClass::Extension => CSeverity::Ignored,
             MessageClass::ExtWarnError => CSeverity::Error,
         };
         if class == MessageClass::Note {
@@ -4578,6 +4621,8 @@ impl DiagnosticEngine {
             && !self.show_in_system_headers
             && message.is_warning_like()
             && class != MessageClass::WarningInSystemHeaders
+            && class != MessageClass::ExtWarnInSystemHeaders
+            && class != MessageClass::WarningOffInSystemHeaders
         {
             return (CSeverity::Ignored, false);
         }
@@ -4607,28 +4652,54 @@ impl DiagnosticEngine {
 }
 
 pub fn render_diagnostic(diagnostic: &CDiagnostic, map: &SourceMap, show_source: bool) -> String {
-    let mut out = String::new();
-    for include in diagnostic.include_stack.iter() {
-        out.push_str(&format!(
-            "In file included from {}:{}:\n",
-            include.name, include.line
-        ));
-    }
-    if let Some(place) = &diagnostic.presumed {
-        out.push_str(&format!("{}:{}:{}: ", place.name, place.line, place.column));
-    }
-    out.push_str(diagnostic.severity.label());
-    out.push_str(": ");
-    out.push_str(&diagnostic.message);
-    if let Some(option) = &diagnostic.option {
-        out.push_str(&format!(" [{option}]"));
-    }
-    out.push('\n');
-    if show_source {
-        if let Some(place) = diagnostic.place {
-            if (place.buffer as usize) < map.buffers.len() {
-                let buffer = map.buffer(place.buffer);
-                if buffer.kind == BufferKind::File {
+    DiagnosticRenderer::default().render(diagnostic, map, show_source)
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct DiagnosticRenderer {
+    last_include: Option<Place>,
+    last_place: Option<Place>,
+    last_severity: Option<CSeverity>,
+}
+
+impl DiagnosticRenderer {
+    pub fn render(
+        &mut self,
+        diagnostic: &CDiagnostic,
+        map: &SourceMap,
+        show_source: bool,
+    ) -> String {
+        let mut out = String::new();
+        let include = diagnostic.presumed.as_ref().and_then(|place| place.include);
+        if include != self.last_include {
+            self.last_include = include;
+            if diagnostic.severity != CSeverity::Note {
+                for entry in diagnostic.include_stack.iter() {
+                    out.push_str(&format!(
+                        "In file included from {}:{}:\n",
+                        entry.name, entry.line
+                    ));
+                }
+            }
+        }
+        if let Some(place) = &diagnostic.presumed {
+            out.push_str(&format!("{}:{}:{}: ", place.name, place.line, place.column));
+        }
+        out.push_str(diagnostic.severity.label());
+        out.push_str(": ");
+        out.push_str(&diagnostic.message);
+        if let Some(option) = &diagnostic.option {
+            out.push_str(&format!(" [{option}]"));
+        }
+        out.push('\n');
+        let repeated = diagnostic.place.is_some()
+            && diagnostic.place == self.last_place
+            && (self.last_severity != Some(CSeverity::Note)
+                || Some(diagnostic.severity) == self.last_severity);
+        if show_source && !repeated {
+            if let Some(place) = diagnostic.place {
+                if (place.buffer as usize) < map.buffers.len() {
+                    let buffer = map.buffer(place.buffer);
                     let line = buffer.physical_line(place.offset);
                     let text = buffer.line_text(line);
                     let column = buffer.physical_column(place.offset) as usize;
@@ -4647,8 +4718,675 @@ pub fn render_diagnostic(diagnostic: &CDiagnostic, map: &SourceMap, show_source:
                 }
             }
         }
+        self.last_place = diagnostic.place;
+        self.last_severity = Some(diagnostic.severity);
+        out
     }
-    out
+}
+
+static KEYWORD_TABLE: [(&str, &str, u32); 418] = [
+    ("auto", "auto", 0x3bffe7ff),
+    ("break", "break", 0x3bffe7ff),
+    ("case", "case", 0x3bffe7ff),
+    ("char", "char", 0x3bffe7ff),
+    ("const", "const", 0x3bffe7ff),
+    ("continue", "continue", 0x3bffe7ff),
+    ("default", "default", 0x3bffe7ff),
+    ("do", "do", 0x3bffe7ff),
+    ("double", "double", 0x3bffe7ff),
+    ("else", "else", 0x3bffe7ff),
+    ("enum", "enum", 0x3bffe7ff),
+    ("extern", "extern", 0x3bffe7ff),
+    ("float", "float", 0x3bffe7ff),
+    ("for", "for", 0x3bffe7ff),
+    ("goto", "goto", 0x3bffe7ff),
+    ("if", "if", 0x3bffe7ff),
+    ("int", "int", 0x3bffe7ff),
+    ("_ExtInt", "_ExtInt", 0x3bffe7ff),
+    ("_BitInt", "_BitInt", 0x3bffe7ff),
+    ("long", "long", 0x3bffe7ff),
+    ("register", "register", 0x3bffe7ff),
+    ("return", "return", 0x3bffe7ff),
+    ("short", "short", 0x3bffe7ff),
+    ("signed", "signed", 0x3bffe7ff),
+    ("static", "static", 0x3bffe7ff),
+    ("struct", "struct", 0x3bffe7ff),
+    ("switch", "switch", 0x3bffe7ff),
+    ("typedef", "typedef", 0x3bffe7ff),
+    ("union", "union", 0x3bffe7ff),
+    ("unsigned", "unsigned", 0x3bffe7ff),
+    ("void", "void", 0x3bffe7ff),
+    ("volatile", "volatile", 0x7bffe7ff),
+    ("while", "while", 0x3bffe7ff),
+    ("_Alignas", "_Alignas", 0x3bffe7ff),
+    ("_Alignof", "_Alignof", 0x3bffe7ff),
+    ("_Atomic", "_Atomic", 0x3bfff7ff),
+    ("_Bool", "_Bool", 0x80),
+    ("_Complex", "_Complex", 0x3bffe7ff),
+    ("_Generic", "_Generic", 0x3bffe7ff),
+    ("_Imaginary", "_Imaginary", 0x3bffe7ff),
+    ("_Noreturn", "_Noreturn", 0x3bffe7ff),
+    ("_Static_assert", "_Static_assert", 0x3bffe7ff),
+    ("_Thread_local", "_Thread_local", 0x3bffe7ff),
+    ("__func__", "__func__", 0x3bffe7ff),
+    ("__objc_yes", "__objc_yes", 0x3bffe7ff),
+    ("__objc_no", "__objc_no", 0x3bffe7ff),
+    ("__ptrauth", "__ptrauth", 0x3bffe7ff),
+    ("__ob_wrap", "__ob_wrap", 0x3bffe7ff),
+    ("__ob_trap", "__ob_trap", 0x3bffe7ff),
+    ("asm", "asm", 0xa),
+    ("bool", "bool", 0x420),
+    ("catch", "catch", 0x2),
+    ("class", "class", 0x2),
+    ("const_cast", "const_cast", 0x2),
+    ("delete", "delete", 0x2),
+    ("dynamic_cast", "dynamic_cast", 0x2),
+    ("explicit", "explicit", 0x2),
+    ("export", "export", 0x2),
+    ("false", "false", 0x420),
+    ("friend", "friend", 0x2),
+    ("mutable", "mutable", 0x2),
+    ("namespace", "namespace", 0x2),
+    ("new", "new", 0x2),
+    ("operator", "operator", 0x2),
+    ("private", "private", 0x2),
+    ("protected", "protected", 0x2),
+    ("public", "public", 0x2),
+    ("reinterpret_cast", "reinterpret_cast", 0x2),
+    ("static_cast", "static_cast", 0x2),
+    ("template", "template", 0x2),
+    ("this", "this", 0x2),
+    ("throw", "throw", 0x2),
+    ("true", "true", 0x420),
+    ("try", "try", 0x2),
+    ("typename", "typename", 0x2),
+    ("typeid", "typeid", 0x2),
+    ("using", "using", 0x2),
+    ("virtual", "virtual", 0x2),
+    ("wchar_t", "wchar_t", 0x2000),
+    ("restrict", "restrict", 0x1),
+    ("inline", "inline", 0xb),
+    ("alignas", "alignas", 0x404),
+    ("char16_t", "char16_t", 0x804),
+    ("char32_t", "char32_t", 0x804),
+    ("constexpr", "constexpr", 0x404),
+    ("decltype", "decltype", 0x4),
+    ("noexcept", "noexcept", 0x4),
+    ("nullptr", "nullptr", 0x404),
+    ("static_assert", "static_assert", 0x400404),
+    ("thread_local", "thread_local", 0x404),
+    ("co_await", "co_await", 0x140000),
+    ("co_return", "co_return", 0x140000),
+    ("co_yield", "co_yield", 0x140000),
+    ("module", "module", 0x80000),
+    ("import", "import", 0x80000),
+    ("consteval", "consteval", 0x100000),
+    ("constinit", "constinit", 0x100000),
+    ("concept", "concept", 0x100000),
+    ("requires", "requires", 0x100000),
+    ("char8_t", "char8_t", 0x8000),
+    ("_Float16", "_Float16", 0x3bffe7ff),
+    ("typeof", "typeof", 0x408),
+    ("typeof_unqual", "typeof_unqual", 0x400),
+    ("_Defer", "_Defer", 0x20000000),
+    ("_Accum", "_Accum", 0x10000000),
+    ("_Fract", "_Fract", 0x10000000),
+    ("_Sat", "_Sat", 0x10000000),
+    ("_Decimal32", "_Decimal32", 0x3bffe7ff),
+    ("_Decimal64", "_Decimal64", 0x3bffe7ff),
+    ("_Decimal128", "_Decimal128", 0x3bffe7ff),
+    ("__null", "__null", 0x2),
+    ("__attribute", "__attribute", 0x3bffe7ff),
+    ("__builtin_choose_expr", "__builtin_choose_expr", 0x3bffe7ff),
+    ("__builtin_offsetof", "__builtin_offsetof", 0x3bffe7ff),
+    ("__builtin_FILE", "__builtin_FILE", 0x3bffe7ff),
+    ("__builtin_FILE_NAME", "__builtin_FILE_NAME", 0x3bffe7ff),
+    ("__builtin_FUNCTION", "__builtin_FUNCTION", 0x3bffe7ff),
+    ("__builtin_FUNCSIG", "__builtin_FUNCSIG", 0x10),
+    ("__builtin_LINE", "__builtin_LINE", 0x3bffe7ff),
+    ("__builtin_COLUMN", "__builtin_COLUMN", 0x3bffe7ff),
+    (
+        "__builtin_source_location",
+        "__builtin_source_location",
+        0x2,
+    ),
+    ("__builtin_va_arg", "__builtin_va_arg", 0x3bffe7ff),
+    ("__extension__", "__extension__", 0x3bffe7ff),
+    ("__float128", "__float128", 0x3bffe7ff),
+    ("__ibm128", "__ibm128", 0x3bffe7ff),
+    ("__imag", "__imag", 0x3bffe7ff),
+    ("__int128", "__int128", 0x3bffe7ff),
+    ("__label__", "__label__", 0x3bffe7ff),
+    ("__real", "__real", 0x3bffe7ff),
+    ("__thread", "__thread", 0x3bffe7ff),
+    ("__FUNCTION__", "__FUNCTION__", 0x3bffe7ff),
+    ("__PRETTY_FUNCTION__", "__PRETTY_FUNCTION__", 0x3bffe7ff),
+    ("__auto_type", "__auto_type", 0x3bffe7ff),
+    ("__FUNCDNAME__", "__FUNCDNAME__", 0x10),
+    ("__FUNCSIG__", "__FUNCSIG__", 0x10),
+    ("L__FUNCTION__", "L__FUNCTION__", 0x10),
+    ("L__FUNCSIG__", "L__FUNCSIG__", 0x10),
+    ("__private_extern__", "__private_extern__", 0x3bffe7ff),
+    ("__module_private__", "__module_private__", 0x3bffe7ff),
+    ("__declspec", "__declspec", 0x0),
+    ("__cdecl", "__cdecl", 0x3bffe7ff),
+    ("__stdcall", "__stdcall", 0x3bffe7ff),
+    ("__fastcall", "__fastcall", 0x3bffe7ff),
+    ("__thiscall", "__thiscall", 0x3bffe7ff),
+    ("__regcall", "__regcall", 0x3bffe7ff),
+    ("__vectorcall", "__vectorcall", 0x3bffe7ff),
+    ("__forceinline", "__forceinline", 0x10),
+    ("__unaligned", "__unaligned", 0x10),
+    ("__super", "__super", 0x10),
+    ("__global", "__global", 0x200200),
+    ("__local", "__local", 0x200200),
+    ("__constant", "__constant", 0x200200),
+    ("__private", "__private", 0x200200),
+    ("__generic", "__generic", 0x200200),
+    ("global", "__global", 0x200200),
+    ("local", "__local", 0x200200),
+    ("constant", "__constant", 0x200200),
+    ("private", "__private", 0x200),
+    ("generic", "__generic", 0x200200),
+    ("__kernel", "__kernel", 0x200200),
+    ("kernel", "__kernel", 0x200200),
+    ("__read_only", "__read_only", 0x200200),
+    ("__write_only", "__write_only", 0x200200),
+    ("__read_write", "__read_write", 0x200200),
+    ("read_only", "__read_only", 0x200200),
+    ("write_only", "__write_only", 0x200200),
+    ("read_write", "__read_write", 0x200200),
+    ("__builtin_astype", "__builtin_astype", 0x200200),
+    ("image1d_t", "image1d_t", 0x200200),
+    ("image1d_array_t", "image1d_array_t", 0x200200),
+    ("image1d_buffer_t", "image1d_buffer_t", 0x200200),
+    ("image2d_t", "image2d_t", 0x200200),
+    ("image2d_array_t", "image2d_array_t", 0x200200),
+    ("image2d_depth_t", "image2d_depth_t", 0x200200),
+    ("image2d_array_depth_t", "image2d_array_depth_t", 0x200200),
+    ("image2d_msaa_t", "image2d_msaa_t", 0x200200),
+    ("image2d_array_msaa_t", "image2d_array_msaa_t", 0x200200),
+    ("image2d_msaa_depth_t", "image2d_msaa_depth_t", 0x200200),
+    (
+        "image2d_array_msaa_depth_t",
+        "image2d_array_msaa_depth_t",
+        0x200200,
+    ),
+    ("image3d_t", "image3d_t", 0x200200),
+    ("pipe", "pipe", 0x200200),
+    ("addrspace_cast", "addrspace_cast", 0x200000),
+    ("__noinline__", "__noinline__", 0x1000000),
+    ("cbuffer", "cbuffer", 0x8000000),
+    ("tbuffer", "tbuffer", 0x8000000),
+    ("groupshared", "groupshared", 0x8000000),
+    ("in", "in", 0x8000000),
+    ("inout", "inout", 0x8000000),
+    ("out", "out", 0x8000000),
+    ("row_major", "row_major", 0x8000000),
+    ("column_major", "column_major", 0x8000000),
+    ("__hlsl_resource_t", "__hlsl_resource_t", 0x8000000),
+    ("__pascal", "__pascal", 0x3bffe7ff),
+    ("__vector", "__vector", 0x20040),
+    ("__pixel", "__pixel", 0x40),
+    ("__bool", "__bool", 0x20040),
+    ("__fp16", "half", 0x3bffe7ff),
+    ("__bf16", "__bf16", 0x3bffe7ff),
+    ("half", "half", 0x4000),
+    ("__bridge", "__bridge", 0x10000),
+    ("__bridge_transfer", "__bridge_transfer", 0x10000),
+    ("__bridge_retained", "__bridge_retained", 0x10000),
+    ("__bridge_retain", "__bridge_retain", 0x10000),
+    ("__covariant", "__covariant", 0x10000),
+    ("__contravariant", "__contravariant", 0x10000),
+    ("__kindof", "__kindof", 0x10000),
+    ("__asm", "asm", 0x3bffe7ff),
+    ("__asm__", "asm", 0x3bffe7ff),
+    ("__attribute__", "__attribute", 0x3bffe7ff),
+    ("__complex", "_Complex", 0x3bffe7ff),
+    ("__complex__", "_Complex", 0x3bffe7ff),
+    ("__const", "const", 0x3bffe7ff),
+    ("__const__", "const", 0x3bffe7ff),
+    ("__decltype", "decltype", 0x2),
+    ("__imag__", "__imag", 0x3bffe7ff),
+    ("__inline", "inline", 0x3bffe7ff),
+    ("__inline__", "inline", 0x3bffe7ff),
+    ("__nullptr", "nullptr", 0x3bffe7ff),
+    ("__real__", "__real", 0x3bffe7ff),
+    ("__restrict", "restrict", 0x3bffe7ff),
+    ("__restrict__", "restrict", 0x3bffe7ff),
+    ("__signed", "signed", 0x3bffe7ff),
+    ("__signed__", "signed", 0x3bffe7ff),
+    ("__typeof", "typeof", 0x3bffe7ff),
+    ("__typeof__", "typeof", 0x3bffe7ff),
+    ("__typeof_unqual", "typeof_unqual", 0x3bffe7ff),
+    ("__typeof_unqual__", "typeof_unqual", 0x3bffe7ff),
+    ("__volatile", "volatile", 0x3bffe7ff),
+    ("__volatile__", "volatile", 0x3bffe7ff),
+    ("_Nonnull", "_Nonnull", 0x3bffe7ff),
+    ("_Nullable", "_Nullable", 0x3bffe7ff),
+    ("_Nullable_result", "_Nullable_result", 0x3bffe7ff),
+    ("_Null_unspecified", "_Null_unspecified", 0x3bffe7ff),
+    ("__funcref", "__funcref", 0x3bffe7ff),
+    ("__ptr64", "__ptr64", 0x10),
+    ("__ptr32", "__ptr32", 0x2000010),
+    ("__sptr", "__sptr", 0x10),
+    ("__uptr", "__uptr", 0x10),
+    ("__w64", "__w64", 0x10),
+    ("__uuidof", "__uuidof", 0x110),
+    ("__try", "__try", 0x110),
+    ("__finally", "__finally", 0x110),
+    ("__leave", "__leave", 0x110),
+    ("__int64", "__int64", 0x10),
+    ("__if_exists", "__if_exists", 0x10),
+    ("__if_not_exists", "__if_not_exists", 0x10),
+    ("__single_inheritance", "__single_inheritance", 0x10),
+    ("__multiple_inheritance", "__multiple_inheritance", 0x10),
+    ("__virtual_inheritance", "__virtual_inheritance", 0x10),
+    ("__interface", "__interface", 0x10),
+    ("__int8", "char", 0x10),
+    ("__int16", "short", 0x10),
+    ("__int32", "int", 0x10),
+    ("__wchar_t", "wchar_t", 0x10),
+    ("_asm", "asm", 0x10),
+    ("_cdecl", "__cdecl", 0x110),
+    ("_declspec", "__declspec", 0x10),
+    ("_fastcall", "__fastcall", 0x110),
+    ("_finally", "__finally", 0x400000),
+    ("_forceinline", "__forceinline", 0x400000),
+    ("_inline", "inline", 0x10),
+    ("_int8", "char", 0x10),
+    ("_int16", "short", 0x10),
+    ("_int32", "int", 0x10),
+    ("_int64", "__int64", 0x10),
+    ("_leave", "__leave", 0x400000),
+    ("_multiple_inheritance", "__multiple_inheritance", 0x400000),
+    ("_ptr32", "__ptr32", 0x400000),
+    ("_ptr64", "__ptr64", 0x400000),
+    ("_restrict", "restrict", 0x400000),
+    ("_stdcall", "__stdcall", 0x110),
+    ("_thiscall", "__thiscall", 0x10),
+    ("_try", "__try", 0x400000),
+    ("_vectorcall", "__vectorcall", 0x10),
+    ("_unaligned", "__unaligned", 0x400000),
+    ("_uptr", "__uptr", 0x400000),
+    ("_uuidof", "__uuidof", 0x110),
+    ("_virtual_inheritance", "__virtual_inheritance", 0x400000),
+    ("_w64", "__w64", 0x400000),
+    ("_pascal", "__pascal", 0x100),
+    (
+        "__builtin_convertvector",
+        "__builtin_convertvector",
+        0x3bffe7ff,
+    ),
+    ("__char16_t", "char16_t", 0x2),
+    ("__char32_t", "char32_t", 0x2),
+    ("__builtin_bit_cast", "__builtin_bit_cast", 0x3bffe7ff),
+    ("__builtin_available", "__builtin_available", 0x3bffe7ff),
+    (
+        "__builtin_sycl_unique_stable_name",
+        "__builtin_sycl_unique_stable_name",
+        0x800000,
+    ),
+    ("__arm_agnostic", "__arm_agnostic", 0x3bffe7ff),
+    ("__arm_in", "__arm_in", 0x3bffe7ff),
+    ("__arm_inout", "__arm_inout", 0x3bffe7ff),
+    (
+        "__arm_locally_streaming",
+        "__arm_locally_streaming",
+        0x3bffe7ff,
+    ),
+    ("__arm_new", "__arm_new", 0x3bffe7ff),
+    ("__arm_out", "__arm_out", 0x3bffe7ff),
+    ("__arm_preserves", "__arm_preserves", 0x3bffe7ff),
+    ("__arm_streaming", "__arm_streaming", 0x3bffe7ff),
+    (
+        "__arm_streaming_compatible",
+        "__arm_streaming_compatible",
+        0x3bffe7ff,
+    ),
+    ("sizeof", "sizeof", 0x3bffe7ff),
+    ("__datasizeof", "__datasizeof", 0x2),
+    ("_Countof", "_Countof", 0x80),
+    ("alignof", "alignof", 0x404),
+    ("__alignof", "__alignof", 0x3bffe7ff),
+    (
+        "__builtin_types_compatible_p",
+        "__builtin_types_compatible_p",
+        0x80,
+    ),
+    ("__builtin_type_order", "__builtin_type_order", 0x100000),
+    ("__is_interface_class", "__is_interface_class", 0x10),
+    ("__is_sealed", "__is_sealed", 0x10),
+    ("__is_destructible", "__is_destructible", 0x3bffe7ff),
+    (
+        "__is_trivially_destructible",
+        "__is_trivially_destructible",
+        0x2,
+    ),
+    (
+        "__is_nothrow_destructible",
+        "__is_nothrow_destructible",
+        0x3bffe7ff,
+    ),
+    ("__is_nothrow_assignable", "__is_nothrow_assignable", 0x2),
+    ("__is_constructible", "__is_constructible", 0x2),
+    (
+        "__is_nothrow_constructible",
+        "__is_nothrow_constructible",
+        0x2,
+    ),
+    ("__is_assignable", "__is_assignable", 0x2),
+    (
+        "__has_nothrow_move_assign",
+        "__has_nothrow_move_assign",
+        0x2,
+    ),
+    (
+        "__has_trivial_move_assign",
+        "__has_trivial_move_assign",
+        0x2,
+    ),
+    (
+        "__has_trivial_move_constructor",
+        "__has_trivial_move_constructor",
+        0x2,
+    ),
+    (
+        "__builtin_is_implicit_lifetime",
+        "__builtin_is_implicit_lifetime",
+        0x2,
+    ),
+    (
+        "__builtin_is_virtual_base_of",
+        "__builtin_is_virtual_base_of",
+        0x2,
+    ),
+    ("__has_nothrow_assign", "__has_nothrow_assign", 0x2),
+    ("__has_nothrow_copy", "__has_nothrow_copy", 0x2),
+    (
+        "__has_nothrow_constructor",
+        "__has_nothrow_constructor",
+        0x2,
+    ),
+    ("__has_trivial_assign", "__has_trivial_assign", 0x2),
+    ("__has_trivial_copy", "__has_trivial_copy", 0x2),
+    (
+        "__has_trivial_constructor",
+        "__has_trivial_constructor",
+        0x2,
+    ),
+    ("__has_trivial_destructor", "__has_trivial_destructor", 0x2),
+    ("__has_virtual_destructor", "__has_virtual_destructor", 0x2),
+    ("__is_abstract", "__is_abstract", 0x2),
+    ("__is_aggregate", "__is_aggregate", 0x2),
+    ("__is_base_of", "__is_base_of", 0x2),
+    ("__is_class", "__is_class", 0x2),
+    ("__is_convertible_to", "__is_convertible_to", 0x2),
+    ("__is_empty", "__is_empty", 0x2),
+    ("__is_enum", "__is_enum", 0x2),
+    ("__is_final", "__is_final", 0x2),
+    ("__is_literal", "__is_literal", 0x2),
+    ("__is_pod", "__is_pod", 0x2),
+    ("__is_polymorphic", "__is_polymorphic", 0x2),
+    ("__is_standard_layout", "__is_standard_layout", 0x2),
+    ("__is_trivial", "__is_trivial", 0x2),
+    (
+        "__is_trivially_assignable",
+        "__is_trivially_assignable",
+        0x2,
+    ),
+    (
+        "__is_trivially_constructible",
+        "__is_trivially_constructible",
+        0x2,
+    ),
+    ("__is_trivially_copyable", "__is_trivially_copyable", 0x2),
+    ("__is_union", "__is_union", 0x2),
+    (
+        "__has_unique_object_representations",
+        "__has_unique_object_representations",
+        0x2,
+    ),
+    ("__is_layout_compatible", "__is_layout_compatible", 0x2),
+    (
+        "__is_pointer_interconvertible_base_of",
+        "__is_pointer_interconvertible_base_of",
+        0x2,
+    ),
+    ("__add_lvalue_reference", "__add_lvalue_reference", 0x2),
+    ("__add_pointer", "__add_pointer", 0x2),
+    ("__add_rvalue_reference", "__add_rvalue_reference", 0x2),
+    ("__decay", "__decay", 0x2),
+    ("__make_signed", "__make_signed", 0x2),
+    ("__make_unsigned", "__make_unsigned", 0x2),
+    ("__remove_all_extents", "__remove_all_extents", 0x2),
+    ("__remove_const", "__remove_const", 0x2),
+    ("__remove_cv", "__remove_cv", 0x2),
+    ("__remove_cvref", "__remove_cvref", 0x2),
+    ("__remove_extent", "__remove_extent", 0x2),
+    ("__remove_pointer", "__remove_pointer", 0x2),
+    ("__remove_reference_t", "__remove_reference_t", 0x2),
+    ("__remove_restrict", "__remove_restrict", 0x2),
+    ("__remove_volatile", "__remove_volatile", 0x2),
+    ("__underlying_type", "__underlying_type", 0x2),
+    (
+        "__is_trivially_equality_comparable",
+        "__is_trivially_equality_comparable",
+        0x2,
+    ),
+    ("__is_bounded_array", "__is_bounded_array", 0x2),
+    ("__is_unbounded_array", "__is_unbounded_array", 0x2),
+    ("__is_scoped_enum", "__is_scoped_enum", 0x2),
+    ("__can_pass_in_regs", "__can_pass_in_regs", 0x2),
+    (
+        "__reference_binds_to_temporary",
+        "__reference_binds_to_temporary",
+        0x2,
+    ),
+    (
+        "__reference_constructs_from_temporary",
+        "__reference_constructs_from_temporary",
+        0x2,
+    ),
+    (
+        "__reference_converts_from_temporary",
+        "__reference_converts_from_temporary",
+        0x2,
+    ),
+    (
+        "__builtin_lt_synthesizes_from_spaceship",
+        "__builtin_lt_synthesizes_from_spaceship",
+        0x2,
+    ),
+    (
+        "__builtin_le_synthesizes_from_spaceship",
+        "__builtin_le_synthesizes_from_spaceship",
+        0x2,
+    ),
+    (
+        "__builtin_gt_synthesizes_from_spaceship",
+        "__builtin_gt_synthesizes_from_spaceship",
+        0x2,
+    ),
+    (
+        "__builtin_ge_synthesizes_from_spaceship",
+        "__builtin_ge_synthesizes_from_spaceship",
+        0x2,
+    ),
+    (
+        "__builtin_is_cpp_trivially_relocatable",
+        "__builtin_is_cpp_trivially_relocatable",
+        0x2,
+    ),
+    (
+        "__is_trivially_relocatable",
+        "__is_trivially_relocatable",
+        0x2,
+    ),
+    (
+        "__is_bitwise_cloneable",
+        "__is_bitwise_cloneable",
+        0x3bffe7ff,
+    ),
+    (
+        "__builtin_structured_binding_size",
+        "__builtin_structured_binding_size",
+        0x2,
+    ),
+    ("__is_lvalue_expr", "__is_lvalue_expr", 0x2),
+    ("__is_rvalue_expr", "__is_rvalue_expr", 0x2),
+    ("__is_arithmetic", "__is_arithmetic", 0x2),
+    ("__is_floating_point", "__is_floating_point", 0x2),
+    ("__is_integral", "__is_integral", 0x2),
+    ("__is_complete_type", "__is_complete_type", 0x2),
+    ("__is_void", "__is_void", 0x2),
+    ("__is_array", "__is_array", 0x2),
+    ("__is_function", "__is_function", 0x2),
+    ("__is_reference", "__is_reference", 0x2),
+    ("__is_lvalue_reference", "__is_lvalue_reference", 0x2),
+    ("__is_rvalue_reference", "__is_rvalue_reference", 0x2),
+    ("__is_fundamental", "__is_fundamental", 0x2),
+    ("__is_object", "__is_object", 0x2),
+    ("__is_scalar", "__is_scalar", 0x2),
+    ("__is_compound", "__is_compound", 0x2),
+    ("__is_pointer", "__is_pointer", 0x2),
+    (
+        "__is_member_object_pointer",
+        "__is_member_object_pointer",
+        0x2,
+    ),
+    (
+        "__is_member_function_pointer",
+        "__is_member_function_pointer",
+        0x2,
+    ),
+    ("__is_member_pointer", "__is_member_pointer", 0x2),
+    ("__is_const", "__is_const", 0x2),
+    ("__is_volatile", "__is_volatile", 0x2),
+    ("__is_signed", "__is_signed", 0x2),
+    ("__is_unsigned", "__is_unsigned", 0x2),
+    ("__is_same", "__is_same", 0x2),
+    ("__is_convertible", "__is_convertible", 0x2),
+    ("__is_nothrow_convertible", "__is_nothrow_convertible", 0x2),
+    ("__array_rank", "__array_rank", 0x2),
+    ("__array_extent", "__array_extent", 0x2),
+    (
+        "__builtin_ptrauth_type_discriminator",
+        "__builtin_ptrauth_type_discriminator",
+        0x3bffe7ff,
+    ),
+    ("vec_step", "vec_step", 0x220240),
+    (
+        "__builtin_hlsl_is_scalarized_layout_compatible",
+        "__builtin_hlsl_is_scalarized_layout_compatible",
+        0x8000000,
+    ),
+    (
+        "__builtin_hlsl_is_intangible",
+        "__builtin_hlsl_is_intangible",
+        0x8000000,
+    ),
+    (
+        "__builtin_hlsl_is_typed_resource_element_compatible",
+        "__builtin_hlsl_is_typed_resource_element_compatible",
+        0x8000000,
+    ),
+    (
+        "__builtin_hlsl_is_constant_buffer_element_compatible",
+        "__builtin_hlsl_is_constant_buffer_element_compatible",
+        0x8000000,
+    ),
+    (
+        "__builtin_omp_required_simd_align",
+        "__builtin_omp_required_simd_align",
+        0x3bffe7ff,
+    ),
+    (
+        "__builtin_vectorelements",
+        "__builtin_vectorelements",
+        0x3bffe7ff,
+    ),
+    ("__alignof__", "__alignof", 0x3bffe7ff),
+    ("__builtin_alignof", "__alignof", 0x10),
+    ("_alignof", "__alignof", 0x10),
+    ("__is_literal_type", "__is_literal", 0x2),
+    ("__is_same_as", "__is_same", 0x2),
+];
+
+const KEYWORD_C99: u32 = 0x1;
+const KEYWORD_GNU: u32 = 0x8;
+const KEYWORD_MICROSOFT: u32 = 0x10;
+const KEYWORD_BOOL_SUPPORT: u32 = 0x20;
+const KEYWORD_NOT_CPLUSPLUS: u32 = 0x80;
+const KEYWORD_C23: u32 = 0x400;
+const KEYWORD_FIXED_POINT: u32 = 0x10000000;
+const KEYWORD_DEFER: u32 = 0x20000000;
+const KEYWORD_EVERYWHERE: u32 = 0x3bffe7ff;
+
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
+pub enum KeywordStatus {
+    Unknown,
+    Disabled,
+    Future,
+    Extension,
+    Enabled,
+}
+
+fn keyword_flag_status(language: &LanguageOptions, flag: u32) -> KeywordStatus {
+    let c99 = language.at_least(CStandard::C99);
+    let c23 = language.at_least(CStandard::C23);
+    let introduced = |present: bool| {
+        if present {
+            KeywordStatus::Enabled
+        } else {
+            KeywordStatus::Future
+        }
+    };
+    match flag {
+        KEYWORD_C99 => introduced(c99),
+        KEYWORD_C23 | KEYWORD_BOOL_SUPPORT => introduced(c23),
+        KEYWORD_GNU if language.gnu_keywords => KeywordStatus::Extension,
+        KEYWORD_MICROSOFT if language.microsoft_extensions => KeywordStatus::Extension,
+        KEYWORD_NOT_CPLUSPLUS => KeywordStatus::Enabled,
+        KEYWORD_FIXED_POINT | KEYWORD_DEFER => KeywordStatus::Disabled,
+        _ => KeywordStatus::Unknown,
+    }
+}
+
+pub fn keyword_status(language: &LanguageOptions, flags: u32) -> KeywordStatus {
+    if flags == KEYWORD_EVERYWHERE {
+        return KeywordStatus::Enabled;
+    }
+    let mut status = KeywordStatus::Unknown;
+    let mut remaining = flags;
+    while remaining != 0 {
+        let flag = remaining & remaining.wrapping_neg();
+        remaining &= !flag;
+        status = status.max(keyword_flag_status(language, flag));
+    }
+    if status == KeywordStatus::Unknown {
+        KeywordStatus::Disabled
+    } else {
+        status
+    }
+}
+
+pub fn keyword_kind(language: &LanguageOptions, spelling: &[u8]) -> Option<&'static str> {
+    let mut kind = None;
+    for (name, token, flags) in KEYWORD_TABLE.iter() {
+        if name.as_bytes() != spelling {
+            continue;
+        }
+        match keyword_status(language, *flags) {
+            KeywordStatus::Enabled | KeywordStatus::Extension => kind = Some(*token),
+            KeywordStatus::Future => kind = None,
+            _ => {}
+        }
+    }
+    if spelling == b"__declspec" && language.declspec_keyword {
+        kind = Some("__declspec");
+    }
+    kind
 }
 
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
@@ -10898,6 +11636,14 @@ pub struct Preprocessor<'files> {
     last_expression_simple: bool,
     seen_copyright_comment: bool,
     linker_comments: Vec<(String, Vec<u8>)>,
+    macro_annotations: BTreeMap<Rc<[u8]>, MacroAnnotations>,
+}
+
+#[derive(Clone, Debug, Default)]
+struct MacroAnnotations {
+    deprecated: Option<(Vec<u8>, Place)>,
+    restricted: Option<(Vec<u8>, Place)>,
+    final_place: Option<Place>,
 }
 
 impl<'files> Preprocessor<'files> {
@@ -10972,6 +11718,7 @@ impl<'files> Preprocessor<'files> {
             last_expression_simple: false,
             seen_copyright_comment: false,
             linker_comments: Vec::new(),
+            macro_annotations: BTreeMap::new(),
         };
         for (name, builtin) in BUILTIN_MACROS {
             let key: Rc<[u8]> = Rc::from(name.as_bytes());
@@ -11476,6 +12223,7 @@ impl<'files> Preprocessor<'files> {
         identifier: Token,
         definition: Rc<MacroDefinition>,
     ) -> Option<Token> {
+        self.emit_macro_expansion_warnings(&identifier, false);
         if let Some(builtin) = definition.builtin {
             return self.expand_builtin(identifier, builtin);
         }
@@ -13010,6 +13758,9 @@ impl<'files> Preprocessor<'files> {
         let Some((name, shadows_keyword)) = self.read_macro_name(MacroUse::Define) else {
             return;
         };
+        if !self.macros.contains_key(&name.spelling) {
+            self.emit_final_macro_warning(&name, false);
+        }
         let keep_macro_comments = self.options.keep_macro_comments;
         self.set_directive_comment_retention(keep_macro_comments);
         let definition = self.read_macro_definition(&name);
@@ -13038,6 +13789,7 @@ impl<'files> Preprocessor<'files> {
         }
         let definition = Rc::new(definition);
         if let Some(existing) = self.macros.get(&name.spelling).cloned() {
+            self.emit_final_macro_warning(&name, false);
             if !self.in_system_header(name.site) {
                 if !existing.used.get() && existing.warn_if_unused.get() {
                     self.report(Message::MacroNotUsed, existing.defined_at, Vec::new());
@@ -13387,6 +14139,7 @@ impl<'files> Preprocessor<'files> {
             return;
         };
         self.check_end_of_directive("undef", false);
+        self.emit_final_macro_warning(&name, true);
         if let Some(existing) = self.macros.get(&name.spelling).cloned() {
             if !existing.used.get() && existing.warn_if_unused.get() {
                 self.report(Message::MacroNotUsed, existing.defined_at, Vec::new());
@@ -13429,6 +14182,7 @@ impl<'files> Preprocessor<'files> {
             self.skip_excluded_block(directive.site, false, false);
             return;
         };
+        self.emit_macro_expansion_warnings(&name, true);
         self.check_end_of_directive(if negated { "ifndef" } else { "ifdef" }, false);
         let defined = self.macros.get(&name.spelling).cloned();
         let read_before = self.directive_read_before || !negated;
@@ -13775,6 +14529,7 @@ impl<'files> Preprocessor<'files> {
                             continue;
                         };
                         self.set_raw(false);
+                        self.emit_macro_expansion_warnings(&macro_name, false);
                         self.check_end_of_directive(
                             if is_elifdef { "elifdef" } else { "elifndef" },
                             false,
@@ -14231,6 +14986,8 @@ impl<'files> Preprocessor<'files> {
         let definition = self.macros.get(&peek.spelling).cloned();
         let value = ExpressionValue::truth(definition.is_some());
         self.defined_state = Some((false, peek.spelling.clone()));
+        let special = matches!(&*peek.spelling, b"INFINITY" | b"NAN");
+        self.emit_macro_expansion_warnings(&peek, special);
         if let Some(definition) = &definition {
             if live {
                 self.mark_used(definition);
@@ -17406,14 +18163,10 @@ impl<'files> Preprocessor<'files> {
                     "assume_nonnull" | "arc_cf_code_audited" if name == "clang" => {
                         self.pragma_audit(&second)
                     }
-                    "deprecated"
-                    | "restrict_expansion"
-                    | "final"
-                    | "unsafe_buffer_usage"
-                    | "module"
-                    | "__set_pp_state"
-                        if name == "clang" =>
-                    {
+                    "deprecated" | "restrict_expansion" | "final" if name == "clang" => {
+                        self.pragma_macro_annotation(&sub)
+                    }
+                    "unsafe_buffer_usage" | "module" | "__set_pp_state" if name == "clang" => {
                         if self.in_directive() {
                             self.discard_until_end_of_directive();
                         }
@@ -17447,6 +18200,136 @@ impl<'files> Preprocessor<'files> {
                 self.unknown_pragma("#pragma", first, known, expand);
             }
         }
+    }
+
+    fn pragma_macro_annotation(&mut self, kind: &str) {
+        let open = self.lex();
+        if open.kind != TokenKind::LeftParen {
+            self.report_token(Message::Expected, &open, vec!["(".to_string()]);
+            return;
+        }
+        let name = self.lex_unexpanded();
+        if name.kind != TokenKind::Identifier {
+            self.report_token(Message::Expected, &name, vec!["identifier".to_string()]);
+            return;
+        }
+        if !self.macros.contains_key(&name.spelling) {
+            self.report_token(
+                Message::VisibilityNonMacro,
+                &name,
+                vec![quoted(&name.spelling)],
+            );
+            return;
+        }
+        let mut token = self.lex();
+        let mut message = Vec::new();
+        if kind != "final" && token.kind == TokenKind::Comma {
+            token = self.lex();
+            let context = format!("#pragma clang {kind}");
+            match self.finish_string_literal(&mut token, &context, true) {
+                Some(value) => message = value,
+                None => return,
+            }
+        }
+        if token.kind != TokenKind::RightParen {
+            self.report_token(Message::Expected, &token, vec![")".to_string()]);
+            return;
+        }
+        let annotations = self
+            .macro_annotations
+            .entry(name.spelling.clone())
+            .or_default();
+        match kind {
+            "deprecated" => annotations.deprecated = Some((message, token.site)),
+            "restrict_expansion" => annotations.restricted = Some((message, token.site)),
+            _ => annotations.final_place = Some(token.site),
+        }
+    }
+
+    fn emit_macro_expansion_warnings(&mut self, identifier: &Token, is_ifndef: bool) {
+        let annotations = self.macro_annotations.get(&identifier.spelling).cloned();
+        if let Some(annotations) = annotations {
+            if let Some((message, place)) = annotations.deprecated {
+                self.report_annotated_use(
+                    Message::PragmaDeprecatedMacroUse,
+                    identifier,
+                    &message,
+                    place,
+                    "0",
+                );
+            }
+            if let Some((message, place)) = annotations.restricted {
+                if !self.in_main_file(identifier.site) {
+                    self.report_annotated_use(
+                        Message::PragmaRestrictExpansionMacroUse,
+                        identifier,
+                        &message,
+                        place,
+                        "1",
+                    );
+                }
+            }
+        }
+        if !is_ifndef {
+            if &*identifier.spelling == b"INFINITY" && self.options.no_honor_infinities {
+                self.report_token(
+                    Message::NanInfinityDisabled,
+                    identifier,
+                    vec!["0".to_string(), "1".to_string()],
+                );
+            }
+            if &*identifier.spelling == b"NAN" && self.options.no_honor_nans {
+                self.report_token(
+                    Message::NanInfinityDisabled,
+                    identifier,
+                    vec!["1".to_string(), "1".to_string()],
+                );
+            }
+        }
+    }
+
+    fn report_annotated_use(
+        &mut self,
+        message: Message,
+        identifier: &Token,
+        text: &[u8],
+        place: Place,
+        selection: &str,
+    ) {
+        let arguments = if text.is_empty() {
+            vec![quoted(&identifier.spelling), "0".to_string()]
+        } else {
+            vec![
+                quoted(&identifier.spelling),
+                "1".to_string(),
+                String::from_utf8_lossy(text).into_owned(),
+            ]
+        };
+        self.report_token(message, identifier, arguments);
+        self.report(
+            Message::MacroAnnotationNote,
+            place,
+            vec![selection.to_string()],
+        );
+    }
+
+    fn emit_final_macro_warning(&mut self, identifier: &Token, undefining: bool) {
+        let Some(place) = self
+            .macro_annotations
+            .get(&identifier.spelling)
+            .and_then(|annotations| annotations.final_place)
+        else {
+            return;
+        };
+        self.report_token(
+            Message::PragmaFinalMacro,
+            identifier,
+            vec![
+                quoted(&identifier.spelling),
+                if undefining { "0" } else { "1" }.to_string(),
+            ],
+        );
+        self.report(Message::MacroAnnotationNote, place, vec!["2".to_string()]);
     }
 
     fn parser_pragmas_active(&self) -> bool {
@@ -18559,7 +19442,10 @@ impl<'files> Preprocessor<'files> {
 
     fn feature_operation(&mut self, builtin: Builtin, token: &mut Token, lexed: &mut bool) -> u64 {
         match builtin {
-            Builtin::IsIdentifier => u64::from(token.kind == TokenKind::Identifier),
+            Builtin::IsIdentifier => u64::from(
+                token.kind == TokenKind::Identifier
+                    && keyword_kind(&self.language, &token.spelling).is_none(),
+            ),
             Builtin::HasFeature | Builtin::HasExtension => {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
@@ -20105,6 +20991,7 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     let mut microsoft = false;
     let mut declspec: Option<bool> = None;
     let mut traditional = false;
+    let mut gnu_keywords: Option<bool> = None;
     let mut after_directories: Vec<SearchDirectory> = Vec::new();
     let options = &mut invocation.preprocessor;
     let mut index = 0usize;
@@ -20167,8 +21054,6 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
             | "-fno-builtin"
             | "-ffile-reproducible"
             | "-fno-file-reproducible"
-            | "-fgnu-keywords"
-            | "-fno-gnu-keywords"
             | "-fno-diagnostics-fixit-info"
             | "-fdiagnostics-parseable-fixits"
             | "-fno-common"
@@ -20179,6 +21064,8 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
             | "-fno-integrated-cc1"
             | "-fgnuc-version=0" => {}
             "-fno-caret-diagnostics" => invocation.show_source = false,
+            "-fgnu-keywords" => gnu_keywords = Some(true),
+            "-fno-gnu-keywords" => gnu_keywords = Some(false),
             "-fno-signed-wchar" => target_options.wchar_signed = false,
             "-fsigned-wchar" => target_options.wchar_signed = true,
             "-fexceptions" => options.exceptions = true,
@@ -20408,6 +21295,9 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     language.microsoft_extensions = microsoft;
     language.declspec_keyword = declspec.unwrap_or(microsoft);
     language.traditional = traditional;
+    if let Some(value) = gnu_keywords {
+        language.gnu_keywords = value;
+    }
     language.char_is_signed = signed_char.unwrap_or(true);
     language.preprocessed_output = invocation.action == FrontendAction::PreprocessOnly
         || (invocation.action == FrontendAction::Preprocess && !invocation.dump_macros);

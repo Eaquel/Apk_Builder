@@ -6,6 +6,12 @@
       "passed": 605473,
       "total": 605473
     },
+    "clang-c-lexer": {
+      "failed": 1,
+      "out_of_scope": 126,
+      "passed": 14,
+      "total": 141
+    },
     "clang-c-preprocessor": {
       "failed": 2,
       "out_of_scope": 252,
