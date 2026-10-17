@@ -46,7 +46,7 @@ Bu bileşenlerin doğruluğu, LLVM/LLD/GCC'nin kendi test paketleriyle ölçül�
 | `Test/Builder_Test_Baseline.json` | Ratchet paketlerinin taban çizgisi (`--record` ile yazılır, geçen sayı asla düşmez). |
 | `Tests/` | Denetimlerin çıktı klasörü, commit'lenmez. |
 
-## 3. Tamamlananlar (yaklaşık %20)
+## 3. Tamamlananlar (yaklaşık %24)
 
 - Çekirdek: derleme grafiği, önbellek, VFS, Gradle/Maven, kaynak derleme,
   Dex yazma, APK/AAB paketleme, imzalama, `release`/`core`/`bridge`/`installable`
@@ -56,19 +56,21 @@ Bu bileşenlerin doğruluğu, LLVM/LLD/GCC'nin kendi test paketleriyle ölçül�
 - TableGen: `tablegen-lit` 190/456, `tablegen-oracle` 152/459 (kapsam dışılar listeli, 0 hata); dört komut tablosu.
 - Bağlayıcı: `lld-elf` 1375/2056, `lld-coff` 341/565 (0 hata).
 - x86 (Claude-A, sürüyor): kodlayıcı ve AT&T/Intel yazıcı tamam; AT&T ve Intel assembler
-  tamam; `mc-x86` 510/642 (3 hata `X86InstComments`, 129 kapsam dışı: nesne dosyası çıktısı, COFF/Mach-O/LFI).
+  tamam; karıştırma/FMA/PTERNLOG/FPCLASS yorumları tamam; `mc-x86` 513/642, kapsam içi %100 (129 kapsam dışı:
+  nesne dosyası çıktısı, COFF/Mach-O/LFI). Disassembler (`X86_64.rs` içinde `decoder` modülü: LLVM
+  X86DisassemblerTables/RecognizableInstr tabloları tablolardan üretilir, X86DisassemblerDecoder portu,
+  `llvm-mc --disassemble/--hex/--mdis`) tamam; `mc-x86-disassembler` 188/188, kapsam dışı yok;
+  kodla→çöz→aynı komut gidiş-dönüş testi var.
 
 ## 4. Kalan işler (öncelik sırasıyla)
 
-1. x86 assembler: `X86InstComments` (karıştırma/FMA/imm yorumları), `mc-x86` %100 (kapsam içi).
-2. x86 disassembler ve `mc-x86-disassembler` paketi %100; kodla→çöz→aynı komut gidiş-dönüş testi.
-3. Assembler'dan ELF/COFF nesne dosyası çıktısı (parçalar, gevşetme, düzeltmeler,
+1. Assembler'dan ELF/COFF nesne dosyası çıktısı (parçalar, gevşetme, düzeltmeler,
    relocation, `.eh_frame`), bizim bağlayıcıyla bağlayıp bu makinede çalıştırma testi.
-4. ARMv7/ARMv8 kodlayıcı + assembler + disassembler (`Armv7.rs`, `Armv8.rs`, tablolar hazır).
-5. Omni IR → makine kodu arka ucu (komut seçimi, yazmaç ayırma, çağrı kuralları) x86_64 ve ARMv8 için.
-6. C/C++ ön yüzü (`Cpp.rs`) ve Rust ön yüzü (`Rust.rs`).
-7. Kotlin/Java derleyicilerinin kapsamını büyütmek (`kotlin-omni` kapsam dışılarını azaltmak).
-8. Uygulama (`Builder.kt`) ve yerel köprü: derleyicilerin arayüze bağlanması, cihazda uçtan uca APK.
+2. ARMv7/ARMv8 kodlayıcı + assembler + disassembler (`Armv7.rs`, `Armv8.rs`, tablolar hazır).
+3. Omni IR → makine kodu arka ucu (komut seçimi, yazmaç ayırma, çağrı kuralları) x86_64 ve ARMv8 için.
+4. C/C++ ön yüzü (`Cpp.rs`) ve Rust ön yüzü (`Rust.rs`).
+5. Kotlin/Java derleyicilerinin kapsamını büyütmek (`kotlin-omni` kapsam dışılarını azaltmak).
+6. Uygulama (`Builder.kt`) ve yerel köprü: derleyicilerin arayüze bağlanması, cihazda uçtan uca APK.
 
 ## 5. Önerilen iş bölümü
 
@@ -109,7 +111,7 @@ python3 Test/Builder_Test.py layout comments templates dependencies strings spee
 PATH=/usr/lib/jvm/java-25-openjdk-amd64/bin:$PATH cargo test --release   # tüm testler, ~40 dk
 cargo clippy --locked --all-targets -- -D warnings
 cargo fmt
-python3 Test/Builder_Test.py assembler            # mc-x86 ratchet paketi
+python3 Test/Builder_Test.py assembler            # mc-x86 ve mc-x86-disassembler ratchet paketleri
 python3 Test/Builder_Test.py linker               # lld-elf, lld-coff
 python3 Test/Builder_Test.py <denetim> --record   # taban çizgisini yükselt
 cargo test --lib -- --ignored --exact tests::table_gen::write_tables_into_the_tree   # tabloları yeniden üret
@@ -149,8 +151,8 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 ## 9. Güncel durum
 
 - Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
-- Claude-A: x86 assembler. Intel girdi sözdizimi ve `-masm-integers` tamam; `mc-x86` 510/642 (129 kapsam dışı,
-  3 hata `X86InstComments` bekliyor). Sıradaki adım `X86InstComments`, ardından disassembler ve nesne dosyası çıktısı.
+- Claude-A: x86 assembler ve disassembler tamam: `mc-x86` 513/642 (kapsam içi %100, 129 kapsam dışı),
+  `mc-x86-disassembler` 188/188. Sıradaki adım assembler'dan ELF/COFF nesne dosyası çıktısı.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.

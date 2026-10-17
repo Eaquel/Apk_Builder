@@ -107,7 +107,7 @@ jobs:
           llvm-tblgen --version
 
       - name: Hold every reference suite, oracle comparison and determinism check
-        run: ./Test/Builder_Test.py --strict suites differential determinism
+        run: ./Test/Builder_Test.py --strict suites differential determinism assembler
 
   apk:
     name: Builder APK
