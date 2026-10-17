@@ -36,6 +36,12 @@
       "passed": 513,
       "total": 642
     },
+    "mc-x86-disassembler": {
+      "failed": 0,
+      "out_of_scope": 0,
+      "passed": 188,
+      "total": 188
+    },
     "regex-oracle": {
       "failed": 0,
       "out_of_scope": 2,

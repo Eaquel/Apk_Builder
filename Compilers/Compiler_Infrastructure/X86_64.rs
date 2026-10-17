@@ -4060,6 +4060,7 @@ pub struct Printer<'t> {
     pub tables: &'static PrintTables,
     pub comments: std::cell::RefCell<Option<String>>,
     pub custom_comment: std::cell::Cell<bool>,
+    pub markup: bool,
 }
 
 fn hexadecimal(value: i64) -> String {
@@ -4235,6 +4236,26 @@ impl<'t> Printer<'t> {
             tables: print_tables(target, options.syntax),
             comments: std::cell::RefCell::new(None),
             custom_comment: std::cell::Cell::new(false),
+            markup: false,
+        }
+    }
+
+    pub fn with_markup(mut self, markup: bool) -> Printer<'t> {
+        self.markup = markup;
+        self
+    }
+
+    fn open_markup(&self, kind: &str, out: &mut String) {
+        if self.markup {
+            out.push('<');
+            out.push_str(kind);
+            out.push(':');
+        }
+    }
+
+    fn close_markup(&self, out: &mut String) {
+        if self.markup {
+            out.push('>');
         }
     }
 
@@ -4283,30 +4304,37 @@ impl<'t> Printer<'t> {
     }
 
     fn register_text(&self, register: RegisterId) -> String {
+        let mut text = String::new();
+        self.open_markup("reg", &mut text);
         if self.att() {
-            format!("%{}", self.target.register_name(register))
-        } else {
-            self.target.register_name(register).to_string()
+            text.push('%');
         }
+        text.push_str(self.target.register_name(register));
+        self.close_markup(&mut text);
+        text
     }
 
     fn operand(&self, instruction: &MachineInstruction, index: usize, out: &mut String) {
         match instruction.operand(index) {
             MachineOperand::Register(register) => out.push_str(&self.register_text(*register)),
             MachineOperand::Immediate(value) => {
+                self.open_markup("imm", out);
                 if self.att() {
                     out.push('$');
                     self.immediate_comment(*value);
                 }
                 out.push_str(&self.format_immediate(*value));
+                self.close_markup(out);
             }
             MachineOperand::Expression(expression) => {
+                self.open_markup("imm", out);
                 if self.att() {
                     out.push('$');
                 } else {
                     out.push_str("offset ");
                 }
                 out.push_str(&self.expression(expression));
+                self.close_markup(out);
             }
         }
     }
@@ -4323,6 +4351,7 @@ impl<'t> Printer<'t> {
         let index = instruction.register_at(operand + ADDRESS_INDEX);
         let scale = instruction.immediate_at(operand + ADDRESS_SCALE);
         let displacement = instruction.operand(operand + ADDRESS_DISPLACEMENT);
+        self.open_markup("mem", out);
         if self.att() {
             self.optional_segment(instruction, operand + ADDRESS_SEGMENT, out);
             match displacement {
@@ -4353,11 +4382,14 @@ impl<'t> Printer<'t> {
                     self.operand(instruction, operand + ADDRESS_INDEX, out);
                     if scale != 1 {
                         out.push(',');
+                        self.open_markup("imm", out);
                         out.push_str(&scale.to_string());
+                        self.close_markup(out);
                     }
                 }
                 out.push(')');
             }
+            self.close_markup(out);
             return;
         }
         self.optional_segment(instruction, operand + ADDRESS_SEGMENT, out);
@@ -4372,7 +4404,9 @@ impl<'t> Printer<'t> {
                 out.push_str(" + ");
             }
             if scale != 1 || base == NO_REGISTER {
+                self.open_markup("imm", out);
                 out.push_str(&scale.to_string());
+                self.close_markup(out);
                 out.push('*');
             }
             self.operand(instruction, operand + ADDRESS_INDEX, out);
@@ -4402,6 +4436,7 @@ impl<'t> Printer<'t> {
             MachineOperand::Register(_) => {}
         }
         out.push(']');
+        self.close_markup(out);
     }
 
     fn memory_size_word(method: &str) -> &'static str {
@@ -4432,9 +4467,13 @@ impl<'t> Printer<'t> {
                     if self.options.mode != Mode::Bits64 {
                         target &= 0xffff_ffff;
                     }
+                    self.open_markup("target", out);
                     out.push_str(&format!("0x{target:x}"));
+                    self.close_markup(out);
                 } else {
+                    self.open_markup("imm", out);
                     out.push_str(&self.format_immediate(*value));
+                    self.close_markup(out);
                 }
             }
             MachineOperand::Expression(Expression::Constant(value)) => {
@@ -4477,28 +4516,34 @@ impl<'t> Printer<'t> {
                 if !self.att() {
                     out.push_str(size_word);
                 }
+                self.open_markup("mem", out);
                 self.optional_segment(instruction, index + 1, out);
                 out.push(if self.att() { '(' } else { '[' });
                 self.operand(instruction, index, out);
                 out.push(if self.att() { ')' } else { ']' });
+                self.close_markup(out);
             }
             "printDstIdx8" | "printDstIdx16" | "printDstIdx32" | "printDstIdx64" => {
                 if self.att() {
+                    self.open_markup("mem", out);
                     out.push_str("%es:(");
                     self.operand(instruction, index, out);
                     out.push(')');
                 } else {
                     out.push_str(size_word);
+                    self.open_markup("mem", out);
                     out.push_str("es:[");
                     self.operand(instruction, index, out);
                     out.push(']');
                 }
+                self.close_markup(out);
             }
             "printMemOffs8" | "printMemOffs16" | "printMemOffs32" | "printMemOffs64"
             | "printMemOffset" => {
                 if !self.att() {
                     out.push_str(size_word);
                 }
+                self.open_markup("mem", out);
                 self.optional_segment(instruction, index + 1, out);
                 if !self.att() {
                     out.push('[');
@@ -4522,13 +4567,16 @@ impl<'t> Printer<'t> {
                 if !self.att() {
                     out.push(']');
                 }
+                self.close_markup(out);
             }
             "printU8Imm" => match instruction.operand(index) {
                 MachineOperand::Immediate(value) => {
+                    self.open_markup("imm", out);
                     if self.att() {
                         out.push('$');
                     }
                     out.push_str(&self.format_immediate(value & 0xff));
+                    self.close_markup(out);
                 }
                 MachineOperand::Expression(expression) => {
                     if self.att() {
@@ -4541,7 +4589,9 @@ impl<'t> Printer<'t> {
             },
             "printSTiRegOperand" => {
                 if self.target.registers[instruction.register_at(index) as usize].record == "ST0" {
+                    self.open_markup("reg", out);
                     out.push_str(if self.att() { "%st(0)" } else { "st(0)" });
+                    self.close_markup(out);
                 } else {
                     self.operand(instruction, index, out);
                 }
@@ -10174,6 +10224,7 @@ pub struct AssemblerOptions {
     pub comment_column: usize,
     pub include_directories: Vec<String>,
     pub masm_integers: bool,
+    pub markup: bool,
 }
 
 impl AssemblerOptions {
@@ -10201,6 +10252,7 @@ impl AssemblerOptions {
             comment_column: 40,
             include_directories: Vec::new(),
             masm_integers: false,
+            markup: false,
         }
     }
 }
@@ -18123,6 +18175,7 @@ pub struct TextStreamer {
     pub show_encoding: bool,
     pub hexadecimal_immediates: bool,
     pub comment_column: usize,
+    pub markup: bool,
     output: String,
     column: usize,
     comments: String,
@@ -18146,6 +18199,7 @@ impl TextStreamer {
             show_encoding,
             hexadecimal_immediates,
             comment_column,
+            markup: false,
             output: String::new(),
             column: 0,
             comments: String::new(),
@@ -18917,7 +18971,7 @@ impl Streamer for TextStreamer {
                 branch_as_address: false,
             },
         );
-        let printer = printer.with_comments();
+        let printer = printer.with_comments().with_markup(self.markup);
         let text = printer.print(instruction, 0);
         self.comments.push_str(&printer.take_comments());
         self.write(&text);
@@ -19525,6 +19579,223 @@ pub fn assemble_source(
     })
 }
 
+fn skip_to_byte_token(text: &[u8], position: &mut usize) -> bool {
+    loop {
+        if *position >= text.len() {
+            return false;
+        }
+        let skipped = text[*position..]
+            .iter()
+            .position(|byte| !matches!(byte, b' ' | b'\t' | b'\r' | b'\n' | b','));
+        match skipped {
+            Some(0) => {}
+            Some(count) => {
+                *position += count;
+                continue;
+            }
+            None => {
+                *position = text.len();
+                continue;
+            }
+        }
+        if text[*position] == b'#' {
+            *position = text[*position..]
+                .iter()
+                .position(|byte| *byte == b'\n')
+                .map(|count| *position + count)
+                .unwrap_or(text.len());
+            continue;
+        }
+        return true;
+    }
+}
+
+fn byte_token_value(token: &[u8]) -> Option<u32> {
+    let text = std::str::from_utf8(token).ok()?;
+    let (digits, radix) = if let Some(rest) = text.strip_prefix("0x").or(text.strip_prefix("0X")) {
+        (rest, 16)
+    } else if let Some(rest) = text.strip_prefix("0b").or(text.strip_prefix("0B")) {
+        (rest, 2)
+    } else if let Some(rest) = text.strip_prefix("0o") {
+        (rest, 8)
+    } else if text.len() > 1 && text.starts_with('0') && text.as_bytes()[1].is_ascii_digit() {
+        (&text[1..], 8)
+    } else {
+        (text, 10)
+    };
+    if digits.is_empty() || !digits.chars().all(|character| character.is_digit(radix)) {
+        return None;
+    }
+    u32::from_str_radix(digits, radix).ok()
+}
+
+pub fn disassemble_source(
+    options: &AssemblerOptions,
+    source: &[u8],
+    hexadecimal_bytes: bool,
+) -> Result<AssemblyResult, Diagnostic> {
+    let target = target()?;
+    let triple = TargetTriple::parse(&options.triple);
+    let mode = triple.mode;
+    let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);
+    let mut streamer: Box<dyn Streamer> = match options.output {
+        OutputKind::Assembly => {
+            let mut text = TextStreamer::new(
+                target,
+                output_syntax,
+                options.show_encoding,
+                options.hexadecimal_immediates,
+                options.comment_column,
+            );
+            text.markup = options.markup;
+            Box::new(text)
+        }
+        _ => Box::new(NullStreamer::new()),
+    };
+    let mut context = AssemblyContext::new(triple);
+    let at = |position: usize| SourceLocation {
+        buffer: 0,
+        position,
+    };
+    let mut failed = false;
+    let mut position = 0usize;
+    let mut atomic = false;
+    while skip_to_byte_token(source, &mut position) {
+        if source[position] == b'[' {
+            if atomic {
+                context.report(
+                    MessageKind::Error,
+                    Some(at(position)),
+                    "nested atomic blocks make no sense",
+                );
+                failed = true;
+            }
+            atomic = true;
+            position += 1;
+            continue;
+        }
+        if source[position] == b']' {
+            if !atomic {
+                context.report(
+                    MessageKind::Error,
+                    Some(at(position)),
+                    "attempt to close atomic block without opening",
+                );
+                failed = true;
+            }
+            atomic = false;
+            position += 1;
+            continue;
+        }
+        let mut bytes: Vec<u8> = Vec::new();
+        let mut origins: Vec<usize> = Vec::new();
+        while skip_to_byte_token(source, &mut position) {
+            if source[position] == b'[' || source[position] == b']' {
+                break;
+            }
+            let length = source[position..]
+                .iter()
+                .position(|byte| {
+                    matches!(
+                        byte,
+                        b' ' | b'\t' | b'\n' | b'\r' | b',' | b'#' | b'[' | b']'
+                    )
+                })
+                .unwrap_or(source.len() - position);
+            let token = &source[position..position + length];
+            if hexadecimal_bytes {
+                if length < 2 {
+                    context.report(
+                        MessageKind::Error,
+                        Some(at(position)),
+                        "expected two hex digits",
+                    );
+                    position += length;
+                    failed = true;
+                    break;
+                }
+                let digit = |byte: u8| (byte as char).to_digit(16);
+                let (Some(high), Some(low)) = (digit(token[0]), digit(token[1])) else {
+                    context.report(
+                        MessageKind::Error,
+                        Some(at(position)),
+                        "invalid input token",
+                    );
+                    position += 2;
+                    failed = true;
+                    break;
+                };
+                bytes.push((high * 16 + low) as u8);
+                origins.push(position);
+                position += 2;
+                continue;
+            }
+            match byte_token_value(token) {
+                Some(value) if value <= 255 => {
+                    bytes.push(value as u8);
+                    origins.push(position);
+                    position += length;
+                }
+                _ => {
+                    context.report(
+                        MessageKind::Error,
+                        Some(at(position)),
+                        "invalid input token",
+                    );
+                    position = source[position..]
+                        .iter()
+                        .position(|byte| *byte == b'\n')
+                        .map(|count| position + count)
+                        .unwrap_or(source.len());
+                    bytes.clear();
+                    origins.clear();
+                    failed = true;
+                }
+            }
+        }
+        let mut index = 0usize;
+        while index < bytes.len() {
+            let (decoded, size) = decoder::decode_instruction(target, mode, &bytes[index..]);
+            match decoded {
+                Some(instruction) => {
+                    streamer.emit_instruction(&mut context, &instruction, mode, at(origins[index]));
+                    index += size;
+                }
+                None => {
+                    context.report(
+                        MessageKind::Warning,
+                        Some(at(origins[index])),
+                        "invalid instruction encoding",
+                    );
+                    if atomic {
+                        failed = true;
+                        break;
+                    }
+                    index += size.max(1);
+                }
+            }
+        }
+    }
+    if atomic {
+        context.report(
+            MessageKind::Error,
+            Some(at(source.len())),
+            "unclosed atomic block",
+        );
+        failed = true;
+    }
+    Ok(AssemblyResult {
+        output: streamer.output(),
+        messages: std::mem::take(&mut context.messages),
+        buffers: vec![SourceBuffer {
+            name: options.source_name.clone(),
+            text: source.to_vec(),
+            include_location: None,
+        }],
+        failed: failed || context.had_error,
+    })
+}
+
 pub fn message_position(
     buffers: &[SourceBuffer],
     location: SourceLocation,
@@ -19650,4 +19921,4455 @@ pub fn render_messages(result: &AssemblyResult) -> Vec<Diagnostic> {
         diagnostics.push(diagnostic);
     }
     diagnostics
+}
+
+pub mod decoder {
+    use super::*;
+
+    const DECODER_CONTEXTS: &[(&str, u8)] = &[
+        ("IC", 0),
+        ("IC_64BIT", 1),
+        ("IC_OPSIZE", 3),
+        ("IC_ADSIZE", 3),
+        ("IC_OPSIZE_ADSIZE", 4),
+        ("IC_XD", 2),
+        ("IC_XS", 2),
+        ("IC_XD_OPSIZE", 3),
+        ("IC_XS_OPSIZE", 3),
+        ("IC_XD_ADSIZE", 3),
+        ("IC_XS_ADSIZE", 3),
+        ("IC_64BIT_REXW", 5),
+        ("IC_64BIT_REXW_ADSIZE", 6),
+        ("IC_64BIT_OPSIZE", 3),
+        ("IC_64BIT_ADSIZE", 3),
+        ("IC_64BIT_OPSIZE_ADSIZE", 4),
+        ("IC_64BIT_XD", 6),
+        ("IC_64BIT_XS", 6),
+        ("IC_64BIT_XD_OPSIZE", 3),
+        ("IC_64BIT_XS_OPSIZE", 3),
+        ("IC_64BIT_XD_ADSIZE", 3),
+        ("IC_64BIT_XS_ADSIZE", 3),
+        ("IC_64BIT_REXW_XS", 7),
+        ("IC_64BIT_REXW_XD", 7),
+        ("IC_64BIT_REXW_OPSIZE", 8),
+        ("IC_64BIT_REX2", 2),
+        ("IC_64BIT_REX2_REXW", 3),
+        ("IC_VEX", 1),
+        ("IC_VEX_XS", 2),
+        ("IC_VEX_XD", 2),
+        ("IC_VEX_OPSIZE", 2),
+        ("IC_VEX_W", 3),
+        ("IC_VEX_W_XS", 4),
+        ("IC_VEX_W_XD", 4),
+        ("IC_VEX_W_OPSIZE", 4),
+        ("IC_VEX_L", 3),
+        ("IC_VEX_L_XS", 4),
+        ("IC_VEX_L_XD", 4),
+        ("IC_VEX_L_OPSIZE", 4),
+        ("IC_VEX_L_W", 4),
+        ("IC_VEX_L_W_XS", 5),
+        ("IC_VEX_L_W_XD", 5),
+        ("IC_VEX_L_W_OPSIZE", 5),
+        ("IC_EVEX", 1),
+        ("IC_EVEX_NF", 2),
+        ("IC_EVEX_XS", 2),
+        ("IC_EVEX_XS_ADSIZE", 3),
+        ("IC_EVEX_XD", 2),
+        ("IC_EVEX_XD_ADSIZE", 3),
+        ("IC_EVEX_OPSIZE", 2),
+        ("IC_EVEX_OPSIZE_NF", 3),
+        ("IC_EVEX_OPSIZE_ADSIZE", 3),
+        ("IC_EVEX_W", 3),
+        ("IC_EVEX_W_NF", 4),
+        ("IC_EVEX_W_XS", 4),
+        ("IC_EVEX_W_XD", 4),
+        ("IC_EVEX_W_OPSIZE", 4),
+        ("IC_EVEX_L", 3),
+        ("IC_EVEX_L_XS", 4),
+        ("IC_EVEX_L_XD", 4),
+        ("IC_EVEX_L_OPSIZE", 4),
+        ("IC_EVEX_L_W", 3),
+        ("IC_EVEX_L_W_XS", 4),
+        ("IC_EVEX_L_W_XD", 4),
+        ("IC_EVEX_L_W_OPSIZE", 4),
+        ("IC_EVEX_L2", 3),
+        ("IC_EVEX_L2_XS", 4),
+        ("IC_EVEX_L2_XD", 4),
+        ("IC_EVEX_L2_OPSIZE", 4),
+        ("IC_EVEX_L2_W", 3),
+        ("IC_EVEX_L2_W_XS", 4),
+        ("IC_EVEX_L2_W_XD", 4),
+        ("IC_EVEX_L2_W_OPSIZE", 4),
+        ("IC_EVEX_K", 1),
+        ("IC_EVEX_XS_K", 2),
+        ("IC_EVEX_XD_K", 2),
+        ("IC_EVEX_OPSIZE_K", 2),
+        ("IC_EVEX_W_K", 3),
+        ("IC_EVEX_W_XS_K", 4),
+        ("IC_EVEX_W_XD_K", 4),
+        ("IC_EVEX_W_OPSIZE_K", 4),
+        ("IC_EVEX_L_K", 3),
+        ("IC_EVEX_L_XS_K", 4),
+        ("IC_EVEX_L_XD_K", 4),
+        ("IC_EVEX_L_OPSIZE_K", 4),
+        ("IC_EVEX_L_W_K", 3),
+        ("IC_EVEX_L_W_XS_K", 4),
+        ("IC_EVEX_L_W_XD_K", 4),
+        ("IC_EVEX_L_W_OPSIZE_K", 4),
+        ("IC_EVEX_L2_K", 3),
+        ("IC_EVEX_L2_XS_K", 4),
+        ("IC_EVEX_L2_XD_K", 4),
+        ("IC_EVEX_L2_OPSIZE_K", 4),
+        ("IC_EVEX_L2_W_K", 3),
+        ("IC_EVEX_L2_W_XS_K", 4),
+        ("IC_EVEX_L2_W_XD_K", 4),
+        ("IC_EVEX_L2_W_OPSIZE_K", 4),
+        ("IC_EVEX_B", 1),
+        ("IC_EVEX_B_NF", 2),
+        ("IC_EVEX_XS_B", 2),
+        ("IC_EVEX_XD_B", 2),
+        ("IC_EVEX_OPSIZE_B", 2),
+        ("IC_EVEX_OPSIZE_B_NF", 3),
+        ("IC_EVEX_W_B", 3),
+        ("IC_EVEX_W_B_NF", 4),
+        ("IC_EVEX_W_XS_B", 4),
+        ("IC_EVEX_W_XD_B", 4),
+        ("IC_EVEX_W_OPSIZE_B", 4),
+        ("IC_EVEX_L_B", 3),
+        ("IC_EVEX_L_XS_B", 4),
+        ("IC_EVEX_L_XD_B", 4),
+        ("IC_EVEX_L_OPSIZE_B", 4),
+        ("IC_EVEX_L_W_B", 3),
+        ("IC_EVEX_L_W_XS_B", 4),
+        ("IC_EVEX_L_W_XD_B", 4),
+        ("IC_EVEX_L_W_OPSIZE_B", 4),
+        ("IC_EVEX_L2_B", 3),
+        ("IC_EVEX_L2_XS_B", 4),
+        ("IC_EVEX_L2_XD_B", 4),
+        ("IC_EVEX_L2_OPSIZE_B", 4),
+        ("IC_EVEX_L2_W_B", 3),
+        ("IC_EVEX_L2_W_XS_B", 4),
+        ("IC_EVEX_L2_W_XD_B", 4),
+        ("IC_EVEX_L2_W_OPSIZE_B", 4),
+        ("IC_EVEX_K_B", 1),
+        ("IC_EVEX_XS_K_B", 2),
+        ("IC_EVEX_XD_K_B", 2),
+        ("IC_EVEX_OPSIZE_K_B", 2),
+        ("IC_EVEX_W_K_B", 3),
+        ("IC_EVEX_W_XS_K_B", 4),
+        ("IC_EVEX_W_XD_K_B", 4),
+        ("IC_EVEX_W_OPSIZE_K_B", 4),
+        ("IC_EVEX_L_K_B", 3),
+        ("IC_EVEX_L_XS_K_B", 4),
+        ("IC_EVEX_L_XD_K_B", 4),
+        ("IC_EVEX_L_OPSIZE_K_B", 4),
+        ("IC_EVEX_L_W_K_B", 3),
+        ("IC_EVEX_L_W_XS_K_B", 4),
+        ("IC_EVEX_L_W_XD_K_B", 4),
+        ("IC_EVEX_L_W_OPSIZE_K_B", 4),
+        ("IC_EVEX_L2_K_B", 3),
+        ("IC_EVEX_L2_XS_K_B", 4),
+        ("IC_EVEX_L2_XD_K_B", 4),
+        ("IC_EVEX_L2_OPSIZE_K_B", 4),
+        ("IC_EVEX_L2_W_K_B", 3),
+        ("IC_EVEX_L2_W_XS_K_B", 4),
+        ("IC_EVEX_L2_W_XD_K_B", 4),
+        ("IC_EVEX_L2_W_OPSIZE_K_B", 4),
+        ("IC_EVEX_KZ_B", 1),
+        ("IC_EVEX_XS_KZ_B", 2),
+        ("IC_EVEX_XD_KZ_B", 2),
+        ("IC_EVEX_OPSIZE_KZ_B", 2),
+        ("IC_EVEX_W_KZ_B", 3),
+        ("IC_EVEX_W_XS_KZ_B", 4),
+        ("IC_EVEX_W_XD_KZ_B", 4),
+        ("IC_EVEX_W_OPSIZE_KZ_B", 4),
+        ("IC_EVEX_L_KZ_B", 3),
+        ("IC_EVEX_L_XS_KZ_B", 4),
+        ("IC_EVEX_L_XD_KZ_B", 4),
+        ("IC_EVEX_L_OPSIZE_KZ_B", 4),
+        ("IC_EVEX_L_W_KZ_B", 3),
+        ("IC_EVEX_L_W_XS_KZ_B", 4),
+        ("IC_EVEX_L_W_XD_KZ_B", 4),
+        ("IC_EVEX_L_W_OPSIZE_KZ_B", 4),
+        ("IC_EVEX_L2_KZ_B", 3),
+        ("IC_EVEX_L2_XS_KZ_B", 4),
+        ("IC_EVEX_L2_XD_KZ_B", 4),
+        ("IC_EVEX_L2_OPSIZE_KZ_B", 4),
+        ("IC_EVEX_L2_W_KZ_B", 3),
+        ("IC_EVEX_L2_W_XS_KZ_B", 4),
+        ("IC_EVEX_L2_W_XD_KZ_B", 4),
+        ("IC_EVEX_L2_W_OPSIZE_KZ_B", 4),
+        ("IC_EVEX_KZ", 1),
+        ("IC_EVEX_XS_KZ", 2),
+        ("IC_EVEX_XD_KZ", 2),
+        ("IC_EVEX_OPSIZE_KZ", 2),
+        ("IC_EVEX_W_KZ", 3),
+        ("IC_EVEX_W_XS_KZ", 4),
+        ("IC_EVEX_W_XD_KZ", 4),
+        ("IC_EVEX_W_OPSIZE_KZ", 4),
+        ("IC_EVEX_L_KZ", 3),
+        ("IC_EVEX_L_XS_KZ", 4),
+        ("IC_EVEX_L_XD_KZ", 4),
+        ("IC_EVEX_L_OPSIZE_KZ", 4),
+        ("IC_EVEX_L_W_KZ", 3),
+        ("IC_EVEX_L_W_XS_KZ", 4),
+        ("IC_EVEX_L_W_XD_KZ", 4),
+        ("IC_EVEX_L_W_OPSIZE_KZ", 4),
+        ("IC_EVEX_L2_KZ", 3),
+        ("IC_EVEX_L2_XS_KZ", 4),
+        ("IC_EVEX_L2_XD_KZ", 4),
+        ("IC_EVEX_L2_OPSIZE_KZ", 4),
+        ("IC_EVEX_L2_W_KZ", 3),
+        ("IC_EVEX_L2_W_XS_KZ", 4),
+        ("IC_EVEX_L2_W_XD_KZ", 4),
+        ("IC_EVEX_L2_W_OPSIZE_KZ", 4),
+        ("IC_EVEX_B_U", 2),
+        ("IC_EVEX_XS_B_U", 3),
+        ("IC_EVEX_XD_B_U", 3),
+        ("IC_EVEX_OPSIZE_B_U", 3),
+        ("IC_EVEX_W_B_U", 4),
+        ("IC_EVEX_W_XS_B_U", 5),
+        ("IC_EVEX_W_XD_B_U", 5),
+        ("IC_EVEX_W_OPSIZE_B_U", 5),
+        ("IC_EVEX_K_B_U", 2),
+        ("IC_EVEX_XS_K_B_U", 3),
+        ("IC_EVEX_XD_K_B_U", 3),
+        ("IC_EVEX_OPSIZE_K_B_U", 3),
+        ("IC_EVEX_W_K_B_U", 4),
+        ("IC_EVEX_W_XS_K_B_U", 5),
+        ("IC_EVEX_W_XD_K_B_U", 5),
+        ("IC_EVEX_W_OPSIZE_K_B_U", 5),
+        ("IC_EVEX_KZ_B_U", 2),
+        ("IC_EVEX_XS_KZ_B_U", 3),
+        ("IC_EVEX_XD_KZ_B_U", 3),
+        ("IC_EVEX_OPSIZE_KZ_B_U", 3),
+        ("IC_EVEX_W_KZ_B_U", 4),
+        ("IC_EVEX_W_XS_KZ_B_U", 5),
+        ("IC_EVEX_W_XD_KZ_B_U", 5),
+        ("IC_EVEX_W_OPSIZE_KZ_B_U", 5),
+    ];
+
+    type InheritanceClause = (&'static [&'static str], &'static str, &'static str);
+
+    const DECODER_INHERITANCE: &[(&str, &[InheritanceClause])] = &[
+        (
+            "IC",
+            &[
+                (&[], "IC_64BIT", "address_64"),
+                (&["no_prefix"], "IC_OPSIZE", "no_prefix"),
+                (&[], "IC_ADSIZE", ""),
+                (&["no_prefix"], "IC_XD", "no_prefix"),
+                (&["no_prefix"], "IC_XS", "no_prefix"),
+            ],
+        ),
+        (
+            "IC_64BIT",
+            &[
+                (&[], "IC_64BIT_REXW", ""),
+                (&[], "IC_64BIT_REX2", ""),
+                (&["no_prefix"], "IC_64BIT_OPSIZE", "no_prefix"),
+                (&["not_address_64"], "IC_64BIT_ADSIZE", ""),
+                (&["no_prefix"], "IC_64BIT_XD", "no_prefix"),
+                (&["no_prefix"], "IC_64BIT_XS", "no_prefix"),
+            ],
+        ),
+        (
+            "IC_OPSIZE",
+            &[(&[], "IC_64BIT_OPSIZE", ""), (&[], "IC_OPSIZE_ADSIZE", "")],
+        ),
+        (
+            "IC_ADSIZE",
+            &[(&["no_prefix"], "IC_OPSIZE_ADSIZE", "no_prefix")],
+        ),
+        ("IC_OPSIZE_ADSIZE", &[]),
+        (
+            "IC_64BIT_ADSIZE",
+            &[(&["no_prefix"], "IC_64BIT_OPSIZE_ADSIZE", "no_prefix")],
+        ),
+        ("IC_64BIT_OPSIZE_ADSIZE", &[]),
+        ("IC_XD", &[(&[], "IC_64BIT_XD", "")]),
+        ("IC_XS", &[(&[], "IC_64BIT_XS", "")]),
+        ("IC_XD_OPSIZE", &[(&[], "IC_64BIT_XD_OPSIZE", "")]),
+        ("IC_XS_OPSIZE", &[(&[], "IC_64BIT_XS_OPSIZE", "")]),
+        ("IC_XD_ADSIZE", &[(&[], "IC_64BIT_XD_ADSIZE", "")]),
+        ("IC_XS_ADSIZE", &[(&[], "IC_64BIT_XS_ADSIZE", "")]),
+        (
+            "IC_64BIT_REXW",
+            &[
+                (&["no_prefix"], "IC_64BIT_REXW_XS", "no_prefix"),
+                (&["no_prefix"], "IC_64BIT_REXW_XD", "no_prefix"),
+                (&["no_prefix"], "IC_64BIT_REXW_OPSIZE", "no_prefix"),
+                (&["not_address_64"], "IC_64BIT_REXW_ADSIZE", ""),
+            ],
+        ),
+        (
+            "IC_64BIT_OPSIZE",
+            &[
+                (&[], "IC_64BIT_REXW_OPSIZE", ""),
+                (&["not_address_64"], "IC_64BIT_OPSIZE_ADSIZE", ""),
+                (&["not_address_64"], "IC_64BIT_REXW_ADSIZE", ""),
+            ],
+        ),
+        (
+            "IC_64BIT_XD",
+            &[
+                (&[], "IC_64BIT_REXW_XD", ""),
+                (&["not_address_64"], "IC_64BIT_XD_ADSIZE", ""),
+            ],
+        ),
+        (
+            "IC_64BIT_XS",
+            &[
+                (&[], "IC_64BIT_REXW_XS", ""),
+                (&["not_address_64"], "IC_64BIT_XS_ADSIZE", ""),
+            ],
+        ),
+        ("IC_64BIT_XD_OPSIZE", &[]),
+        ("IC_64BIT_XS_OPSIZE", &[]),
+        ("IC_64BIT_XD_ADSIZE", &[]),
+        ("IC_64BIT_XS_ADSIZE", &[]),
+        ("IC_64BIT_REXW_XD", &[]),
+        ("IC_64BIT_REXW_XS", &[]),
+        ("IC_64BIT_REXW_OPSIZE", &[]),
+        ("IC_64BIT_REXW_ADSIZE", &[]),
+        ("IC_64BIT_REX2_REXW", &[]),
+        ("IC_64BIT_REX2", &[(&[], "IC_64BIT_REX2_REXW", "")]),
+        (
+            "IC_VEX",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_VEX_L_W", ""),
+                (&["width_ignored"], "IC_VEX_W", ""),
+                (&["length_ignored"], "IC_VEX_L", ""),
+            ],
+        ),
+        (
+            "IC_VEX_XS",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_VEX_L_W_XS", ""),
+                (&["width_ignored"], "IC_VEX_W_XS", ""),
+                (&["length_ignored"], "IC_VEX_L_XS", ""),
+            ],
+        ),
+        (
+            "IC_VEX_XD",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_VEX_L_W_XD", ""),
+                (&["width_ignored"], "IC_VEX_W_XD", ""),
+                (&["length_ignored"], "IC_VEX_L_XD", ""),
+            ],
+        ),
+        (
+            "IC_VEX_OPSIZE",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_VEX_L_W_OPSIZE",
+                    "",
+                ),
+                (&["width_ignored"], "IC_VEX_W_OPSIZE", ""),
+                (&["length_ignored"], "IC_VEX_L_OPSIZE", ""),
+            ],
+        ),
+        ("IC_VEX_W", &[(&["length_ignored"], "IC_VEX_L_W", "")]),
+        ("IC_VEX_W_XS", &[(&["length_ignored"], "IC_VEX_L_W_XS", "")]),
+        ("IC_VEX_W_XD", &[(&["length_ignored"], "IC_VEX_L_W_XD", "")]),
+        (
+            "IC_VEX_W_OPSIZE",
+            &[(&["length_ignored"], "IC_VEX_L_W_OPSIZE", "")],
+        ),
+        ("IC_VEX_L", &[(&["width_ignored"], "IC_VEX_L_W", "")]),
+        ("IC_VEX_L_XS", &[(&["width_ignored"], "IC_VEX_L_W_XS", "")]),
+        ("IC_VEX_L_XD", &[(&["width_ignored"], "IC_VEX_L_W_XD", "")]),
+        (
+            "IC_VEX_L_OPSIZE",
+            &[(&["width_ignored"], "IC_VEX_L_W_OPSIZE", "")],
+        ),
+        ("IC_VEX_L_W", &[]),
+        ("IC_VEX_L_W_XS", &[]),
+        ("IC_VEX_L_W_XD", &[]),
+        ("IC_VEX_L_W_OPSIZE", &[]),
+        (
+            "IC_EVEX",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W", ""),
+                (&["width_ignored"], "IC_EVEX_W", ""),
+                (&["length_ignored"], "IC_EVEX_L", ""),
+                (&["length_ignored"], "IC_EVEX_L2", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XS",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_XS", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W_XS", ""),
+                (&["width_ignored"], "IC_EVEX_W_XS", ""),
+                (&["length_ignored"], "IC_EVEX_L_XS", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XS", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XD",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_XD", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W_XD", ""),
+                (&["width_ignored"], "IC_EVEX_W_XD", ""),
+                (&["length_ignored"], "IC_EVEX_L_XD", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XD", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_OPSIZE",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_OPSIZE",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_OPSIZE",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_OPSIZE", ""),
+                (&["length_ignored"], "IC_EVEX_L_OPSIZE", ""),
+                (&["length_ignored"], "IC_EVEX_L2_OPSIZE", ""),
+            ],
+        ),
+        ("IC_EVEX_OPSIZE_ADSIZE", &[]),
+        ("IC_EVEX_XS_ADSIZE", &[]),
+        ("IC_EVEX_XD_ADSIZE", &[]),
+        (
+            "IC_EVEX_K",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_K", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W_K", ""),
+                (&["width_ignored"], "IC_EVEX_W_K", ""),
+                (&["length_ignored"], "IC_EVEX_L_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XS_K",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_XS_K", ""),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XS_K",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XS_K", ""),
+                (&["length_ignored"], "IC_EVEX_L_XS_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XS_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XD_K",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_XD_K", ""),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XD_K",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XD_K", ""),
+                (&["length_ignored"], "IC_EVEX_L_XD_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XD_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_OPSIZE_K",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_OPSIZE_K",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_OPSIZE_K",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_OPSIZE_K", ""),
+                (&["length_ignored"], "IC_EVEX_L_OPSIZE_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_OPSIZE_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_KZ",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_KZ", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W_KZ", ""),
+                (&["width_ignored"], "IC_EVEX_W_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XS_KZ",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_XS_KZ",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XS_KZ",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XS_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L_XS_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XS_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XD_KZ",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_XD_KZ",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XD_KZ",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XD_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L_XD_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XD_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_OPSIZE_KZ",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_OPSIZE_KZ",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_OPSIZE_KZ",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_OPSIZE_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L_OPSIZE_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_OPSIZE_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W", ""),
+                (&[], "IC_EVEX_W_OPSIZE", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XS",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XS", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XS", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XD",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XD", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XD", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_OPSIZE",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_OPSIZE", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_OPSIZE", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_K",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XS_K",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XS_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XS_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XD_K",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XD_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XD_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_OPSIZE_K",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_OPSIZE_K", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_OPSIZE_K", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_KZ",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XS_KZ",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XS_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XS_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XD_KZ",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XD_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XD_KZ", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_OPSIZE_KZ",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_OPSIZE_KZ", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_OPSIZE_KZ", ""),
+            ],
+        ),
+        ("IC_EVEX_L", &[(&["width_ignored"], "IC_EVEX_L_W", "")]),
+        (
+            "IC_EVEX_L_XS",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XS", "")],
+        ),
+        (
+            "IC_EVEX_L_XD",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XD", "")],
+        ),
+        (
+            "IC_EVEX_L_OPSIZE",
+            &[(&["width_ignored"], "IC_EVEX_L_W_OPSIZE", "")],
+        ),
+        ("IC_EVEX_L_K", &[(&["width_ignored"], "IC_EVEX_L_W_K", "")]),
+        (
+            "IC_EVEX_L_XS_K",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XS_K", "")],
+        ),
+        (
+            "IC_EVEX_L_XD_K",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XD_K", "")],
+        ),
+        (
+            "IC_EVEX_L_OPSIZE_K",
+            &[(&["width_ignored"], "IC_EVEX_L_W_OPSIZE_K", "")],
+        ),
+        (
+            "IC_EVEX_L_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L_W_KZ", "")],
+        ),
+        (
+            "IC_EVEX_L_XS_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XS_KZ", "")],
+        ),
+        (
+            "IC_EVEX_L_XD_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XD_KZ", "")],
+        ),
+        (
+            "IC_EVEX_L_OPSIZE_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L_W_OPSIZE_KZ", "")],
+        ),
+        ("IC_EVEX_L_W", &[]),
+        ("IC_EVEX_L_W_XS", &[]),
+        ("IC_EVEX_L_W_XD", &[]),
+        ("IC_EVEX_L_W_OPSIZE", &[]),
+        ("IC_EVEX_L_W_K", &[]),
+        ("IC_EVEX_L_W_XS_K", &[]),
+        ("IC_EVEX_L_W_XD_K", &[]),
+        ("IC_EVEX_L_W_OPSIZE_K", &[]),
+        ("IC_EVEX_L_W_KZ", &[]),
+        ("IC_EVEX_L_W_XS_KZ", &[]),
+        ("IC_EVEX_L_W_XD_KZ", &[]),
+        ("IC_EVEX_L_W_OPSIZE_KZ", &[]),
+        ("IC_EVEX_L2", &[(&["width_ignored"], "IC_EVEX_L2_W", "")]),
+        (
+            "IC_EVEX_L2_XS",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XS", "")],
+        ),
+        (
+            "IC_EVEX_L2_XD",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XD", "")],
+        ),
+        (
+            "IC_EVEX_L2_OPSIZE",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_OPSIZE", "")],
+        ),
+        (
+            "IC_EVEX_L2_K",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_K", "")],
+        ),
+        (
+            "IC_EVEX_L2_XS_K",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XS_K", "")],
+        ),
+        (
+            "IC_EVEX_L2_XD_K",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XD_K", "")],
+        ),
+        (
+            "IC_EVEX_L2_OPSIZE_K",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_OPSIZE_K", "")],
+        ),
+        (
+            "IC_EVEX_L2_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_KZ", "")],
+        ),
+        (
+            "IC_EVEX_L2_XS_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XS_KZ", "")],
+        ),
+        (
+            "IC_EVEX_L2_XD_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XD_KZ", "")],
+        ),
+        (
+            "IC_EVEX_L2_OPSIZE_KZ",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_OPSIZE_KZ", "")],
+        ),
+        ("IC_EVEX_L2_W", &[]),
+        ("IC_EVEX_L2_W_XS", &[]),
+        ("IC_EVEX_L2_W_XD", &[]),
+        ("IC_EVEX_L2_W_OPSIZE", &[]),
+        ("IC_EVEX_L2_W_K", &[]),
+        ("IC_EVEX_L2_W_XS_K", &[]),
+        ("IC_EVEX_L2_W_XD_K", &[]),
+        ("IC_EVEX_L2_W_OPSIZE_K", &[]),
+        ("IC_EVEX_L2_W_KZ", &[]),
+        ("IC_EVEX_L2_W_XS_KZ", &[]),
+        ("IC_EVEX_L2_W_XD_KZ", &[]),
+        ("IC_EVEX_L2_W_OPSIZE_KZ", &[]),
+        (
+            "IC_EVEX_B",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_B", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W_B", ""),
+                (&["width_ignored"], "IC_EVEX_W_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XS_B",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_XS_B", ""),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XS_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XS_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_XS_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XS_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XD_B",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_XD_B", ""),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XD_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XD_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_XD_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XD_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_OPSIZE_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_OPSIZE_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_OPSIZE_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_OPSIZE_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_OPSIZE_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_OPSIZE_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_K_B",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_K_B", ""),
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L2_W_K_B", ""),
+                (&["width_ignored"], "IC_EVEX_W_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XS_K_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_XS_K_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XS_K_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XS_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_XS_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XS_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XD_K_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_XD_K_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XD_K_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XD_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_XD_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XD_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_OPSIZE_K_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_OPSIZE_K_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_OPSIZE_K_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_OPSIZE_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_OPSIZE_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_OPSIZE_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_KZ_B",
+            &[
+                (&["length_ignored", "width_ignored"], "IC_EVEX_L_W_KZ_B", ""),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_KZ_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XS_KZ_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_XS_KZ_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XS_KZ_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XS_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_XS_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XS_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_XD_KZ_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_XD_KZ_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_XD_KZ_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_XD_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_XD_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_XD_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_OPSIZE_KZ_B",
+            &[
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L_W_OPSIZE_KZ_B",
+                    "",
+                ),
+                (
+                    &["length_ignored", "width_ignored"],
+                    "IC_EVEX_L2_W_OPSIZE_KZ_B",
+                    "",
+                ),
+                (&["width_ignored"], "IC_EVEX_W_OPSIZE_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L_OPSIZE_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_OPSIZE_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_B", ""),
+                (&[], "IC_EVEX_W_OPSIZE_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XS_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XS_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XS_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XD_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XD_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XD_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_OPSIZE_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_OPSIZE_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_OPSIZE_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_K_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XS_K_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XS_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XS_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XD_K_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XD_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XD_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_OPSIZE_K_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_OPSIZE_K_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_OPSIZE_K_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_KZ_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XS_KZ_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XS_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XS_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_XD_KZ_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_XD_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_XD_KZ_B", ""),
+            ],
+        ),
+        (
+            "IC_EVEX_W_OPSIZE_KZ_B",
+            &[
+                (&["length_ignored"], "IC_EVEX_L_W_OPSIZE_KZ_B", ""),
+                (&["length_ignored"], "IC_EVEX_L2_W_OPSIZE_KZ_B", ""),
+            ],
+        ),
+        ("IC_EVEX_L_B", &[(&["width_ignored"], "IC_EVEX_L_W_B", "")]),
+        (
+            "IC_EVEX_L_XS_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XS_B", "")],
+        ),
+        (
+            "IC_EVEX_L_XD_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XD_B", "")],
+        ),
+        (
+            "IC_EVEX_L_OPSIZE_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_OPSIZE_B", "")],
+        ),
+        (
+            "IC_EVEX_L_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L_XS_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XS_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L_XD_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XD_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L_OPSIZE_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_OPSIZE_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_KZ_B", "")],
+        ),
+        (
+            "IC_EVEX_L_XS_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XS_KZ_B", "")],
+        ),
+        (
+            "IC_EVEX_L_XD_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_XD_KZ_B", "")],
+        ),
+        (
+            "IC_EVEX_L_OPSIZE_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L_W_OPSIZE_KZ_B", "")],
+        ),
+        ("IC_EVEX_L_W_B", &[]),
+        ("IC_EVEX_L_W_XS_B", &[]),
+        ("IC_EVEX_L_W_XD_B", &[]),
+        ("IC_EVEX_L_W_OPSIZE_B", &[]),
+        ("IC_EVEX_L_W_K_B", &[]),
+        ("IC_EVEX_L_W_XS_K_B", &[]),
+        ("IC_EVEX_L_W_XD_K_B", &[]),
+        ("IC_EVEX_L_W_OPSIZE_K_B", &[]),
+        ("IC_EVEX_L_W_KZ_B", &[]),
+        ("IC_EVEX_L_W_XS_KZ_B", &[]),
+        ("IC_EVEX_L_W_XD_KZ_B", &[]),
+        ("IC_EVEX_L_W_OPSIZE_KZ_B", &[]),
+        (
+            "IC_EVEX_L2_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_XS_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XS_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_XD_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XD_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_OPSIZE_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_OPSIZE_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_XS_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XS_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_XD_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XD_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_OPSIZE_K_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_OPSIZE_K_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_KZ_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_XS_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XS_KZ_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_XD_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_XD_KZ_B", "")],
+        ),
+        (
+            "IC_EVEX_L2_OPSIZE_KZ_B",
+            &[(&["width_ignored"], "IC_EVEX_L2_W_OPSIZE_KZ_B", "")],
+        ),
+        ("IC_EVEX_L2_W_B", &[]),
+        ("IC_EVEX_L2_W_XS_B", &[]),
+        ("IC_EVEX_L2_W_XD_B", &[]),
+        ("IC_EVEX_L2_W_OPSIZE_B", &[]),
+        ("IC_EVEX_L2_W_K_B", &[]),
+        ("IC_EVEX_L2_W_XS_K_B", &[]),
+        ("IC_EVEX_L2_W_XD_K_B", &[]),
+        ("IC_EVEX_L2_W_OPSIZE_K_B", &[]),
+        ("IC_EVEX_L2_W_KZ_B", &[]),
+        ("IC_EVEX_L2_W_XS_KZ_B", &[]),
+        ("IC_EVEX_L2_W_XD_KZ_B", &[]),
+        ("IC_EVEX_L2_W_OPSIZE_KZ_B", &[]),
+        ("IC_EVEX_NF", &[(&["width_ignored"], "IC_EVEX_W_NF", "")]),
+        (
+            "IC_EVEX_B_NF",
+            &[(&["width_ignored"], "IC_EVEX_W_B_NF", "")],
+        ),
+        ("IC_EVEX_OPSIZE_NF", &[]),
+        ("IC_EVEX_OPSIZE_B_NF", &[]),
+        ("IC_EVEX_W_NF", &[]),
+        ("IC_EVEX_W_B_NF", &[]),
+        ("IC_EVEX_B_U", &[]),
+        ("IC_EVEX_XS_B_U", &[]),
+        ("IC_EVEX_XD_B_U", &[]),
+        ("IC_EVEX_OPSIZE_B_U", &[]),
+        ("IC_EVEX_W_B_U", &[]),
+        ("IC_EVEX_W_XS_B_U", &[]),
+        ("IC_EVEX_W_XD_B_U", &[]),
+        ("IC_EVEX_W_OPSIZE_B_U", &[]),
+        ("IC_EVEX_K_B_U", &[]),
+        ("IC_EVEX_XS_K_B_U", &[]),
+        ("IC_EVEX_XD_K_B_U", &[]),
+        ("IC_EVEX_OPSIZE_K_B_U", &[]),
+        ("IC_EVEX_W_K_B_U", &[]),
+        ("IC_EVEX_W_XS_K_B_U", &[]),
+        ("IC_EVEX_W_XD_K_B_U", &[]),
+        ("IC_EVEX_W_OPSIZE_K_B_U", &[]),
+        ("IC_EVEX_KZ_B_U", &[]),
+        ("IC_EVEX_XS_KZ_B_U", &[]),
+        ("IC_EVEX_XD_KZ_B_U", &[]),
+        ("IC_EVEX_OPSIZE_KZ_B_U", &[]),
+        ("IC_EVEX_W_KZ_B_U", &[]),
+        ("IC_EVEX_W_XS_KZ_B_U", &[]),
+        ("IC_EVEX_W_XD_KZ_B_U", &[]),
+        ("IC_EVEX_W_OPSIZE_KZ_B_U", &[]),
+    ];
+
+    const DECODER_REGISTERS: &[&str] = &[
+        "AL", "CL", "DL", "BL", "AH", "CH", "DH", "BH", "R8B", "R9B", "R10B", "R11B", "R12B",
+        "R13B", "R14B", "R15B", "R16B", "R17B", "R18B", "R19B", "R20B", "R21B", "R22B", "R23B",
+        "R24B", "R25B", "R26B", "R27B", "R28B", "R29B", "R30B", "R31B", "SPL", "BPL", "SIL", "DIL",
+        "AX", "CX", "DX", "BX", "SP", "BP", "SI", "DI", "R8W", "R9W", "R10W", "R11W", "R12W",
+        "R13W", "R14W", "R15W", "R16W", "R17W", "R18W", "R19W", "R20W", "R21W", "R22W", "R23W",
+        "R24W", "R25W", "R26W", "R27W", "R28W", "R29W", "R30W", "R31W", "EAX", "ECX", "EDX", "EBX",
+        "ESP", "EBP", "ESI", "EDI", "R8D", "R9D", "R10D", "R11D", "R12D", "R13D", "R14D", "R15D",
+        "R16D", "R17D", "R18D", "R19D", "R20D", "R21D", "R22D", "R23D", "R24D", "R25D", "R26D",
+        "R27D", "R28D", "R29D", "R30D", "R31D", "RAX", "RCX", "RDX", "RBX", "RSP", "RBP", "RSI",
+        "RDI", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16", "R17", "R18", "R19",
+        "R20", "R21", "R22", "R23", "R24", "R25", "R26", "R27", "R28", "R29", "R30", "R31", "MM0",
+        "MM1", "MM2", "MM3", "MM4", "MM5", "MM6", "MM7", "XMM0", "XMM1", "XMM2", "XMM3", "XMM4",
+        "XMM5", "XMM6", "XMM7", "XMM8", "XMM9", "XMM10", "XMM11", "XMM12", "XMM13", "XMM14",
+        "XMM15", "XMM16", "XMM17", "XMM18", "XMM19", "XMM20", "XMM21", "XMM22", "XMM23", "XMM24",
+        "XMM25", "XMM26", "XMM27", "XMM28", "XMM29", "XMM30", "XMM31", "YMM0", "YMM1", "YMM2",
+        "YMM3", "YMM4", "YMM5", "YMM6", "YMM7", "YMM8", "YMM9", "YMM10", "YMM11", "YMM12", "YMM13",
+        "YMM14", "YMM15", "YMM16", "YMM17", "YMM18", "YMM19", "YMM20", "YMM21", "YMM22", "YMM23",
+        "YMM24", "YMM25", "YMM26", "YMM27", "YMM28", "YMM29", "YMM30", "YMM31", "ZMM0", "ZMM1",
+        "ZMM2", "ZMM3", "ZMM4", "ZMM5", "ZMM6", "ZMM7", "ZMM8", "ZMM9", "ZMM10", "ZMM11", "ZMM12",
+        "ZMM13", "ZMM14", "ZMM15", "ZMM16", "ZMM17", "ZMM18", "ZMM19", "ZMM20", "ZMM21", "ZMM22",
+        "ZMM23", "ZMM24", "ZMM25", "ZMM26", "ZMM27", "ZMM28", "ZMM29", "ZMM30", "ZMM31", "K0",
+        "K1", "K2", "K3", "K4", "K5", "K6", "K7", "K0_K1", "K2_K3", "K4_K5", "K6_K7", "ES", "CS",
+        "SS", "DS", "FS", "GS", "DR0", "DR1", "DR2", "DR3", "DR4", "DR5", "DR6", "DR7", "DR8",
+        "DR9", "DR10", "DR11", "DR12", "DR13", "DR14", "DR15", "CR0", "CR1", "CR2", "CR3", "CR4",
+        "CR5", "CR6", "CR7", "CR8", "CR9", "CR10", "CR11", "CR12", "CR13", "CR14", "CR15", "TMM0",
+        "TMM1", "TMM2", "TMM3", "TMM4", "TMM5", "TMM6", "TMM7", "RIP",
+    ];
+
+    const DECODER_BASES: &[&str] = &[
+        "BX_SI", "BX_DI", "BP_SI", "BP_DI", "SI", "DI", "BP", "BX", "R8W", "R9W", "R10W", "R11W",
+        "R12W", "R13W", "R14W", "R15W", "R16W", "R17W", "R18W", "R19W", "R20W", "R21W", "R22W",
+        "R23W", "R24W", "R25W", "R26W", "R27W", "R28W", "R29W", "R30W", "R31W", "EAX", "ECX",
+        "EDX", "EBX", "sib", "EBP", "ESI", "EDI", "R8D", "R9D", "R10D", "R11D", "R12D", "R13D",
+        "R14D", "R15D", "R16D", "R17D", "R18D", "R19D", "R20D", "R21D", "R22D", "R23D", "R24D",
+        "R25D", "R26D", "R27D", "R28D", "R29D", "R30D", "R31D", "RAX", "RCX", "RDX", "RBX",
+        "sib64", "RBP", "RSI", "RDI", "R8", "R9", "R10", "R11", "R12", "R13", "R14", "R15", "R16",
+        "R17", "R18", "R19", "R20", "R21", "R22", "R23", "R24", "R25", "R26", "R27", "R28", "R29",
+        "R30", "R31",
+    ];
+
+    const DECODER_SCALED_INDEX_EXTRA: &[&str] = &[
+        "XMM0", "XMM1", "XMM2", "XMM3", "XMM4", "XMM5", "XMM6", "XMM7", "XMM8", "XMM9", "XMM10",
+        "XMM11", "XMM12", "XMM13", "XMM14", "XMM15", "XMM16", "XMM17", "XMM18", "XMM19", "XMM20",
+        "XMM21", "XMM22", "XMM23", "XMM24", "XMM25", "XMM26", "XMM27", "XMM28", "XMM29", "XMM30",
+        "XMM31", "YMM0", "YMM1", "YMM2", "YMM3", "YMM4", "YMM5", "YMM6", "YMM7", "YMM8", "YMM9",
+        "YMM10", "YMM11", "YMM12", "YMM13", "YMM14", "YMM15", "YMM16", "YMM17", "YMM18", "YMM19",
+        "YMM20", "YMM21", "YMM22", "YMM23", "YMM24", "YMM25", "YMM26", "YMM27", "YMM28", "YMM29",
+        "YMM30", "YMM31", "ZMM0", "ZMM1", "ZMM2", "ZMM3", "ZMM4", "ZMM5", "ZMM6", "ZMM7", "ZMM8",
+        "ZMM9", "ZMM10", "ZMM11", "ZMM12", "ZMM13", "ZMM14", "ZMM15", "ZMM16", "ZMM17", "ZMM18",
+        "ZMM19", "ZMM20", "ZMM21", "ZMM22", "ZMM23", "ZMM24", "ZMM25", "ZMM26", "ZMM27", "ZMM28",
+        "ZMM29", "ZMM30", "ZMM31",
+    ];
+
+    const DECODER_SCALED_BASES: &[&str] = &[
+        "EAX", "ECX", "EDX", "EBX", "ESP", "EBP", "ESI", "EDI", "R8D", "R9D", "R10D", "R11D",
+        "R12D", "R13D", "R14D", "R15D", "R16D", "R17D", "R18D", "R19D", "R20D", "R21D", "R22D",
+        "R23D", "R24D", "R25D", "R26D", "R27D", "R28D", "R29D", "R30D", "R31D", "RAX", "RCX",
+        "RDX", "RBX", "RSP", "RBP", "RSI", "RDI", "R8", "R9", "R10", "R11", "R12", "R13", "R14",
+        "R15", "R16", "R17", "R18", "R19", "R20", "R21", "R22", "R23", "R24", "R25", "R26", "R27",
+        "R28", "R29", "R30", "R31",
+    ];
+
+    const DECODER_TYPE_NAMES: &[(&str, &str)] = &[
+        ("i16mem", "TYPE_M"),
+        ("i16imm", "TYPE_IMM"),
+        ("i16i8imm", "TYPE_IMM"),
+        ("GR16", "TYPE_R16"),
+        ("GR16orGR32orGR64", "TYPE_R16"),
+        ("i32mem", "TYPE_M"),
+        ("i32imm", "TYPE_IMM"),
+        ("i32i8imm", "TYPE_IMM"),
+        ("GR32", "TYPE_R32"),
+        ("GR32orGR64", "TYPE_R32"),
+        ("i64mem", "TYPE_M"),
+        ("i64i32imm", "TYPE_IMM"),
+        ("i64i8imm", "TYPE_IMM"),
+        ("GR64", "TYPE_R64"),
+        ("i8mem", "TYPE_M"),
+        ("i8imm", "TYPE_IMM"),
+        ("u4imm", "TYPE_UIMM8"),
+        ("u8imm", "TYPE_UIMM8"),
+        ("i16u8imm", "TYPE_UIMM8"),
+        ("i32u8imm", "TYPE_UIMM8"),
+        ("i64u8imm", "TYPE_UIMM8"),
+        ("GR8", "TYPE_R8"),
+        ("VR128", "TYPE_XMM"),
+        ("VR128X", "TYPE_XMM"),
+        ("f128mem", "TYPE_M"),
+        ("f256mem", "TYPE_M"),
+        ("f512mem", "TYPE_M"),
+        ("FR128", "TYPE_XMM"),
+        ("FR64", "TYPE_XMM"),
+        ("FR64X", "TYPE_XMM"),
+        ("f64mem", "TYPE_M"),
+        ("sdmem", "TYPE_M"),
+        ("FR16X", "TYPE_XMM"),
+        ("FR32", "TYPE_XMM"),
+        ("FR32X", "TYPE_XMM"),
+        ("f32mem", "TYPE_M"),
+        ("f16mem", "TYPE_M"),
+        ("ssmem", "TYPE_M"),
+        ("shmem", "TYPE_M"),
+        ("RST", "TYPE_ST"),
+        ("RSTi", "TYPE_ST"),
+        ("i128mem", "TYPE_M"),
+        ("i256mem", "TYPE_M"),
+        ("i512mem", "TYPE_M"),
+        ("i512mem_GR16", "TYPE_M"),
+        ("i512mem_GR32", "TYPE_M"),
+        ("i512mem_GR64", "TYPE_M"),
+        ("i64i32imm_brtarget", "TYPE_REL"),
+        ("i8imm_brtarget", "TYPE_REL"),
+        ("i16imm_brtarget", "TYPE_REL"),
+        ("i32imm_brtarget", "TYPE_REL"),
+        ("ccode", "TYPE_IMM"),
+        ("cflags", "TYPE_IMM"),
+        ("AVX512RC", "TYPE_IMM"),
+        ("brtarget32", "TYPE_REL"),
+        ("brtarget16", "TYPE_REL"),
+        ("brtarget8", "TYPE_REL"),
+        ("f80mem", "TYPE_M"),
+        ("lea64_8mem", "TYPE_M"),
+        ("lea64_16mem", "TYPE_M"),
+        ("lea64_32mem", "TYPE_M"),
+        ("lea64mem", "TYPE_M"),
+        ("VR64", "TYPE_MM64"),
+        ("i64imm", "TYPE_IMM"),
+        ("anymem", "TYPE_M"),
+        ("opaquemem", "TYPE_M"),
+        ("sibmem", "TYPE_MSIB"),
+        ("SEGMENT_REG", "TYPE_SEGMENTREG"),
+        ("DEBUG_REG", "TYPE_DEBUGREG"),
+        ("CONTROL_REG", "TYPE_CONTROLREG"),
+        ("srcidx8", "TYPE_SRCIDX"),
+        ("srcidx16", "TYPE_SRCIDX"),
+        ("srcidx32", "TYPE_SRCIDX"),
+        ("srcidx64", "TYPE_SRCIDX"),
+        ("dstidx8", "TYPE_DSTIDX"),
+        ("dstidx16", "TYPE_DSTIDX"),
+        ("dstidx32", "TYPE_DSTIDX"),
+        ("dstidx64", "TYPE_DSTIDX"),
+        ("offset16_8", "TYPE_MOFFS"),
+        ("offset16_16", "TYPE_MOFFS"),
+        ("offset16_32", "TYPE_MOFFS"),
+        ("offset32_8", "TYPE_MOFFS"),
+        ("offset32_16", "TYPE_MOFFS"),
+        ("offset32_32", "TYPE_MOFFS"),
+        ("offset32_64", "TYPE_MOFFS"),
+        ("offset64_8", "TYPE_MOFFS"),
+        ("offset64_16", "TYPE_MOFFS"),
+        ("offset64_32", "TYPE_MOFFS"),
+        ("offset64_64", "TYPE_MOFFS"),
+        ("VR256", "TYPE_YMM"),
+        ("VR256X", "TYPE_YMM"),
+        ("VR512", "TYPE_ZMM"),
+        ("VK1", "TYPE_VK"),
+        ("VK1WM", "TYPE_VK"),
+        ("VK2", "TYPE_VK"),
+        ("VK2WM", "TYPE_VK"),
+        ("VK4", "TYPE_VK"),
+        ("VK4WM", "TYPE_VK"),
+        ("VK8", "TYPE_VK"),
+        ("VK8WM", "TYPE_VK"),
+        ("VK16", "TYPE_VK"),
+        ("VK16WM", "TYPE_VK"),
+        ("VK32", "TYPE_VK"),
+        ("VK32WM", "TYPE_VK"),
+        ("VK64", "TYPE_VK"),
+        ("VK64WM", "TYPE_VK"),
+        ("VK1Pair", "TYPE_VK_PAIR"),
+        ("VK2Pair", "TYPE_VK_PAIR"),
+        ("VK4Pair", "TYPE_VK_PAIR"),
+        ("VK8Pair", "TYPE_VK_PAIR"),
+        ("VK16Pair", "TYPE_VK_PAIR"),
+        ("vx32mem", "TYPE_MVSIBX"),
+        ("vx64mem", "TYPE_MVSIBX"),
+        ("vy32mem", "TYPE_MVSIBY"),
+        ("vy64mem", "TYPE_MVSIBY"),
+        ("vx32xmem", "TYPE_MVSIBX"),
+        ("vx64xmem", "TYPE_MVSIBX"),
+        ("vy32xmem", "TYPE_MVSIBY"),
+        ("vy64xmem", "TYPE_MVSIBY"),
+        ("vz32mem", "TYPE_MVSIBZ"),
+        ("vz64mem", "TYPE_MVSIBZ"),
+        ("BNDR", "TYPE_BNDR"),
+        ("TILE", "TYPE_TMM"),
+    ];
+
+    const DECODER_IMMEDIATE_ENCODINGS: &[(&str, &str)] = &[
+        ("i32i8imm", "ENCODING_IB"),
+        ("AVX512RC", "ENCODING_IRC"),
+        ("i16imm", "ENCODING_Iv"),
+        ("i16i8imm", "ENCODING_IB"),
+        ("i32imm", "ENCODING_Iv"),
+        ("i64i32imm", "ENCODING_ID"),
+        ("i64i8imm", "ENCODING_IB"),
+        ("i8imm", "ENCODING_IB"),
+        ("ccode", "ENCODING_CC"),
+        ("cflags", "ENCODING_CF"),
+        ("u4imm", "ENCODING_IB"),
+        ("u8imm", "ENCODING_IB"),
+        ("i16u8imm", "ENCODING_IB"),
+        ("i32u8imm", "ENCODING_IB"),
+        ("i64u8imm", "ENCODING_IB"),
+        ("FR32", "ENCODING_IB"),
+        ("FR64", "ENCODING_IB"),
+        ("FR128", "ENCODING_IB"),
+        ("VR128", "ENCODING_IB"),
+        ("VR256", "ENCODING_IB"),
+        ("FR16X", "ENCODING_IB"),
+        ("FR32X", "ENCODING_IB"),
+        ("FR64X", "ENCODING_IB"),
+        ("VR128X", "ENCODING_IB"),
+        ("VR256X", "ENCODING_IB"),
+        ("VR512", "ENCODING_IB"),
+        ("TILE", "ENCODING_IB"),
+    ];
+
+    const DECODER_RM_REGISTER_ENCODINGS: &[(&str, &str)] = &[
+        ("RST", "ENCODING_FP"),
+        ("RSTi", "ENCODING_FP"),
+        ("GR16", "ENCODING_RM"),
+        ("GR16orGR32orGR64", "ENCODING_RM"),
+        ("GR32", "ENCODING_RM"),
+        ("GR32orGR64", "ENCODING_RM"),
+        ("GR64", "ENCODING_RM"),
+        ("GR8", "ENCODING_RM"),
+        ("VR128", "ENCODING_RM"),
+        ("VR128X", "ENCODING_RM"),
+        ("FR128", "ENCODING_RM"),
+        ("FR64", "ENCODING_RM"),
+        ("FR32", "ENCODING_RM"),
+        ("FR64X", "ENCODING_RM"),
+        ("FR32X", "ENCODING_RM"),
+        ("FR16X", "ENCODING_RM"),
+        ("VR64", "ENCODING_RM"),
+        ("VR256", "ENCODING_RM"),
+        ("VR256X", "ENCODING_RM"),
+        ("VR512", "ENCODING_RM"),
+        ("VK1", "ENCODING_RM"),
+        ("VK2", "ENCODING_RM"),
+        ("VK4", "ENCODING_RM"),
+        ("VK8", "ENCODING_RM"),
+        ("VK16", "ENCODING_RM"),
+        ("VK32", "ENCODING_RM"),
+        ("VK64", "ENCODING_RM"),
+        ("BNDR", "ENCODING_RM"),
+        ("TILE", "ENCODING_RM"),
+        ("TILEPair", "ENCODING_RM"),
+    ];
+
+    const DECODER_REG_REGISTER_ENCODINGS: &[(&str, &str)] = &[
+        ("GR16", "ENCODING_REG"),
+        ("GR16orGR32orGR64", "ENCODING_REG"),
+        ("GR32", "ENCODING_REG"),
+        ("GR32orGR64", "ENCODING_REG"),
+        ("GR64", "ENCODING_REG"),
+        ("GR8", "ENCODING_REG"),
+        ("VR128", "ENCODING_REG"),
+        ("FR128", "ENCODING_REG"),
+        ("FR64", "ENCODING_REG"),
+        ("FR32", "ENCODING_REG"),
+        ("VR64", "ENCODING_REG"),
+        ("SEGMENT_REG", "ENCODING_REG"),
+        ("DEBUG_REG", "ENCODING_REG"),
+        ("CONTROL_REG", "ENCODING_REG"),
+        ("VR256", "ENCODING_REG"),
+        ("VR256X", "ENCODING_REG"),
+        ("VR128X", "ENCODING_REG"),
+        ("FR64X", "ENCODING_REG"),
+        ("FR32X", "ENCODING_REG"),
+        ("FR16X", "ENCODING_REG"),
+        ("VR512", "ENCODING_REG"),
+        ("VK1", "ENCODING_REG"),
+        ("VK2", "ENCODING_REG"),
+        ("VK4", "ENCODING_REG"),
+        ("VK8", "ENCODING_REG"),
+        ("VK16", "ENCODING_REG"),
+        ("VK32", "ENCODING_REG"),
+        ("VK64", "ENCODING_REG"),
+        ("VK1Pair", "ENCODING_REG"),
+        ("VK2Pair", "ENCODING_REG"),
+        ("VK4Pair", "ENCODING_REG"),
+        ("VK8Pair", "ENCODING_REG"),
+        ("VK16Pair", "ENCODING_REG"),
+        ("VK1WM", "ENCODING_REG"),
+        ("VK2WM", "ENCODING_REG"),
+        ("VK4WM", "ENCODING_REG"),
+        ("VK8WM", "ENCODING_REG"),
+        ("VK16WM", "ENCODING_REG"),
+        ("VK32WM", "ENCODING_REG"),
+        ("VK64WM", "ENCODING_REG"),
+        ("BNDR", "ENCODING_REG"),
+        ("TILE", "ENCODING_REG"),
+        ("TILEPair", "ENCODING_REG"),
+    ];
+
+    const DECODER_VVVV_ENCODINGS: &[(&str, &str)] = &[
+        ("GR8", "ENCODING_VVVV"),
+        ("GR16", "ENCODING_VVVV"),
+        ("GR32", "ENCODING_VVVV"),
+        ("GR64", "ENCODING_VVVV"),
+        ("FR32", "ENCODING_VVVV"),
+        ("FR128", "ENCODING_VVVV"),
+        ("FR64", "ENCODING_VVVV"),
+        ("VR128", "ENCODING_VVVV"),
+        ("VR256", "ENCODING_VVVV"),
+        ("FR16X", "ENCODING_VVVV"),
+        ("FR32X", "ENCODING_VVVV"),
+        ("FR64X", "ENCODING_VVVV"),
+        ("VR128X", "ENCODING_VVVV"),
+        ("VR256X", "ENCODING_VVVV"),
+        ("VR512", "ENCODING_VVVV"),
+        ("VK1", "ENCODING_VVVV"),
+        ("VK2", "ENCODING_VVVV"),
+        ("VK4", "ENCODING_VVVV"),
+        ("VK8", "ENCODING_VVVV"),
+        ("VK16", "ENCODING_VVVV"),
+        ("VK32", "ENCODING_VVVV"),
+        ("VK64", "ENCODING_VVVV"),
+        ("TILE", "ENCODING_VVVV"),
+        ("TILEPair", "ENCODING_VVVV"),
+    ];
+
+    const DECODER_WRITEMASK_ENCODINGS: &[(&str, &str)] = &[
+        ("VK1WM", "ENCODING_WRITEMASK"),
+        ("VK2WM", "ENCODING_WRITEMASK"),
+        ("VK4WM", "ENCODING_WRITEMASK"),
+        ("VK8WM", "ENCODING_WRITEMASK"),
+        ("VK16WM", "ENCODING_WRITEMASK"),
+        ("VK32WM", "ENCODING_WRITEMASK"),
+        ("VK64WM", "ENCODING_WRITEMASK"),
+    ];
+
+    const DECODER_MEMORY_ENCODINGS: &[(&str, &str)] = &[
+        ("i16mem", "ENCODING_RM"),
+        ("i32mem", "ENCODING_RM"),
+        ("i64mem", "ENCODING_RM"),
+        ("i8mem", "ENCODING_RM"),
+        ("shmem", "ENCODING_RM"),
+        ("ssmem", "ENCODING_RM"),
+        ("sdmem", "ENCODING_RM"),
+        ("f128mem", "ENCODING_RM"),
+        ("f256mem", "ENCODING_RM"),
+        ("f512mem", "ENCODING_RM"),
+        ("f64mem", "ENCODING_RM"),
+        ("f32mem", "ENCODING_RM"),
+        ("f16mem", "ENCODING_RM"),
+        ("i128mem", "ENCODING_RM"),
+        ("i256mem", "ENCODING_RM"),
+        ("i512mem", "ENCODING_RM"),
+        ("i512mem_GR16", "ENCODING_RM"),
+        ("i512mem_GR32", "ENCODING_RM"),
+        ("i512mem_GR64", "ENCODING_RM"),
+        ("f80mem", "ENCODING_RM"),
+        ("lea64_8mem", "ENCODING_RM"),
+        ("lea64_16mem", "ENCODING_RM"),
+        ("lea64_32mem", "ENCODING_RM"),
+        ("lea64mem", "ENCODING_RM"),
+        ("anymem", "ENCODING_RM"),
+        ("opaquemem", "ENCODING_RM"),
+        ("sibmem", "ENCODING_SIB"),
+        ("vx32mem", "ENCODING_VSIB"),
+        ("vx64mem", "ENCODING_VSIB"),
+        ("vy32mem", "ENCODING_VSIB"),
+        ("vy64mem", "ENCODING_VSIB"),
+        ("vx32xmem", "ENCODING_VSIB"),
+        ("vx64xmem", "ENCODING_VSIB"),
+        ("vy32xmem", "ENCODING_VSIB"),
+        ("vy64xmem", "ENCODING_VSIB"),
+        ("vz32mem", "ENCODING_VSIB"),
+        ("vz64mem", "ENCODING_VSIB"),
+    ];
+
+    const DECODER_RELOCATION_ENCODINGS: &[(&str, &str)] = &[
+        ("i16imm", "ENCODING_Iv"),
+        ("i16i8imm", "ENCODING_IB"),
+        ("i32imm", "ENCODING_Iv"),
+        ("i32i8imm", "ENCODING_IB"),
+        ("i64i32imm", "ENCODING_ID"),
+        ("i64i8imm", "ENCODING_IB"),
+        ("i8imm", "ENCODING_IB"),
+        ("u8imm", "ENCODING_IB"),
+        ("i16u8imm", "ENCODING_IB"),
+        ("i32u8imm", "ENCODING_IB"),
+        ("i64u8imm", "ENCODING_IB"),
+        ("i64i32imm_brtarget", "ENCODING_ID"),
+        ("i16imm_brtarget", "ENCODING_IW"),
+        ("i32imm_brtarget", "ENCODING_ID"),
+        ("i8imm_brtarget", "ENCODING_IB"),
+        ("brtarget32", "ENCODING_ID"),
+        ("brtarget16", "ENCODING_IW"),
+        ("brtarget8", "ENCODING_IB"),
+        ("i64imm", "ENCODING_IO"),
+        ("offset16_8", "ENCODING_Ia"),
+        ("offset16_16", "ENCODING_Ia"),
+        ("offset16_32", "ENCODING_Ia"),
+        ("offset32_8", "ENCODING_Ia"),
+        ("offset32_16", "ENCODING_Ia"),
+        ("offset32_32", "ENCODING_Ia"),
+        ("offset32_64", "ENCODING_Ia"),
+        ("offset64_8", "ENCODING_Ia"),
+        ("offset64_16", "ENCODING_Ia"),
+        ("offset64_32", "ENCODING_Ia"),
+        ("offset64_64", "ENCODING_Ia"),
+        ("srcidx8", "ENCODING_SI"),
+        ("srcidx16", "ENCODING_SI"),
+        ("srcidx32", "ENCODING_SI"),
+        ("srcidx64", "ENCODING_SI"),
+        ("dstidx8", "ENCODING_DI"),
+        ("dstidx16", "ENCODING_DI"),
+        ("dstidx32", "ENCODING_DI"),
+        ("dstidx64", "ENCODING_DI"),
+    ];
+
+    const DECODER_OPCODE_MODIFIER_ENCODINGS: &[(&str, &str)] = &[
+        ("GR32", "ENCODING_Rv"),
+        ("GR64", "ENCODING_RO"),
+        ("GR16", "ENCODING_Rv"),
+        ("GR8", "ENCODING_RB"),
+        ("ccode", "ENCODING_CC"),
+    ];
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum OperandEncoding {
+        None,
+        Register,
+        RegisterMemory(u8),
+        ScaledIndexBase,
+        VectorIndex(u8),
+        VectorRegister,
+        Writemask,
+        Immediate8,
+        Immediate16,
+        Immediate32,
+        Immediate64,
+        ImmediateOperandSize,
+        ImmediateAddressSize,
+        RoundingControl,
+        OpcodeRegister8,
+        OpcodeRegister64,
+        OpcodeRegisterOperandSize,
+        FloatingStack,
+        ConditionCode,
+        ConditionFlags,
+        Duplicate,
+        SourceIndex,
+        DestinationIndex,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DecoderOperandType {
+        None,
+        Relative,
+        Register8,
+        Register16,
+        Register32,
+        Register64,
+        Immediate,
+        UnsignedImmediate8,
+        Memory,
+        MemoryScaledIndexBase,
+        VectorIndexExtended,
+        VectorIndexYmm,
+        VectorIndexZmm,
+        SourceIndex,
+        DestinationIndex,
+        MemoryOffset,
+        FloatingStack,
+        Multimedia,
+        Vector128,
+        Vector256,
+        Vector512,
+        Mask,
+        MaskPair,
+        Tile,
+        Segment,
+        Debug,
+        Control,
+        Bound,
+        RegisterOperandSize,
+        Duplicate(u8),
+    }
+
+    fn operand_type_named(name: &str) -> DecoderOperandType {
+        match name {
+            "TYPE_REL" => DecoderOperandType::Relative,
+            "TYPE_R8" => DecoderOperandType::Register8,
+            "TYPE_R16" => DecoderOperandType::Register16,
+            "TYPE_R32" => DecoderOperandType::Register32,
+            "TYPE_R64" => DecoderOperandType::Register64,
+            "TYPE_IMM" => DecoderOperandType::Immediate,
+            "TYPE_UIMM8" => DecoderOperandType::UnsignedImmediate8,
+            "TYPE_M" => DecoderOperandType::Memory,
+            "TYPE_MSIB" => DecoderOperandType::MemoryScaledIndexBase,
+            "TYPE_MVSIBX" => DecoderOperandType::VectorIndexExtended,
+            "TYPE_MVSIBY" => DecoderOperandType::VectorIndexYmm,
+            "TYPE_MVSIBZ" => DecoderOperandType::VectorIndexZmm,
+            "TYPE_SRCIDX" => DecoderOperandType::SourceIndex,
+            "TYPE_DSTIDX" => DecoderOperandType::DestinationIndex,
+            "TYPE_MOFFS" => DecoderOperandType::MemoryOffset,
+            "TYPE_ST" => DecoderOperandType::FloatingStack,
+            "TYPE_MM64" => DecoderOperandType::Multimedia,
+            "TYPE_XMM" => DecoderOperandType::Vector128,
+            "TYPE_YMM" => DecoderOperandType::Vector256,
+            "TYPE_ZMM" => DecoderOperandType::Vector512,
+            "TYPE_VK" => DecoderOperandType::Mask,
+            "TYPE_VK_PAIR" => DecoderOperandType::MaskPair,
+            "TYPE_TMM" => DecoderOperandType::Tile,
+            "TYPE_SEGMENTREG" => DecoderOperandType::Segment,
+            "TYPE_DEBUGREG" => DecoderOperandType::Debug,
+            "TYPE_CONTROLREG" => DecoderOperandType::Control,
+            "TYPE_BNDR" => DecoderOperandType::Bound,
+            "TYPE_Rv" => DecoderOperandType::RegisterOperandSize,
+            _ => DecoderOperandType::None,
+        }
+    }
+
+    fn operand_encoding_named(name: &str) -> OperandEncoding {
+        match name {
+            "ENCODING_REG" => OperandEncoding::Register,
+            "ENCODING_RM" => OperandEncoding::RegisterMemory(0),
+            "ENCODING_SIB" => OperandEncoding::ScaledIndexBase,
+            "ENCODING_VSIB" => OperandEncoding::VectorIndex(0),
+            "ENCODING_VVVV" => OperandEncoding::VectorRegister,
+            "ENCODING_WRITEMASK" => OperandEncoding::Writemask,
+            "ENCODING_IB" => OperandEncoding::Immediate8,
+            "ENCODING_IW" => OperandEncoding::Immediate16,
+            "ENCODING_ID" => OperandEncoding::Immediate32,
+            "ENCODING_IO" => OperandEncoding::Immediate64,
+            "ENCODING_Iv" => OperandEncoding::ImmediateOperandSize,
+            "ENCODING_Ia" => OperandEncoding::ImmediateAddressSize,
+            "ENCODING_IRC" => OperandEncoding::RoundingControl,
+            "ENCODING_RB" => OperandEncoding::OpcodeRegister8,
+            "ENCODING_RO" => OperandEncoding::OpcodeRegister64,
+            "ENCODING_Rv" => OperandEncoding::OpcodeRegisterOperandSize,
+            "ENCODING_FP" => OperandEncoding::FloatingStack,
+            "ENCODING_CC" => OperandEncoding::ConditionCode,
+            "ENCODING_CF" => OperandEncoding::ConditionFlags,
+            "ENCODING_SI" => OperandEncoding::SourceIndex,
+            "ENCODING_DI" => OperandEncoding::DestinationIndex,
+            _ => OperandEncoding::None,
+        }
+    }
+
+    const FORM_PSEUDO: u8 = 0;
+    const FORM_RAW: u8 = 1;
+    const FORM_ADD_REGISTER: u8 = 2;
+    const FORM_RAW_MEMORY_OFFSET: u8 = 3;
+    const FORM_RAW_SOURCE: u8 = 4;
+    const FORM_RAW_DESTINATION: u8 = 5;
+    const FORM_RAW_DESTINATION_SOURCE: u8 = 6;
+    const FORM_RAW_IMMEDIATE_8: u8 = 7;
+    const FORM_RAW_IMMEDIATE_16: u8 = 8;
+    const FORM_ADD_CONDITION: u8 = 9;
+    const FORM_PREFIX_BYTE: u8 = 10;
+    const FORM_DESTINATION_REGISTER_CONDITION: u8 = 18;
+    const FORM_DESTINATION_MEMORY_CONDITION: u8 = 19;
+    const FORM_DESTINATION_MEMORY_FOUR_OPERAND_CONDITION: u8 = 20;
+    const FORM_REGISTER_ZERO: u8 = 21;
+    const FORM_SOURCE_MEMORY_FORCED_SIB: u8 = 22;
+    const FORM_DESTINATION_MEMORY_FORCED_SIB: u8 = 23;
+    const FORM_DESTINATION_MEMORY: u8 = 24;
+    const FORM_SOURCE_MEMORY: u8 = 25;
+    const FORM_SOURCE_MEMORY_FOUR_OPERAND_THIRD: u8 = 26;
+    const FORM_SOURCE_MEMORY_OPERAND_FOUR: u8 = 27;
+    const FORM_SOURCE_MEMORY_CONDITION: u8 = 28;
+    const FORM_MEMORY_CONDITION: u8 = 30;
+    const FORM_MEMORY_ANY: u8 = 31;
+    const FORM_MEMORY_EXTENDED_FIRST: u8 = 32;
+    const FORM_MEMORY_EXTENDED_LAST: u8 = 39;
+    const FORM_DESTINATION_REGISTER: u8 = 40;
+    const FORM_SOURCE_REGISTER: u8 = 41;
+    const FORM_SOURCE_REGISTER_FOUR_OPERAND_THIRD: u8 = 42;
+    const FORM_SOURCE_REGISTER_OPERAND_FOUR: u8 = 43;
+    const FORM_SOURCE_REGISTER_CONDITION: u8 = 44;
+    const FORM_REGISTER_CONDITION: u8 = 46;
+    const FORM_REGISTER_ANY: u8 = 47;
+    const FORM_REGISTER_EXTENDED_FIRST: u8 = 48;
+    const FORM_REGISTER_EXTENDED_LAST: u8 = 55;
+    const FORM_ANY_EXTENDED_FIRST: u8 = 56;
+    const FORM_ANY_EXTENDED_LAST: u8 = 63;
+    const FORM_EXACT_FIRST: u8 = 64;
+    const FORM_EXACT_LAST: u8 = 127;
+
+    const PREFIX_PD: u8 = 1;
+    const PREFIX_XS: u8 = 2;
+    const PREFIX_XD: u8 = 3;
+    const PREFIX_PS: u8 = 4;
+    const ENCODING_VEX: u8 = 1;
+    const ENCODING_XOP: u8 = 2;
+    const ENCODING_EVEX: u8 = 3;
+    const OPERAND_SIZE_16: u8 = 1;
+    const OPERAND_SIZE_32: u8 = 2;
+    const ADDRESS_SIZE_16: u8 = 1;
+    const ADDRESS_SIZE_32: u8 = 2;
+    const ADDRESS_SIZE_64: u8 = 3;
+    const MAP_FOUR: u8 = 8;
+
+    pub const ATTRIBUTE_64BIT: u16 = 1;
+    pub const ATTRIBUTE_XS: u16 = 1 << 1;
+    pub const ATTRIBUTE_XD: u16 = 1 << 2;
+    pub const ATTRIBUTE_REXW: u16 = 1 << 3;
+    pub const ATTRIBUTE_OPSIZE: u16 = 1 << 4;
+    pub const ATTRIBUTE_ADSIZE: u16 = 1 << 5;
+    pub const ATTRIBUTE_VEX: u16 = 1 << 6;
+    pub const ATTRIBUTE_VEXL: u16 = 1 << 7;
+    pub const ATTRIBUTE_EVEX: u16 = 1 << 8;
+    pub const ATTRIBUTE_EVEXL2: u16 = 1 << 9;
+    pub const ATTRIBUTE_EVEXK: u16 = 1 << 10;
+    pub const ATTRIBUTE_EVEXKZ: u16 = 1 << 11;
+    pub const ATTRIBUTE_EVEXB: u16 = 1 << 12;
+    pub const ATTRIBUTE_REX2: u16 = 1 << 13;
+    pub const ATTRIBUTE_EVEXNF: u16 = 1 << 14;
+    pub const ATTRIBUTE_EVEXU: u16 = 1 << 15;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum ModRmFilter {
+        Everything,
+        Mode(bool),
+        Extended(bool, u8),
+        ExtendedRegisterMemory(u8),
+        Exact(u8),
+    }
+
+    impl ModRmFilter {
+        fn accepts(self, modrm: u8) -> bool {
+            let register = modrm & 0xc0 == 0xc0;
+            match self {
+                ModRmFilter::Everything => true,
+                ModRmFilter::Mode(wanted) => wanted == register,
+                ModRmFilter::Extended(wanted, field) => {
+                    wanted == register && (modrm & 0x38) >> 3 == field
+                }
+                ModRmFilter::ExtendedRegisterMemory(field) => register && modrm & 7 == field,
+                ModRmFilter::Exact(value) => modrm == value,
+            }
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct DecoderSpecifier {
+        pub name: String,
+        pub context: u16,
+        pub operands: Vec<(OperandEncoding, DecoderOperandType)>,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    pub enum DecisionKind {
+        OneEntry,
+        SplitRegisterMemory,
+        SplitMiscellaneous,
+        SplitRegister,
+        Full,
+    }
+
+    pub struct DecoderTables {
+        pub context_names: Vec<&'static str>,
+        pub contexts_by_attributes: Vec<u16>,
+        pub decisions: BTreeMap<(u8, u16, u8), (DecisionKind, u32)>,
+        pub modrm_table: Vec<u16>,
+        pub specifiers: Vec<Option<DecoderSpecifier>>,
+    }
+
+    struct ContextModel {
+        names: Vec<&'static str>,
+        index: BTreeMap<&'static str, u16>,
+        ranks: Vec<u8>,
+        clauses: Vec<Vec<(Vec<&'static str>, u16, &'static str)>>,
+        sixty_four: u16,
+    }
+
+    #[derive(Clone, Copy)]
+    struct InheritanceFlags {
+        no_prefix: bool,
+        length_ignored: bool,
+        width_ignored: bool,
+        address_64: bool,
+    }
+
+    impl ContextModel {
+        fn new() -> ContextModel {
+            let names: Vec<&'static str> = DECODER_CONTEXTS.iter().map(|(name, _)| *name).collect();
+            let ranks = DECODER_CONTEXTS.iter().map(|(_, rank)| *rank).collect();
+            let index: BTreeMap<&'static str, u16> = names
+                .iter()
+                .enumerate()
+                .map(|(position, name)| (*name, position as u16))
+                .collect();
+            let mut clauses = vec![Vec::new(); names.len()];
+            for (parent, terms) in DECODER_INHERITANCE {
+                let Some(parent) = index.get(parent) else {
+                    continue;
+                };
+                for (conditions, child, argument) in terms.iter() {
+                    if let Some(child) = index.get(child) {
+                        clauses[*parent as usize].push((conditions.to_vec(), *child, *argument));
+                    }
+                }
+            }
+            let sixty_four = index.get("IC_64BIT").copied().unwrap_or(1);
+            ContextModel {
+                names,
+                index,
+                ranks,
+                clauses,
+                sixty_four,
+            }
+        }
+
+        fn named(&self, name: &str) -> u16 {
+            self.index.get(name).copied().unwrap_or(0)
+        }
+
+        fn inherits(&self, child: u16, parent: u16, flags: InheritanceFlags) -> bool {
+            if child == parent {
+                return true;
+            }
+            for (conditions, next, argument) in &self.clauses[parent as usize] {
+                let holds = conditions.iter().all(|condition| match *condition {
+                    "no_prefix" => flags.no_prefix,
+                    "length_ignored" => flags.length_ignored,
+                    "width_ignored" => flags.width_ignored,
+                    "not_address_64" => !flags.address_64,
+                    _ => false,
+                });
+                if !holds {
+                    continue;
+                }
+                let no_prefix = match *argument {
+                    "no_prefix" => flags.no_prefix,
+                    "address_64" => flags.address_64,
+                    _ => true,
+                };
+                let next_flags = InheritanceFlags {
+                    no_prefix,
+                    length_ignored: false,
+                    width_ignored: false,
+                    address_64: false,
+                };
+                if self.inherits(child, *next, next_flags) {
+                    return true;
+                }
+            }
+            false
+        }
+
+        fn context_for_attributes(&self, index: u16) -> u16 {
+            let has = |bit: u16| index & bit != 0;
+            let name = if has(ATTRIBUTE_EVEX) && has(ATTRIBUTE_ADSIZE) && has(ATTRIBUTE_OPSIZE) {
+                "IC_EVEX_OPSIZE_ADSIZE".to_string()
+            } else if has(ATTRIBUTE_EVEX) && has(ATTRIBUTE_ADSIZE) && has(ATTRIBUTE_XD) {
+                "IC_EVEX_XD_ADSIZE".to_string()
+            } else if has(ATTRIBUTE_EVEX) && has(ATTRIBUTE_ADSIZE) && has(ATTRIBUTE_XS) {
+                "IC_EVEX_XS_ADSIZE".to_string()
+            } else if has(ATTRIBUTE_EVEXNF) {
+                let mut name = "IC_EVEX".to_string();
+                if has(ATTRIBUTE_REXW) {
+                    name.push_str("_W");
+                } else if has(ATTRIBUTE_OPSIZE) {
+                    name.push_str("_OPSIZE");
+                }
+                if has(ATTRIBUTE_EVEXB) {
+                    name.push_str("_B");
+                }
+                name.push_str("_NF");
+                name
+            } else if has(ATTRIBUTE_EVEX) || has(ATTRIBUTE_VEX) || has(ATTRIBUTE_VEXL) {
+                let mut name = if has(ATTRIBUTE_EVEX) {
+                    "IC_EVEX".to_string()
+                } else {
+                    "IC_VEX".to_string()
+                };
+                if has(ATTRIBUTE_EVEXB) && has(ATTRIBUTE_EVEXU) {
+                } else if has(ATTRIBUTE_EVEX) && has(ATTRIBUTE_EVEXL2) {
+                    name.push_str("_L2");
+                } else if has(ATTRIBUTE_VEXL) {
+                    name.push_str("_L");
+                }
+                if has(ATTRIBUTE_REXW) {
+                    name.push_str("_W");
+                }
+                if has(ATTRIBUTE_OPSIZE) {
+                    name.push_str("_OPSIZE");
+                } else if has(ATTRIBUTE_XD) {
+                    name.push_str("_XD");
+                } else if has(ATTRIBUTE_XS) {
+                    name.push_str("_XS");
+                }
+                if has(ATTRIBUTE_EVEX) {
+                    if has(ATTRIBUTE_EVEXKZ) {
+                        name.push_str("_KZ");
+                    } else if has(ATTRIBUTE_EVEXK) {
+                        name.push_str("_K");
+                    }
+                    if has(ATTRIBUTE_EVEXB) {
+                        name.push_str("_B");
+                    }
+                    if has(ATTRIBUTE_EVEXB) && has(ATTRIBUTE_EVEXU) {
+                        name.push_str("_U");
+                    }
+                }
+                name
+            } else if has(ATTRIBUTE_64BIT) && has(ATTRIBUTE_REX2) {
+                if has(ATTRIBUTE_REXW) {
+                    "IC_64BIT_REX2_REXW".to_string()
+                } else {
+                    "IC_64BIT_REX2".to_string()
+                }
+            } else {
+                let sixty_four = has(ATTRIBUTE_64BIT);
+                let width = has(ATTRIBUTE_REXW);
+                let xs = has(ATTRIBUTE_XS);
+                let xd = has(ATTRIBUTE_XD);
+                let operand = has(ATTRIBUTE_OPSIZE);
+                let address = has(ATTRIBUTE_ADSIZE);
+                let name = if sixty_four && width && xs {
+                    "IC_64BIT_REXW_XS"
+                } else if sixty_four && width && xd {
+                    "IC_64BIT_REXW_XD"
+                } else if sixty_four && width && operand {
+                    "IC_64BIT_REXW_OPSIZE"
+                } else if sixty_four && width && address {
+                    "IC_64BIT_REXW_ADSIZE"
+                } else if sixty_four && xd && operand {
+                    "IC_64BIT_XD_OPSIZE"
+                } else if sixty_four && xd && address {
+                    "IC_64BIT_XD_ADSIZE"
+                } else if sixty_four && xs && operand {
+                    "IC_64BIT_XS_OPSIZE"
+                } else if sixty_four && xs && address {
+                    "IC_64BIT_XS_ADSIZE"
+                } else if sixty_four && xs {
+                    "IC_64BIT_XS"
+                } else if sixty_four && xd {
+                    "IC_64BIT_XD"
+                } else if sixty_four && operand && address {
+                    "IC_64BIT_OPSIZE_ADSIZE"
+                } else if sixty_four && operand {
+                    "IC_64BIT_OPSIZE"
+                } else if sixty_four && address {
+                    "IC_64BIT_ADSIZE"
+                } else if sixty_four && width {
+                    "IC_64BIT_REXW"
+                } else if sixty_four {
+                    "IC_64BIT"
+                } else if xs && operand {
+                    "IC_XS_OPSIZE"
+                } else if xd && operand {
+                    "IC_XD_OPSIZE"
+                } else if xs && address {
+                    "IC_XS_ADSIZE"
+                } else if xd && address {
+                    "IC_XD_ADSIZE"
+                } else if xs {
+                    "IC_XS"
+                } else if xd {
+                    "IC_XD"
+                } else if operand && address {
+                    "IC_OPSIZE_ADSIZE"
+                } else if operand {
+                    "IC_OPSIZE"
+                } else if address {
+                    "IC_ADSIZE"
+                } else {
+                    "IC"
+                };
+                name.to_string()
+            };
+            self.named(&name)
+        }
+    }
+
+    struct RecognizedInstruction {
+        prefix: u8,
+        map: u8,
+        opcode: u8,
+        form: u8,
+        encoding: u8,
+        operand_size: u8,
+        address_size: u8,
+        width: bool,
+        vector_register: bool,
+        width_ignored: bool,
+        length: bool,
+        length_ignored: bool,
+        length_two: bool,
+        mask: bool,
+        mask_zero: bool,
+        broadcast: bool,
+        upper: bool,
+        no_flags: bool,
+        rounding_control: bool,
+        displacement_scale: u8,
+        explicit_rex2: bool,
+        only_32_bit: bool,
+        only_64_bit: bool,
+    }
+
+    fn record_byte(record: &TableRecord, field: &str) -> u8 {
+        match record.field(field) {
+            Some(TableValue::Bits(bits)) => bits_value(bits) as u8,
+            Some(TableValue::Integer(value)) => *value as u8,
+            _ => 0,
+        }
+    }
+
+    impl RecognizedInstruction {
+        fn from(record: &TableRecord) -> RecognizedInstruction {
+            let bit = |field: &str| table_bit(record, field);
+            let form = record_byte(record, "FormBits");
+            let broadcast = bit("hasEVEX_B");
+            let mut only_32_bit = false;
+            let mut only_64_bit = false;
+            for predicate in table_record_list(record, "Predicates") {
+                if predicate.contains("Not64Bit") || predicate.contains("In32Bit") {
+                    only_32_bit = true;
+                    break;
+                }
+                if predicate.contains("In64Bit") {
+                    only_64_bit = true;
+                    break;
+                }
+            }
+            RecognizedInstruction {
+                prefix: record_byte(record, "OpPrefixBits"),
+                map: record_byte(record, "OpMapBits"),
+                opcode: record_byte(record, "Opcode"),
+                form,
+                encoding: record_byte(record, "OpEncBits"),
+                operand_size: record_byte(record, "OpSizeBits"),
+                address_size: record_byte(record, "AdSizeBits"),
+                width: bit("hasREX_W"),
+                vector_register: bit("hasVEX_4V"),
+                width_ignored: bit("IgnoresW"),
+                length: bit("hasVEX_L"),
+                length_ignored: bit("ignoresVEX_L"),
+                length_two: bit("hasEVEX_L2"),
+                mask: bit("hasEVEX_K"),
+                mask_zero: bit("hasEVEX_Z"),
+                broadcast,
+                upper: bit("hasEVEX_U"),
+                no_flags: bit("hasEVEX_NF"),
+                rounding_control: broadcast
+                    && (form == FORM_DESTINATION_REGISTER || form == FORM_SOURCE_REGISTER),
+                displacement_scale: record_byte(record, "CD8_Scale"),
+                explicit_rex2: record_byte(record, "explicitOpPrefixBits") == 1,
+                only_32_bit,
+                only_64_bit,
+            }
+        }
+
+        fn emitted(&self, record: &TableRecord) -> bool {
+            self.form != FORM_PSEUDO
+                && (!table_bit(record, "isCodeGenOnly") || table_bit(record, "ForceDisassemble"))
+                && !table_bit(record, "isAsmParserOnly")
+        }
+
+        fn masked(&self, base: &str) -> String {
+            let suffix = if self.mask_zero && self.broadcast {
+                "_KZ_B"
+            } else if self.mask && self.broadcast {
+                "_K_B"
+            } else if self.mask_zero {
+                "_KZ"
+            } else if self.mask {
+                "_K"
+            } else if self.broadcast {
+                "_B"
+            } else {
+                ""
+            };
+            format!("{base}{suffix}")
+        }
+
+        fn masked_upper(&self, base: &str) -> String {
+            let suffix = if self.mask_zero {
+                "_KZ_B_U"
+            } else if self.mask {
+                "_K_B_U"
+            } else {
+                "_B_U"
+            };
+            format!("{base}{suffix}")
+        }
+
+        fn prefixed(&self, base: &str) -> Option<String> {
+            match self.prefix {
+                PREFIX_PD => Some(format!("{base}_OPSIZE")),
+                PREFIX_XS => Some(format!("{base}_XS")),
+                PREFIX_XD => Some(format!("{base}_XD")),
+                PREFIX_PS => Some(base.to_string()),
+                _ => None,
+            }
+        }
+
+        fn context_name(&self) -> String {
+            if self.encoding == ENCODING_EVEX {
+                if self.rounding_control && self.upper {
+                    let base = if self.width { "IC_EVEX_W" } else { "IC_EVEX" };
+                    return self.masked_upper(&self.prefixed(base).unwrap_or_default());
+                }
+                if self.no_flags {
+                    let base = if self.prefix == PREFIX_PD {
+                        "IC_EVEX_OPSIZE"
+                    } else if self.width {
+                        "IC_EVEX_W"
+                    } else {
+                        "IC_EVEX"
+                    };
+                    let base = if self.broadcast {
+                        format!("{base}_B")
+                    } else {
+                        base.to_string()
+                    };
+                    return format!("{base}_NF");
+                }
+                let base = if !self.rounding_control && self.length && self.width {
+                    "IC_EVEX_L_W"
+                } else if !self.rounding_control && self.length {
+                    "IC_EVEX_L"
+                } else if !self.rounding_control && self.length_two && self.width {
+                    "IC_EVEX_L2_W"
+                } else if !self.rounding_control && self.length_two {
+                    "IC_EVEX_L2"
+                } else if self.width {
+                    "IC_EVEX_W"
+                } else {
+                    let plain = match self.prefix {
+                        PREFIX_PD => "IC_EVEX_OPSIZE",
+                        PREFIX_XD => "IC_EVEX_XD",
+                        PREFIX_XS => "IC_EVEX_XS",
+                        _ => "IC_EVEX",
+                    };
+                    if self.prefix != PREFIX_PS && self.address_size == ADDRESS_SIZE_32 {
+                        return format!("{plain}_ADSIZE");
+                    }
+                    return self.masked(plain);
+                };
+                return self.masked(&self.prefixed(base).unwrap_or_default());
+            }
+            if self.encoding == ENCODING_VEX || self.encoding == ENCODING_XOP {
+                let (pd, xs, xd, ps) = (
+                    self.prefix == PREFIX_PD,
+                    self.prefix == PREFIX_XS,
+                    self.prefix == PREFIX_XD,
+                    self.prefix == PREFIX_PS,
+                );
+                let name = if self.length && self.width {
+                    return self.prefixed("IC_VEX_L_W").unwrap_or_default();
+                } else if pd && self.length {
+                    "IC_VEX_L_OPSIZE"
+                } else if pd && self.width {
+                    "IC_VEX_W_OPSIZE"
+                } else if pd {
+                    "IC_VEX_OPSIZE"
+                } else if self.length && xs {
+                    "IC_VEX_L_XS"
+                } else if self.length && xd {
+                    "IC_VEX_L_XD"
+                } else if self.width && xs {
+                    "IC_VEX_W_XS"
+                } else if self.width && xd {
+                    "IC_VEX_W_XD"
+                } else if self.width && ps {
+                    "IC_VEX_W"
+                } else if self.length && ps {
+                    "IC_VEX_L"
+                } else if xd {
+                    "IC_VEX_XD"
+                } else if xs {
+                    "IC_VEX_XS"
+                } else {
+                    "IC_VEX"
+                };
+                return name.to_string();
+            }
+            let operand16 = self.operand_size == OPERAND_SIZE_16;
+            let (pd, xs, xd) = (
+                self.prefix == PREFIX_PD,
+                self.prefix == PREFIX_XS,
+                self.prefix == PREFIX_XD,
+            );
+            if self.only_64_bit || self.width || self.address_size == ADDRESS_SIZE_64 {
+                let address32 = self.address_size == ADDRESS_SIZE_32;
+                let name = if self.width && (operand16 || pd) {
+                    "IC_64BIT_REXW_OPSIZE"
+                } else if self.width && address32 {
+                    "IC_64BIT_REXW_ADSIZE"
+                } else if operand16 && xd {
+                    "IC_64BIT_XD_OPSIZE"
+                } else if operand16 && xs {
+                    "IC_64BIT_XS_OPSIZE"
+                } else if address32 && (pd || operand16) {
+                    "IC_64BIT_OPSIZE_ADSIZE"
+                } else if operand16 || pd {
+                    "IC_64BIT_OPSIZE"
+                } else if address32 {
+                    "IC_64BIT_ADSIZE"
+                } else if self.width && xs {
+                    "IC_64BIT_REXW_XS"
+                } else if self.width && xd {
+                    "IC_64BIT_REXW_XD"
+                } else if xd {
+                    "IC_64BIT_XD"
+                } else if xs {
+                    "IC_64BIT_XS"
+                } else if self.width && self.explicit_rex2 {
+                    "IC_64BIT_REX2_REXW"
+                } else if self.explicit_rex2 {
+                    "IC_64BIT_REX2"
+                } else if self.width {
+                    "IC_64BIT_REXW"
+                } else {
+                    "IC_64BIT"
+                };
+                return name.to_string();
+            }
+            let address16 = self.address_size == ADDRESS_SIZE_16;
+            let name = if operand16 && xd {
+                "IC_XD_OPSIZE"
+            } else if operand16 && xs {
+                "IC_XS_OPSIZE"
+            } else if address16 && xd {
+                "IC_XD_ADSIZE"
+            } else if address16 && xs {
+                "IC_XS_ADSIZE"
+            } else if address16 && (pd || operand16) {
+                "IC_OPSIZE_ADSIZE"
+            } else if operand16 || pd {
+                "IC_OPSIZE"
+            } else if address16 {
+                "IC_ADSIZE"
+            } else if xd {
+                "IC_XD"
+            } else if xs {
+                "IC_XS"
+            } else {
+                "IC"
+            };
+            name.to_string()
+        }
+
+        fn operand_type(&self, name: &str) -> DecoderOperandType {
+            if self.width && name == "GR32" {
+                return DecoderOperandType::Register32;
+            }
+            if self.operand_size == OPERAND_SIZE_16 && name == "GR16" {
+                return DecoderOperandType::RegisterOperandSize;
+            }
+            if self.operand_size == OPERAND_SIZE_32 && name == "GR32" {
+                return DecoderOperandType::RegisterOperandSize;
+            }
+            DECODER_TYPE_NAMES
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| operand_type_named(value))
+                .unwrap_or(DecoderOperandType::None)
+        }
+
+        fn operand_encoding(&self, table: &[(&str, &str)], name: &str) -> OperandEncoding {
+            let immediate_like = table.iter().any(|(key, _)| *key == "i16imm");
+            if immediate_like && self.operand_size != OPERAND_SIZE_16 && name == "i16imm" {
+                return OperandEncoding::Immediate16;
+            }
+            let encoding = table
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| operand_encoding_named(value))
+                .unwrap_or(OperandEncoding::None);
+            if self.displacement_scale == 0 {
+                return encoding;
+            }
+            let shift = self.displacement_scale.trailing_zeros() as u8;
+            match encoding {
+                OperandEncoding::RegisterMemory(_) => OperandEncoding::RegisterMemory(shift),
+                OperandEncoding::VectorIndex(_) => OperandEncoding::VectorIndex(shift),
+                other => other,
+            }
+        }
+
+        fn operands(
+            &self,
+            instruction: &Instruction,
+        ) -> Vec<(OperandEncoding, DecoderOperandType)> {
+            let groups = &instruction.groups;
+            let count = groups.len();
+            let mut mapping: Vec<usize> = (0..count).collect();
+            let mut physical_count = 0;
+            for (index, group) in groups.iter().enumerate() {
+                match group.tied_to {
+                    Some(target) if target < count => mapping[target] = index,
+                    _ => physical_count += 1,
+                }
+            }
+            let mut specifier = vec![(OperandEncoding::None, DecoderOperandType::None); count];
+            let mut operand = 0usize;
+            let mut physical = 0usize;
+            let mut handle = |optional: bool,
+                              table: &[(&str, &str)],
+                              operand: &mut usize,
+                              physical: &mut usize| {
+                if optional && *physical >= physical_count {
+                    return;
+                }
+                while *operand < count && mapping[*operand] != *operand {
+                    specifier[*operand] = (
+                        OperandEncoding::Duplicate,
+                        DecoderOperandType::Duplicate(mapping[*operand] as u8),
+                    );
+                    *operand += 1;
+                }
+                if *operand >= count {
+                    return;
+                }
+                let name = groups[*operand].record.as_str();
+                specifier[*operand] = (self.operand_encoding(table, name), self.operand_type(name));
+                *operand += 1;
+                *physical += 1;
+            };
+            let new_data = self.map == MAP_FOUR && self.broadcast && self.vector_register;
+            let reg = DECODER_REG_REGISTER_ENCODINGS;
+            let rm = DECODER_RM_REGISTER_ENCODINGS;
+            let vvvv = DECODER_VVVV_ENCODINGS;
+            let writemask = DECODER_WRITEMASK_ENCODINGS;
+            let memory = DECODER_MEMORY_ENCODINGS;
+            let immediate = DECODER_IMMEDIATE_ENCODINGS;
+            let relocation = DECODER_RELOCATION_ENCODINGS;
+            let modifier = DECODER_OPCODE_MODIFIER_ENCODINGS;
+            let (o, p) = (&mut operand, &mut physical);
+            match self.form {
+                FORM_PREFIX_BYTE => {}
+                FORM_RAW_SOURCE | FORM_RAW_DESTINATION => handle(false, relocation, o, p),
+                FORM_RAW_DESTINATION_SOURCE => {
+                    handle(false, relocation, o, p);
+                    handle(false, relocation, o, p);
+                }
+                FORM_RAW => handle(true, relocation, o, p),
+                FORM_RAW_MEMORY_OFFSET => handle(false, relocation, o, p),
+                FORM_ADD_REGISTER => {
+                    handle(false, modifier, o, p);
+                    handle(true, relocation, o, p);
+                }
+                FORM_ADD_CONDITION => {
+                    handle(false, relocation, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_DESTINATION_REGISTER_CONDITION => {
+                    handle(false, rm, o, p);
+                    handle(false, reg, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_DESTINATION_REGISTER
+                | FORM_DESTINATION_MEMORY
+                | FORM_DESTINATION_MEMORY_FORCED_SIB => {
+                    let first = if self.form == FORM_DESTINATION_REGISTER {
+                        rm
+                    } else {
+                        memory
+                    };
+                    if new_data {
+                        handle(false, vvvv, o, p);
+                    }
+                    handle(false, first, o, p);
+                    if self.mask {
+                        handle(false, writemask, o, p);
+                    }
+                    if !new_data && self.vector_register {
+                        handle(false, vvvv, o, p);
+                    }
+                    handle(false, reg, o, p);
+                    handle(true, immediate, o, p);
+                    handle(true, immediate, o, p);
+                }
+                FORM_DESTINATION_MEMORY_CONDITION => {
+                    handle(false, memory, o, p);
+                    handle(false, reg, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_DESTINATION_MEMORY_FOUR_OPERAND_CONDITION => {
+                    handle(false, reg, o, p);
+                    handle(false, memory, o, p);
+                    handle(false, vvvv, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_SOURCE_REGISTER | FORM_SOURCE_MEMORY | FORM_SOURCE_MEMORY_FORCED_SIB => {
+                    let last = if self.form == FORM_SOURCE_REGISTER {
+                        rm
+                    } else {
+                        memory
+                    };
+                    if new_data {
+                        handle(false, vvvv, o, p);
+                    }
+                    handle(false, reg, o, p);
+                    if self.mask {
+                        handle(false, writemask, o, p);
+                    }
+                    if !new_data && self.vector_register {
+                        handle(false, vvvv, o, p);
+                    }
+                    handle(false, last, o, p);
+                    handle(true, immediate, o, p);
+                    handle(true, immediate, o, p);
+                }
+                FORM_SOURCE_REGISTER_FOUR_OPERAND_THIRD | FORM_SOURCE_MEMORY_FOUR_OPERAND_THIRD => {
+                    let middle = if self.form == FORM_SOURCE_REGISTER_FOUR_OPERAND_THIRD {
+                        rm
+                    } else {
+                        memory
+                    };
+                    handle(false, reg, o, p);
+                    handle(false, middle, o, p);
+                    handle(false, vvvv, o, p);
+                }
+                FORM_SOURCE_REGISTER_OPERAND_FOUR | FORM_SOURCE_MEMORY_OPERAND_FOUR => {
+                    let last = if self.form == FORM_SOURCE_REGISTER_OPERAND_FOUR {
+                        rm
+                    } else {
+                        memory
+                    };
+                    handle(false, reg, o, p);
+                    handle(false, vvvv, o, p);
+                    handle(false, immediate, o, p);
+                    handle(false, last, o, p);
+                    handle(true, immediate, o, p);
+                }
+                FORM_SOURCE_REGISTER_CONDITION | FORM_SOURCE_MEMORY_CONDITION => {
+                    let last = if self.form == FORM_SOURCE_REGISTER_CONDITION {
+                        rm
+                    } else {
+                        memory
+                    };
+                    if new_data {
+                        handle(false, vvvv, o, p);
+                    }
+                    handle(false, reg, o, p);
+                    handle(false, last, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_REGISTER_CONDITION => {
+                    handle(false, rm, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_REGISTER_ZERO => handle(false, reg, o, p),
+                FORM_REGISTER_ANY | FORM_REGISTER_EXTENDED_FIRST..=FORM_REGISTER_EXTENDED_LAST => {
+                    if self.vector_register {
+                        handle(false, vvvv, o, p);
+                    }
+                    if self.mask {
+                        handle(false, writemask, o, p);
+                    }
+                    handle(true, rm, o, p);
+                    handle(true, relocation, o, p);
+                    handle(true, immediate, o, p);
+                    handle(true, immediate, o, p);
+                }
+                FORM_MEMORY_CONDITION => {
+                    handle(false, memory, o, p);
+                    handle(false, modifier, o, p);
+                }
+                FORM_MEMORY_ANY | FORM_MEMORY_EXTENDED_FIRST..=FORM_MEMORY_EXTENDED_LAST => {
+                    if self.vector_register {
+                        handle(false, vvvv, o, p);
+                    }
+                    if self.mask {
+                        handle(false, writemask, o, p);
+                    }
+                    handle(false, memory, o, p);
+                    handle(true, relocation, o, p);
+                    handle(true, immediate, o, p);
+                    handle(true, immediate, o, p);
+                }
+                FORM_RAW_IMMEDIATE_8 | FORM_RAW_IMMEDIATE_16 => {
+                    handle(false, immediate, o, p);
+                    handle(false, immediate, o, p);
+                }
+                FORM_ANY_EXTENDED_FIRST..=FORM_ANY_EXTENDED_LAST
+                | FORM_EXACT_FIRST..=FORM_EXACT_LAST => handle(true, relocation, o, p),
+                _ => {}
+            }
+            specifier
+        }
+
+        fn filter(&self) -> Option<ModRmFilter> {
+            Some(match self.form {
+                FORM_RAW
+                | FORM_ADD_REGISTER
+                | FORM_RAW_MEMORY_OFFSET
+                | FORM_RAW_SOURCE
+                | FORM_RAW_DESTINATION
+                | FORM_RAW_DESTINATION_SOURCE
+                | FORM_RAW_IMMEDIATE_8
+                | FORM_RAW_IMMEDIATE_16
+                | FORM_ADD_CONDITION
+                | FORM_PREFIX_BYTE => ModRmFilter::Everything,
+                FORM_DESTINATION_REGISTER
+                | FORM_DESTINATION_REGISTER_CONDITION
+                | FORM_SOURCE_REGISTER
+                | FORM_SOURCE_REGISTER_FOUR_OPERAND_THIRD
+                | FORM_SOURCE_REGISTER_OPERAND_FOUR
+                | FORM_SOURCE_REGISTER_CONDITION
+                | FORM_REGISTER_CONDITION
+                | FORM_REGISTER_ANY => ModRmFilter::Mode(true),
+                FORM_DESTINATION_MEMORY
+                | FORM_DESTINATION_MEMORY_CONDITION
+                | FORM_DESTINATION_MEMORY_FOUR_OPERAND_CONDITION
+                | FORM_DESTINATION_MEMORY_FORCED_SIB
+                | FORM_SOURCE_MEMORY
+                | FORM_SOURCE_MEMORY_FORCED_SIB
+                | FORM_SOURCE_MEMORY_FOUR_OPERAND_THIRD
+                | FORM_SOURCE_MEMORY_OPERAND_FOUR
+                | FORM_SOURCE_MEMORY_CONDITION
+                | FORM_MEMORY_CONDITION
+                | FORM_MEMORY_ANY => ModRmFilter::Mode(false),
+                FORM_REGISTER_EXTENDED_FIRST..=FORM_REGISTER_EXTENDED_LAST => {
+                    ModRmFilter::Extended(true, self.form - FORM_REGISTER_EXTENDED_FIRST)
+                }
+                FORM_ANY_EXTENDED_FIRST..=FORM_ANY_EXTENDED_LAST => {
+                    ModRmFilter::Extended(true, self.form - FORM_ANY_EXTENDED_FIRST)
+                }
+                FORM_REGISTER_ZERO => ModRmFilter::ExtendedRegisterMemory(0),
+                FORM_MEMORY_EXTENDED_FIRST..=FORM_MEMORY_EXTENDED_LAST => {
+                    ModRmFilter::Extended(false, self.form - FORM_MEMORY_EXTENDED_FIRST)
+                }
+                FORM_EXACT_FIRST..=FORM_EXACT_LAST => {
+                    ModRmFilter::Exact(0xc0 + (self.form - FORM_EXACT_FIRST))
+                }
+                _ => return None,
+            })
+        }
+
+        fn opcode_count(&self) -> u8 {
+            match self.form {
+                FORM_ADD_REGISTER => 8,
+                FORM_SOURCE_REGISTER_CONDITION
+                | FORM_SOURCE_MEMORY_CONDITION
+                | FORM_REGISTER_CONDITION
+                | FORM_MEMORY_CONDITION
+                | FORM_ADD_CONDITION
+                | FORM_DESTINATION_REGISTER_CONDITION
+                | FORM_DESTINATION_MEMORY_CONDITION
+                | FORM_DESTINATION_MEMORY_FOUR_OPERAND_CONDITION => 16,
+                _ => 1,
+            }
+        }
+
+        fn address_bits(&self) -> u32 {
+            match self.address_size {
+                ADDRESS_SIZE_16 => 16,
+                ADDRESS_SIZE_32 => 32,
+                ADDRESS_SIZE_64 => 64,
+                _ => 0,
+            }
+        }
+    }
+
+    struct PendingEntry {
+        identifier: u16,
+        context: u16,
+        filter: ModRmFilter,
+        only_32_bit: bool,
+        flags: InheritanceFlags,
+        address_bits: u32,
+    }
+
+    fn decision_kind(identifiers: &[u16; 256]) -> DecisionKind {
+        let mut one_entry = true;
+        let mut split_register_memory = true;
+        let mut split_register = true;
+        let mut split_miscellaneous = true;
+        for index in 0..256 {
+            let value = identifiers[index];
+            if value != identifiers[0] {
+                one_entry = false;
+            }
+            let register = index & 0xc0 == 0xc0;
+            if register && value != identifiers[0xc0] {
+                split_register_memory = false;
+            }
+            if !register && value != identifiers[0] {
+                split_register_memory = false;
+            }
+            if register && value != identifiers[index & 0xf8] {
+                split_register = false;
+            }
+            if !register && value != identifiers[index & 0x38] {
+                split_miscellaneous = false;
+            }
+        }
+        if one_entry {
+            DecisionKind::OneEntry
+        } else if split_register_memory {
+            DecisionKind::SplitRegisterMemory
+        } else if split_register && split_miscellaneous {
+            DecisionKind::SplitRegister
+        } else if split_miscellaneous {
+            DecisionKind::SplitMiscellaneous
+        } else {
+            DecisionKind::Full
+        }
+    }
+
+    fn decision_entries(kind: DecisionKind, identifiers: &[u16; 256]) -> Vec<u16> {
+        match kind {
+            DecisionKind::OneEntry => vec![identifiers[0]],
+            DecisionKind::SplitRegisterMemory => vec![identifiers[0], identifiers[0xc0]],
+            DecisionKind::SplitRegister => (0..64)
+                .step_by(8)
+                .chain((0xc0..256).step_by(8))
+                .map(|index| identifiers[index])
+                .collect(),
+            DecisionKind::SplitMiscellaneous => (0..64)
+                .step_by(8)
+                .chain(0xc0..256)
+                .map(|index| identifiers[index])
+                .collect(),
+            DecisionKind::Full => identifiers.to_vec(),
+        }
+    }
+
+    fn build_decoder_tables(target: &Target) -> DecoderTables {
+        let model = ContextModel::new();
+        let context_count = model.names.len();
+        let mut order: Vec<usize> = (0..target.instructions.len()).collect();
+        order.sort_by(|left, right| {
+            let pseudo = |index: &usize| {
+                target
+                    .records
+                    .get(&target.instructions[*index].record)
+                    .map(|record| table_bit(record, "isPseudo"))
+                    .unwrap_or(false)
+            };
+            (!pseudo(left), target.instructions[*left].record.as_str())
+                .cmp(&(!pseudo(right), target.instructions[*right].record.as_str()))
+        });
+        let mut specifiers: Vec<Option<DecoderSpecifier>> = vec![None; target.instructions.len()];
+        let mut groups: BTreeMap<(u8, u8), Vec<PendingEntry>> = BTreeMap::new();
+        for index in order {
+            let instruction = &target.instructions[index];
+            let Some(record) = target.records.get(&instruction.record) else {
+                continue;
+            };
+            if !record.is_a("X86Inst") {
+                continue;
+            }
+            let recognized = RecognizedInstruction::from(record);
+            if !recognized.emitted(record) {
+                continue;
+            }
+            let context = model.named(&recognized.context_name());
+            specifiers[index] = Some(DecoderSpecifier {
+                name: instruction.record.clone(),
+                context,
+                operands: recognized.operands(instruction),
+            });
+            let Some(filter) = recognized.filter() else {
+                continue;
+            };
+            if recognized.map > 11 {
+                continue;
+            }
+            let flags = InheritanceFlags {
+                no_prefix: recognized.prefix == 0,
+                length_ignored: recognized.length_ignored || recognized.rounding_control,
+                width_ignored: recognized.width_ignored,
+                address_64: recognized.address_bits() == 64,
+            };
+            let count = recognized.opcode_count();
+            for offset in 0..count {
+                let opcode = recognized.opcode.wrapping_add(offset);
+                groups
+                    .entry((recognized.map, opcode))
+                    .or_default()
+                    .push(PendingEntry {
+                        identifier: index as u16 + 1,
+                        context,
+                        filter,
+                        only_32_bit: recognized.only_32_bit,
+                        flags,
+                        address_bits: recognized.address_bits(),
+                    });
+            }
+        }
+        let default_flags = InheritanceFlags {
+            no_prefix: true,
+            length_ignored: false,
+            width_ignored: false,
+            address_64: false,
+        };
+        let mut sixty_four_children: Vec<bool> = vec![false; context_count];
+        for (child, slot) in sixty_four_children.iter_mut().enumerate() {
+            *slot = model.inherits(child as u16, model.sixty_four, default_flags);
+        }
+        let mut inheritance_cache: BTreeMap<(u16, u8), Vec<bool>> = BTreeMap::new();
+        let mut modrm_table: Vec<u16> = vec![0];
+        let mut interned: BTreeMap<Vec<u16>, u32> = BTreeMap::new();
+        interned.insert(vec![0], 0);
+        let mut decisions = BTreeMap::new();
+        for ((map, opcode), entries) in groups {
+            let mut contexts: BTreeMap<u16, [u16; 256]> = BTreeMap::new();
+            for entry in &entries {
+                let key = (
+                    entry.context,
+                    u8::from(entry.flags.no_prefix)
+                        | u8::from(entry.flags.length_ignored) << 1
+                        | u8::from(entry.flags.width_ignored) << 2
+                        | u8::from(entry.flags.address_64) << 3,
+                );
+                let children = inheritance_cache.entry(key).or_insert_with(|| {
+                    (0..context_count)
+                        .map(|child| model.inherits(child as u16, entry.context, entry.flags))
+                        .collect()
+                });
+                for context in 0..context_count {
+                    if (entry.only_32_bit || entry.address_bits == 16)
+                        && sixty_four_children[context]
+                    {
+                        continue;
+                    }
+                    if !children[context] {
+                        continue;
+                    }
+                    let table = contexts.entry(context as u16).or_insert([0u16; 256]);
+                    for (modrm, slot) in table.iter_mut().enumerate() {
+                        if !entry.filter.accepts(modrm as u8) {
+                            continue;
+                        }
+                        let previous = *slot;
+                        if previous == entry.identifier {
+                            continue;
+                        }
+                        if previous != 0 {
+                            let previous_specifier = specifiers[previous as usize - 1].as_ref();
+                            let new_specifier = specifiers[entry.identifier as usize - 1].as_ref();
+                            if let (Some(old), Some(new)) = (previous_specifier, new_specifier) {
+                                if old.name == "NOOP"
+                                    && matches!(
+                                        new.name.as_str(),
+                                        "XCHG16ar" | "XCHG32ar" | "XCHG64ar"
+                                    )
+                                {
+                                    continue;
+                                }
+                                if model.ranks[old.context as usize]
+                                    > model.ranks[new.context as usize]
+                                {
+                                    continue;
+                                }
+                            }
+                        }
+                        *slot = entry.identifier;
+                    }
+                }
+            }
+            for (context, identifiers) in contexts {
+                let kind = decision_kind(&identifiers);
+                if kind == DecisionKind::OneEntry && identifiers[0] == 0 {
+                    continue;
+                }
+                let entries = decision_entries(kind, &identifiers);
+                let offset = match interned.get(&entries) {
+                    Some(offset) => *offset,
+                    None => {
+                        let offset = modrm_table.len() as u32;
+                        modrm_table.extend_from_slice(&entries);
+                        interned.insert(entries, offset);
+                        offset
+                    }
+                };
+                decisions.insert((map, context, opcode), (kind, offset));
+            }
+        }
+        let contexts_by_attributes = (0..=u16::MAX)
+            .map(|attributes| model.context_for_attributes(attributes))
+            .collect();
+        DecoderTables {
+            context_names: model.names.clone(),
+            contexts_by_attributes,
+            decisions,
+            modrm_table,
+            specifiers,
+        }
+    }
+
+    pub fn decoder_tables(target: &Target) -> &'static DecoderTables {
+        static TABLES: OnceLock<DecoderTables> = OnceLock::new();
+        TABLES.get_or_init(|| build_decoder_tables(target))
+    }
+
+    const REGISTER_8: u16 = 0;
+    const REGISTER_8_HIGH: u16 = 32;
+    const REGISTER_16: u16 = 36;
+    const REGISTER_32: u16 = 68;
+    const REGISTER_64: u16 = 100;
+    const REGISTER_MMX: u16 = 132;
+    const REGISTER_XMM: u16 = 140;
+    const REGISTER_YMM: u16 = 172;
+    const REGISTER_ZMM: u16 = 204;
+    const REGISTER_MASK: u16 = 236;
+    const REGISTER_MASK_PAIR: u16 = 244;
+    const REGISTER_SEGMENT: u16 = 248;
+    const REGISTER_DEBUG: u16 = 254;
+    const REGISTER_CONTROL: u16 = 270;
+    const REGISTER_TILE: u16 = 286;
+
+    const BASE_NONE: u16 = 0;
+    const BASE_16: u16 = 1;
+    const BASE_32: u16 = 33;
+    const BASE_SIB: u16 = 37;
+    const BASE_64: u16 = 65;
+    const BASE_SIB_64: u16 = 69;
+    const BASE_REGISTER: u16 = 97;
+
+    const INDEX_NONE: u16 = 0;
+    const INDEX_XMM: u16 = 97;
+    const INDEX_YMM: u16 = 129;
+    const INDEX_ZMM: u16 = 161;
+
+    const SCALED_BASE_NONE: u16 = 0;
+    const SCALED_BASE_32: u16 = 1;
+    const SCALED_BASE_64: u16 = 33;
+
+    const MAP_ONE_BYTE: u8 = 0;
+    const MAP_TWO_BYTE: u8 = 1;
+    const MAP_THREE_BYTE_38: u8 = 2;
+    const MAP_THREE_BYTE_3A: u8 = 3;
+    const MAP_XOP_8: u8 = 4;
+    const MAP_XOP_9: u8 = 5;
+    const MAP_XOP_A: u8 = 6;
+    const MAP_THREE_D_NOW: u8 = 7;
+    const MAP_DECODER_FOUR: u8 = 8;
+    const MAP_FIVE: u8 = 9;
+    const MAP_SIX: u8 = 10;
+    const MAP_SEVEN: u8 = 11;
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum VectorExtension {
+        None,
+        Vex2,
+        Vex3,
+        Evex,
+        Xop,
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Displacement {
+        None,
+        Byte,
+        Word,
+        Double,
+    }
+
+    fn inverted_bit(value: u8, offset: u8) -> u8 {
+        (!value >> offset) & 1
+    }
+
+    fn bit_at(value: u8, offset: u8) -> u8 {
+        (value >> offset) & 1
+    }
+
+    struct DecoderState<'b> {
+        bytes: &'b [u8],
+        cursor: usize,
+        mode: Mode,
+        mandatory_prefix: u8,
+        vector_prefix: [u8; 4],
+        vector: VectorExtension,
+        rex2_prefix: [u8; 2],
+        rex: u8,
+        segment: u8,
+        acquire_release: bool,
+        address_prefix: bool,
+        operand_prefix: bool,
+        lock: bool,
+        repeat: u8,
+        register_size: u8,
+        address_size: u8,
+        displacement_size: u8,
+        immediate_size: u8,
+        opcode: u8,
+        map: u8,
+        identifier: u16,
+        vvvv: u16,
+        writemask: u16,
+        consumed_modrm: bool,
+        modrm: u8,
+        sib: u8,
+        displacement: i32,
+        immediates_consumed: usize,
+        immediates: [u64; 3],
+        opcode_register: u16,
+        register_memory_base: u16,
+        register_base: u16,
+        base: u16,
+        displacement_kind: Displacement,
+        register: u16,
+        index_base: u16,
+        index: u16,
+        scale: u8,
+        scaled_base: u16,
+        rounding: u8,
+    }
+
+    impl<'b> DecoderState<'b> {
+        fn new(bytes: &'b [u8], mode: Mode) -> DecoderState<'b> {
+            DecoderState {
+                bytes,
+                cursor: 0,
+                mode,
+                mandatory_prefix: 0,
+                vector_prefix: [0; 4],
+                vector: VectorExtension::None,
+                rex2_prefix: [0; 2],
+                rex: 0,
+                segment: 0,
+                acquire_release: false,
+                address_prefix: false,
+                operand_prefix: false,
+                lock: false,
+                repeat: 0,
+                register_size: 0,
+                address_size: 0,
+                displacement_size: 0,
+                immediate_size: 0,
+                opcode: 0,
+                map: MAP_ONE_BYTE,
+                identifier: 0,
+                vvvv: 0,
+                writemask: 0,
+                consumed_modrm: false,
+                modrm: 0,
+                sib: 0,
+                displacement: 0,
+                immediates_consumed: 0,
+                immediates: [0; 3],
+                opcode_register: 0,
+                register_memory_base: 0,
+                register_base: 0,
+                base: BASE_NONE,
+                displacement_kind: Displacement::None,
+                register: 0,
+                index_base: 0,
+                index: INDEX_NONE,
+                scale: 0,
+                scaled_base: SCALED_BASE_NONE,
+                rounding: 0,
+            }
+        }
+
+        fn peek(&self) -> Option<u8> {
+            self.bytes.get(self.cursor).copied()
+        }
+
+        fn consume(&mut self) -> Option<u8> {
+            let byte = self.peek()?;
+            self.cursor += 1;
+            Some(byte)
+        }
+
+        fn consume_bytes(&mut self, count: usize) -> Option<u64> {
+            if self.cursor + count > self.bytes.len() {
+                return None;
+            }
+            let mut value = 0u64;
+            for (index, byte) in self.bytes[self.cursor..self.cursor + count]
+                .iter()
+                .enumerate()
+            {
+                value |= (*byte as u64) << (8 * index);
+            }
+            self.cursor += count;
+            Some(value)
+        }
+
+        fn sixty_four(&self) -> bool {
+            self.mode == Mode::Bits64
+        }
+
+        fn is_rex(&self, byte: u8) -> bool {
+            self.sixty_four() && (0x40..=0x4f).contains(&byte)
+        }
+
+        fn is_rex2(&self, byte: u8) -> bool {
+            self.sixty_four() && byte == 0xd5
+        }
+
+        fn rex_w(&self) -> u8 {
+            bit_at(self.rex, 3)
+        }
+
+        fn rex_r(&self) -> u8 {
+            bit_at(self.rex, 2)
+        }
+
+        fn rex_x(&self) -> u8 {
+            bit_at(self.rex, 1)
+        }
+
+        fn rex_b(&self) -> u8 {
+            bit_at(self.rex, 0)
+        }
+
+        fn rex2_m(&self) -> u8 {
+            bit_at(self.rex2_prefix[1], 7)
+        }
+
+        fn rex2_r2(&self) -> u8 {
+            bit_at(self.rex2_prefix[1], 6)
+        }
+
+        fn rex2_x2(&self) -> u8 {
+            bit_at(self.rex2_prefix[1], 5)
+        }
+
+        fn rex2_b2(&self) -> u8 {
+            bit_at(self.rex2_prefix[1], 4)
+        }
+
+        fn evex_r2(&self) -> u8 {
+            inverted_bit(self.vector_prefix[1], 4)
+        }
+
+        fn evex_x(&self) -> u8 {
+            inverted_bit(self.vector_prefix[1], 6)
+        }
+
+        fn evex_pp(&self) -> u8 {
+            self.vector_prefix[2] & 3
+        }
+
+        fn evex_u(&self) -> u8 {
+            inverted_bit(self.vector_prefix[2], 2)
+        }
+
+        fn evex_z(&self) -> u8 {
+            bit_at(self.vector_prefix[3], 7)
+        }
+
+        fn evex_l2(&self) -> u8 {
+            bit_at(self.vector_prefix[3], 6)
+        }
+
+        fn evex_l(&self) -> u8 {
+            bit_at(self.vector_prefix[3], 5)
+        }
+
+        fn evex_b(&self) -> u8 {
+            bit_at(self.vector_prefix[3], 4)
+        }
+
+        fn evex_v2(&self) -> u8 {
+            inverted_bit(self.vector_prefix[3], 3)
+        }
+
+        fn evex_aaa(&self) -> u8 {
+            self.vector_prefix[3] & 7
+        }
+
+        fn evex_nf(&self) -> u8 {
+            bit_at(self.vector_prefix[3], 2)
+        }
+
+        fn evex_condition(&self) -> u8 {
+            self.vector_prefix[3] & 0xf
+        }
+
+        fn evex_flags(&self) -> u8 {
+            (self.vector_prefix[2] >> 3) & 0xf
+        }
+
+        fn read_prefixes(&mut self) -> Option<()> {
+            let mut is_prefix = true;
+            let mut byte = 0u8;
+            while is_prefix {
+                let Some(next) = self.consume() else {
+                    break;
+                };
+                byte = next;
+                if self.cursor == 1 && byte == 0xf0 {
+                    break;
+                }
+                if byte == 0xf2 || byte == 0xf3 {
+                    if let Some(next_byte) = self.peek() {
+                        if next_byte == 0xf0 || next_byte & 0xfe == 0x86 || next_byte & 0xf8 == 0x90
+                        {
+                            self.acquire_release = true;
+                            if !(byte == 0xf3 && next_byte == 0x90) {
+                                break;
+                            }
+                        }
+                        if byte == 0xf3 && matches!(next_byte, 0x88 | 0x89 | 0xc6 | 0xc7) {
+                            self.acquire_release = true;
+                            break;
+                        }
+                        if self.is_rex(next_byte) {
+                            self.consume()?;
+                            self.peek()?;
+                            self.cursor -= 1;
+                        }
+                    }
+                }
+                match byte {
+                    0xf0 => self.lock = true,
+                    0xf2 | 0xf3 => {
+                        if let Some(next_byte) = self.peek() {
+                            if self.is_rex(next_byte)
+                                || self.is_rex2(next_byte)
+                                || next_byte == 0x0f
+                                || next_byte == 0x66
+                            {
+                                self.mandatory_prefix = byte;
+                            }
+                            self.repeat = byte;
+                        }
+                    }
+                    0x2e => self.segment = 1,
+                    0x36 => self.segment = 2,
+                    0x3e => self.segment = 3,
+                    0x26 => self.segment = 4,
+                    0x64 => self.segment = 5,
+                    0x65 => self.segment = 6,
+                    0x66 => {
+                        self.operand_prefix = true;
+                        if let Some(next_byte) = self.peek() {
+                            if self.mandatory_prefix == 0
+                                && (next_byte == 0x0f || self.is_rex(next_byte))
+                            {
+                                self.mandatory_prefix = byte;
+                            }
+                        }
+                    }
+                    0x67 => self.address_prefix = true,
+                    _ => is_prefix = false,
+                }
+                if self.is_rex(byte) {
+                    self.rex = byte;
+                    is_prefix = true;
+                } else if is_prefix {
+                    self.rex = 0;
+                }
+            }
+            self.vector = VectorExtension::None;
+            if byte == 0x62 {
+                let first = self.consume()?;
+                self.peek()?;
+                if self.sixty_four() || first & 0xc0 == 0xc0 {
+                    self.vector = VectorExtension::Evex;
+                } else {
+                    self.cursor -= 2;
+                }
+                if self.vector == VectorExtension::Evex {
+                    self.vector_prefix[0] = byte;
+                    self.vector_prefix[1] = first;
+                    self.vector_prefix[2] = self.consume()?;
+                    self.vector_prefix[3] = self.consume()?;
+                    if self.sixty_four() {
+                        let prefix = self.vector_prefix;
+                        self.rex = 0x40
+                            | (bit_at(prefix[2], 7) << 3)
+                            | (inverted_bit(prefix[1], 7) << 2)
+                            | (inverted_bit(prefix[1], 6) << 1)
+                            | inverted_bit(prefix[1], 5);
+                        self.rex2_prefix[1] = (inverted_bit(prefix[1], 4) << 6)
+                            | (inverted_bit(prefix[2], 2) << 5)
+                            | (bit_at(prefix[1], 3) << 4);
+                    }
+                }
+            } else if byte == 0xc4 {
+                let first = self.peek()?;
+                if self.sixty_four() || first & 0xc0 == 0xc0 {
+                    self.vector = VectorExtension::Vex3;
+                } else {
+                    self.cursor -= 1;
+                }
+                if self.vector == VectorExtension::Vex3 {
+                    self.vector_prefix[0] = byte;
+                    if let Some(value) = self.consume() {
+                        self.vector_prefix[1] = value;
+                    }
+                    if let Some(value) = self.consume() {
+                        self.vector_prefix[2] = value;
+                    }
+                    if self.sixty_four() {
+                        let prefix = self.vector_prefix;
+                        self.rex = 0x40
+                            | (bit_at(prefix[2], 7) << 3)
+                            | (inverted_bit(prefix[1], 7) << 2)
+                            | (inverted_bit(prefix[1], 6) << 1)
+                            | inverted_bit(prefix[1], 5);
+                    }
+                }
+            } else if byte == 0xc5 {
+                let first = self.peek()?;
+                if self.sixty_four() || first & 0xc0 == 0xc0 {
+                    self.vector = VectorExtension::Vex2;
+                } else {
+                    self.cursor -= 1;
+                }
+                if self.vector == VectorExtension::Vex2 {
+                    self.vector_prefix[0] = byte;
+                    if let Some(value) = self.consume() {
+                        self.vector_prefix[1] = value;
+                    }
+                    if self.sixty_four() {
+                        self.rex = 0x40 | (inverted_bit(self.vector_prefix[1], 7) << 2);
+                    }
+                    if self.vector_prefix[1] & 3 == 1 {
+                        self.operand_prefix = true;
+                    }
+                }
+            } else if byte == 0x8f {
+                let first = self.peek()?;
+                if first & 0x38 != 0 {
+                    self.vector = VectorExtension::Xop;
+                } else {
+                    self.cursor -= 1;
+                }
+                if self.vector == VectorExtension::Xop {
+                    self.vector_prefix[0] = byte;
+                    if let Some(value) = self.consume() {
+                        self.vector_prefix[1] = value;
+                    }
+                    if let Some(value) = self.consume() {
+                        self.vector_prefix[2] = value;
+                    }
+                    if self.sixty_four() {
+                        let prefix = self.vector_prefix;
+                        self.rex = 0x40
+                            | (bit_at(prefix[2], 7) << 3)
+                            | (inverted_bit(prefix[1], 7) << 2)
+                            | (inverted_bit(prefix[1], 6) << 1)
+                            | inverted_bit(prefix[1], 5);
+                    }
+                    if self.vector_prefix[2] & 3 == 1 {
+                        self.operand_prefix = true;
+                    }
+                }
+            } else if self.is_rex2(byte) {
+                self.peek()?;
+                self.rex2_prefix[0] = byte;
+                if let Some(value) = self.consume() {
+                    self.rex2_prefix[1] = value;
+                }
+                let prefix = self.rex2_prefix[1];
+                self.rex = 0x40
+                    | (bit_at(prefix, 3) << 3)
+                    | (bit_at(prefix, 2) << 2)
+                    | (bit_at(prefix, 1) << 1)
+                    | bit_at(prefix, 0);
+            } else if self.cursor > 0 {
+                self.cursor -= 1;
+            }
+            match self.mode {
+                Mode::Bits16 => {
+                    self.register_size = if self.operand_prefix { 4 } else { 2 };
+                    self.address_size = if self.address_prefix { 4 } else { 2 };
+                    self.displacement_size = if self.address_prefix { 4 } else { 2 };
+                    self.immediate_size = if self.operand_prefix { 4 } else { 2 };
+                }
+                Mode::Bits32 => {
+                    self.register_size = if self.operand_prefix { 2 } else { 4 };
+                    self.address_size = if self.address_prefix { 2 } else { 4 };
+                    self.displacement_size = if self.address_prefix { 2 } else { 4 };
+                    self.immediate_size = if self.operand_prefix { 2 } else { 4 };
+                }
+                Mode::Bits64 => {
+                    self.displacement_size = 4;
+                    if self.rex != 0 && self.rex_w() != 0 {
+                        self.register_size = 8;
+                        self.address_size = if self.address_prefix { 4 } else { 8 };
+                        self.immediate_size = 4;
+                        self.operand_prefix = false;
+                    } else {
+                        self.register_size = if self.operand_prefix { 2 } else { 4 };
+                        self.address_size = if self.address_prefix { 4 } else { 8 };
+                        self.immediate_size = if self.operand_prefix { 2 } else { 4 };
+                    }
+                }
+            }
+            Some(())
+        }
+
+        fn read_scaled_index(&mut self) -> Option<()> {
+            let scaled_base_start = match self.address_size {
+                4 => {
+                    self.index_base = BASE_32;
+                    SCALED_BASE_32
+                }
+                8 => {
+                    self.index_base = BASE_64;
+                    SCALED_BASE_64
+                }
+                _ => return None,
+            };
+            self.sib = self.consume()?;
+            let index = ((self.sib >> 3) & 7) | (self.rex_x() << 3) | (self.rex2_x2() << 4);
+            self.index = if index == 4 {
+                INDEX_NONE
+            } else {
+                self.index_base + index as u16
+            };
+            self.scale = 1 << (self.sib >> 6);
+            let base = (self.sib & 7) | (self.rex_b() << 3) | (self.rex2_b2() << 4);
+            match base {
+                0x5 | 0xd => match self.modrm >> 6 {
+                    0 => {
+                        self.displacement_kind = Displacement::Double;
+                        self.scaled_base = SCALED_BASE_NONE;
+                    }
+                    1 => {
+                        self.displacement_kind = Displacement::Byte;
+                        self.scaled_base = scaled_base_start + base as u16;
+                    }
+                    2 => {
+                        self.displacement_kind = Displacement::Double;
+                        self.scaled_base = scaled_base_start + base as u16;
+                    }
+                    _ => return None,
+                },
+                _ => self.scaled_base = scaled_base_start + base as u16,
+            }
+            Some(())
+        }
+
+        fn read_displacement(&mut self) -> Option<()> {
+            match self.displacement_kind {
+                Displacement::None => {}
+                Displacement::Byte => self.displacement = self.consume_bytes(1)? as u8 as i8 as i32,
+                Displacement::Word => {
+                    self.displacement = self.consume_bytes(2)? as u16 as i16 as i32
+                }
+                Displacement::Double => self.displacement = self.consume_bytes(4)? as u32 as i32,
+            }
+            Some(())
+        }
+
+        fn read_modrm(&mut self) -> Option<()> {
+            if self.consumed_modrm {
+                return Some(());
+            }
+            self.modrm = self.consume()?;
+            self.consumed_modrm = true;
+            let mode = self.modrm >> 6;
+            let mut rm = self.modrm & 7;
+            let mut reg = (self.modrm >> 3) & 7;
+            match self.register_size {
+                2 => {
+                    self.register_base = REGISTER_16;
+                    self.register_memory_base = BASE_REGISTER + REGISTER_16;
+                }
+                4 => {
+                    self.register_base = REGISTER_32;
+                    self.register_memory_base = BASE_REGISTER + REGISTER_32;
+                }
+                8 => {
+                    self.register_base = REGISTER_64;
+                    self.register_memory_base = BASE_REGISTER + REGISTER_64;
+                }
+                _ => {}
+            }
+            reg |= (self.rex_r() << 3) | (self.rex2_r2() << 4);
+            rm |= (self.rex_b() << 3) | (self.rex2_b2() << 4);
+            if self.vector == VectorExtension::Evex && self.sixty_four() {
+                reg |= self.evex_r2() << 4;
+            }
+            self.register = self.register_base + reg as u16;
+            match self.address_size {
+                2 => match mode {
+                    0 => {
+                        if rm == 6 {
+                            self.base = BASE_NONE;
+                            self.displacement_kind = Displacement::Word;
+                            self.read_displacement()?;
+                        } else {
+                            self.base = BASE_16 + rm as u16;
+                            self.displacement_kind = Displacement::None;
+                        }
+                    }
+                    1 => {
+                        self.base = BASE_16 + rm as u16;
+                        self.displacement_kind = Displacement::Byte;
+                        self.displacement_size = 1;
+                        self.read_displacement()?;
+                    }
+                    2 => {
+                        self.base = BASE_16 + rm as u16;
+                        self.displacement_kind = Displacement::Word;
+                        self.read_displacement()?;
+                    }
+                    _ => {
+                        self.base = self.register_memory_base + rm as u16;
+                        self.read_displacement()?;
+                    }
+                },
+                4 | 8 => {
+                    let base_start = if self.address_size == 4 {
+                        BASE_32
+                    } else {
+                        BASE_64
+                    };
+                    match mode {
+                        0 => {
+                            self.displacement_kind = Displacement::None;
+                            match rm & 7 {
+                                4 => {
+                                    self.base = if self.address_size == 4 {
+                                        BASE_SIB
+                                    } else {
+                                        BASE_SIB_64
+                                    };
+                                    self.read_scaled_index()?;
+                                    self.read_displacement()?;
+                                }
+                                5 => {
+                                    self.base = BASE_NONE;
+                                    self.displacement_kind = Displacement::Double;
+                                    self.read_displacement()?;
+                                }
+                                _ => self.base = base_start + rm as u16,
+                            }
+                        }
+                        1 | 2 => {
+                            if mode == 1 {
+                                self.displacement_size = 1;
+                            }
+                            self.displacement_kind = if mode == 1 {
+                                Displacement::Byte
+                            } else {
+                                Displacement::Double
+                            };
+                            if rm & 7 == 4 {
+                                self.base = BASE_SIB;
+                                self.read_scaled_index()?;
+                                self.read_displacement()?;
+                            } else {
+                                self.base = base_start + rm as u16;
+                                self.read_displacement()?;
+                            }
+                        }
+                        _ => {
+                            self.displacement_kind = Displacement::None;
+                            self.base = self.register_memory_base + rm as u16;
+                        }
+                    }
+                }
+                _ => {}
+            }
+            Some(())
+        }
+
+        fn fixup_value(&self, kind: DecoderOperandType, index: u16, base: u16) -> Option<u16> {
+            Some(match kind {
+                DecoderOperandType::RegisterOperandSize => base + index,
+                DecoderOperandType::Register8 => {
+                    if self.rex != 0 && (4..=7).contains(&index) {
+                        REGISTER_8_HIGH + (index - 4)
+                    } else {
+                        REGISTER_8 + index
+                    }
+                }
+                DecoderOperandType::Register16 => REGISTER_16 + index,
+                DecoderOperandType::Register32 => REGISTER_32 + index,
+                DecoderOperandType::Register64 => REGISTER_64 + index,
+                DecoderOperandType::Vector512 | DecoderOperandType::VectorIndexZmm => {
+                    REGISTER_ZMM + index
+                }
+                DecoderOperandType::Vector256 | DecoderOperandType::VectorIndexYmm => {
+                    REGISTER_YMM + index
+                }
+                DecoderOperandType::Vector128 | DecoderOperandType::VectorIndexExtended => {
+                    REGISTER_XMM + index
+                }
+                DecoderOperandType::Tile if index <= 7 => REGISTER_TILE + index,
+                DecoderOperandType::Mask if index & 0xf <= 7 => REGISTER_MASK + (index & 0xf),
+                DecoderOperandType::MaskPair if index <= 7 => REGISTER_MASK_PAIR + index / 2,
+                DecoderOperandType::Multimedia => REGISTER_MMX + (index & 7),
+                DecoderOperandType::Segment if index & 7 <= 5 => REGISTER_SEGMENT + (index & 7),
+                DecoderOperandType::Debug if index <= 15 => REGISTER_DEBUG + index,
+                DecoderOperandType::Control if index <= 15 => REGISTER_CONTROL + index,
+                _ => return None,
+            })
+        }
+
+        fn fixup(&mut self, encoding: OperandEncoding, kind: DecoderOperandType) -> Option<()> {
+            match encoding {
+                OperandEncoding::VectorRegister => {
+                    self.vvvv = self.fixup_value(kind, self.vvvv, self.register_base)?;
+                }
+                OperandEncoding::Register => {
+                    self.register = self.fixup_value(
+                        kind,
+                        self.register - self.register_base,
+                        self.register_base,
+                    )?;
+                }
+                OperandEncoding::RegisterMemory(_) | OperandEncoding::ScaledIndexBase => {
+                    if matches!(encoding, OperandEncoding::RegisterMemory(_))
+                        && self.vector == VectorExtension::Evex
+                        && self.sixty_four()
+                        && self.modrm >> 6 == 3
+                        && !matches!(
+                            kind,
+                            DecoderOperandType::RegisterOperandSize
+                                | DecoderOperandType::Register8
+                                | DecoderOperandType::Register16
+                                | DecoderOperandType::Register32
+                                | DecoderOperandType::Register64
+                        )
+                    {
+                        self.base += (self.evex_x() as u16) << 4;
+                    }
+                    if self.base >= self.register_memory_base {
+                        self.base = BASE_REGISTER
+                            + self.fixup_value(
+                                kind,
+                                self.base - self.register_memory_base,
+                                self.register_memory_base - BASE_REGISTER,
+                            )?;
+                    }
+                }
+                _ => return None,
+            }
+            Some(())
+        }
+
+        fn read_opcode(&mut self) -> Option<()> {
+            self.map = MAP_ONE_BYTE;
+            let map = match self.vector {
+                VectorExtension::Evex => Some(match self.vector_prefix[1] & 7 {
+                    1 => MAP_TWO_BYTE,
+                    2 => MAP_THREE_BYTE_38,
+                    3 => MAP_THREE_BYTE_3A,
+                    4 => MAP_DECODER_FOUR,
+                    5 => MAP_FIVE,
+                    6 => MAP_SIX,
+                    7 => MAP_SEVEN,
+                    _ => return None,
+                }),
+                VectorExtension::Vex3 => Some(match self.vector_prefix[1] & 0x1f {
+                    1 => MAP_TWO_BYTE,
+                    2 => MAP_THREE_BYTE_38,
+                    3 => MAP_THREE_BYTE_3A,
+                    5 => MAP_FIVE,
+                    6 => MAP_SIX,
+                    7 => MAP_SEVEN,
+                    _ => return None,
+                }),
+                VectorExtension::Vex2 => Some(MAP_TWO_BYTE),
+                VectorExtension::Xop => Some(match self.vector_prefix[1] & 0x1f {
+                    8 => MAP_XOP_8,
+                    9 => MAP_XOP_9,
+                    10 => MAP_XOP_A,
+                    _ => return None,
+                }),
+                VectorExtension::None if self.rex2_m() != 0 => Some(MAP_TWO_BYTE),
+                VectorExtension::None => None,
+            };
+            if let Some(map) = map {
+                self.map = map;
+                self.opcode = self.consume()?;
+                return Some(());
+            }
+            let mut current = self.consume()?;
+            if current == 0x0f {
+                current = self.consume()?;
+                if current == 0x38 {
+                    current = self.consume()?;
+                    self.map = MAP_THREE_BYTE_38;
+                } else if current == 0x3a {
+                    current = self.consume()?;
+                    self.map = MAP_THREE_BYTE_3A;
+                } else if current == 0x0f {
+                    self.read_modrm()?;
+                    current = self.consume()?;
+                    self.map = MAP_THREE_D_NOW;
+                } else {
+                    self.map = MAP_TWO_BYTE;
+                }
+            } else if self.mandatory_prefix != 0 {
+                self.mandatory_prefix = 0;
+            }
+            self.opcode = current;
+            Some(())
+        }
+
+        fn identifier_with(&mut self, tables: &DecoderTables, attributes: u16) -> Option<u16> {
+            let context = tables.contexts_by_attributes[attributes as usize];
+            let Some((kind, offset)) = tables
+                .decisions
+                .get(&(self.map, context, self.opcode))
+                .copied()
+            else {
+                return Some(0);
+            };
+            let offset = offset as usize;
+            let table = &tables.modrm_table;
+            if kind == DecisionKind::OneEntry {
+                return Some(table[offset]);
+            }
+            self.read_modrm()?;
+            let modrm = self.modrm as usize;
+            let register = modrm & 0xc0 == 0xc0;
+            Some(match kind {
+                DecisionKind::OneEntry => table[offset],
+                DecisionKind::SplitRegisterMemory => table[offset + usize::from(register)],
+                DecisionKind::SplitRegister => {
+                    if register {
+                        table[offset + ((modrm & 0x38) >> 3) + 8]
+                    } else {
+                        table[offset + ((modrm & 0x38) >> 3)]
+                    }
+                }
+                DecisionKind::SplitMiscellaneous => {
+                    if register {
+                        table[offset + (modrm & 0x3f) + 8]
+                    } else {
+                        table[offset + ((modrm & 0x38) >> 3)]
+                    }
+                }
+                DecisionKind::Full => table[offset + modrm],
+            })
+        }
+
+        fn conditional_compare_or_test(&self) -> bool {
+            if self.map != MAP_DECODER_FOUR {
+                return false;
+            }
+            let reg = (self.modrm >> 3) & 7;
+            if self.opcode == 0x83 && reg == 7 {
+                return true;
+            }
+            match self.opcode & 0xfe {
+                0x38 | 0x3a | 0x84 => true,
+                0x80 => reg == 7,
+                0xf6 => reg == 0,
+                _ => false,
+            }
+        }
+
+        fn no_flags(&self) -> bool {
+            if self.evex_nf() == 0 {
+                return false;
+            }
+            if self.map == MAP_DECODER_FOUR {
+                return true;
+            }
+            self.map == MAP_THREE_BYTE_38
+                && self.evex_pp() == 0
+                && matches!(self.opcode, 0xf2 | 0xf3 | 0xf5 | 0xf7)
+        }
+
+        fn read_identifier(&mut self, target: &Target, tables: &DecoderTables) -> Option<()> {
+            let name = |identifier: u16| -> &str {
+                if identifier == 0 {
+                    return "PHI";
+                }
+                target.instructions[identifier as usize - 1].record.as_str()
+            };
+            let mut attributes = 0u16;
+            if self.sixty_four() {
+                attributes |= ATTRIBUTE_64BIT;
+            }
+            if self.vector != VectorExtension::None {
+                attributes |= if self.vector == VectorExtension::Evex {
+                    ATTRIBUTE_EVEX
+                } else {
+                    ATTRIBUTE_VEX
+                };
+                let (pp, length) = match self.vector {
+                    VectorExtension::Evex => (self.evex_pp(), self.evex_l()),
+                    VectorExtension::Vex3 | VectorExtension::Xop => {
+                        (self.vector_prefix[2] & 3, bit_at(self.vector_prefix[2], 2))
+                    }
+                    _ => (self.vector_prefix[1] & 3, bit_at(self.vector_prefix[1], 2)),
+                };
+                match pp {
+                    1 => {
+                        attributes |= ATTRIBUTE_OPSIZE;
+                        if self.vector == VectorExtension::Vex2 && self.address_prefix {
+                            attributes |= ATTRIBUTE_ADSIZE;
+                        }
+                    }
+                    2 => attributes |= ATTRIBUTE_XS,
+                    3 => attributes |= ATTRIBUTE_XD,
+                    _ => {}
+                }
+                if self.vector == VectorExtension::Evex {
+                    if self.evex_z() != 0 {
+                        attributes |= ATTRIBUTE_EVEXKZ;
+                    }
+                    if self.no_flags()
+                        && self.read_modrm().is_some()
+                        && !self.conditional_compare_or_test()
+                    {
+                        attributes |= ATTRIBUTE_EVEXNF;
+                    } else if self.evex_aaa() != 0 && self.map != MAP_DECODER_FOUR {
+                        attributes |= ATTRIBUTE_EVEXK;
+                    }
+                    if self.evex_b() != 0 {
+                        attributes |= ATTRIBUTE_EVEXB;
+                        if self.evex_u() != 0 && self.read_modrm().is_some() && self.modrm >> 6 == 3
+                        {
+                            attributes |= ATTRIBUTE_EVEXU;
+                        }
+                    }
+                    if self.evex_l2() != 0 {
+                        attributes |= ATTRIBUTE_EVEXL2;
+                    }
+                }
+                if length != 0 {
+                    attributes |= ATTRIBUTE_VEXL;
+                }
+            } else if self.mandatory_prefix == 0 {
+                if self.operand_prefix && self.mode != Mode::Bits16 {
+                    attributes |= ATTRIBUTE_OPSIZE;
+                }
+                if self.address_prefix {
+                    attributes |= ATTRIBUTE_ADSIZE;
+                }
+                if self.map == MAP_ONE_BYTE {
+                    if self.repeat == 0xf3 && self.opcode == 0x90 {
+                        attributes |= ATTRIBUTE_XS;
+                    }
+                } else if self.repeat == 0xf2 {
+                    attributes |= ATTRIBUTE_XD;
+                } else if self.repeat == 0xf3 {
+                    attributes |= ATTRIBUTE_XS;
+                }
+            } else {
+                match self.mandatory_prefix {
+                    0xf2 => attributes |= ATTRIBUTE_XD,
+                    0xf3 => attributes |= ATTRIBUTE_XS,
+                    0x66 => {
+                        if self.mode != Mode::Bits16 {
+                            attributes |= ATTRIBUTE_OPSIZE;
+                        }
+                        if self.address_prefix {
+                            attributes |= ATTRIBUTE_ADSIZE;
+                        }
+                    }
+                    0x67 => attributes |= ATTRIBUTE_ADSIZE,
+                    _ => {}
+                }
+            }
+            if self.rex & 0x08 != 0 {
+                attributes |= ATTRIBUTE_REXW;
+                attributes &= !ATTRIBUTE_ADSIZE;
+            }
+            if self.rex2_prefix[0] == 0xd5
+                && self.map == MAP_ONE_BYTE
+                && (self.opcode == 0xa1 || self.opcode & 0xf0 == 0x50)
+            {
+                attributes |= ATTRIBUTE_REX2;
+            }
+            if self.mode == Mode::Bits16 {
+                if self.map == MAP_ONE_BYTE && self.opcode == 0xe3 {
+                    attributes ^= ATTRIBUTE_ADSIZE;
+                }
+                if !self.operand_prefix
+                    && self.map == MAP_ONE_BYTE
+                    && (self.opcode == 0xe8 || self.opcode == 0xe9)
+                {
+                    attributes |= ATTRIBUTE_OPSIZE;
+                }
+                if !self.operand_prefix
+                    && self.map == MAP_TWO_BYTE
+                    && (0x80..=0x8f).contains(&self.opcode)
+                {
+                    attributes |= ATTRIBUTE_OPSIZE;
+                }
+            }
+            let mut identifier = self.identifier_with(tables, attributes)?;
+            if !self.sixty_four() && self.vector != VectorExtension::None {
+                let wide = match self.vector {
+                    VectorExtension::Evex | VectorExtension::Vex3 | VectorExtension::Xop => {
+                        bit_at(self.vector_prefix[2], 7) != 0
+                    }
+                    _ => false,
+                };
+                if wide {
+                    let Some(with_width) =
+                        self.identifier_with(tables, attributes | ATTRIBUTE_REXW)
+                    else {
+                        self.identifier = identifier;
+                        return Some(());
+                    };
+                    if !name(with_width).contains("64") {
+                        self.identifier = with_width;
+                        return Some(());
+                    }
+                }
+            }
+            if (self.map == MAP_ONE_BYTE && self.opcode & 0xfc == 0xa0)
+                || (self.map == MAP_TWO_BYTE && self.opcode == 0xae)
+                || (self.map == MAP_THREE_BYTE_38 && self.opcode == 0xf8)
+                || (self.map == MAP_DECODER_FOUR && self.opcode == 0xf8)
+            {
+                if self.address_prefix {
+                    attributes |= ATTRIBUTE_ADSIZE;
+                }
+                if self.operand_prefix {
+                    attributes |= ATTRIBUTE_OPSIZE;
+                }
+                if self.mode == Mode::Bits16 {
+                    attributes ^= ATTRIBUTE_ADSIZE;
+                    if self.map == MAP_ONE_BYTE && self.opcode & 0xfc == 0xa0 {
+                        attributes ^= ATTRIBUTE_OPSIZE;
+                    }
+                }
+                self.identifier = self.identifier_with(tables, attributes)?;
+                return Some(());
+            }
+            if (self.mode == Mode::Bits16 || self.operand_prefix)
+                && attributes & ATTRIBUTE_OPSIZE == 0
+            {
+                let Some(with_size) = self.identifier_with(tables, attributes | ATTRIBUTE_OPSIZE)
+                else {
+                    self.identifier = identifier;
+                    return Some(());
+                };
+                if sixteen_bit_equivalent(name(identifier), name(with_size))
+                    && ((self.mode == Mode::Bits16) ^ self.operand_prefix)
+                {
+                    identifier = with_size;
+                }
+                self.identifier = identifier;
+                return Some(());
+            }
+            if self.map == MAP_ONE_BYTE && self.opcode == 0x90 && self.rex & 1 != 0 {
+                self.opcode = 0x91;
+                let with_opcode = self.identifier_with(tables, attributes);
+                self.opcode = 0x90;
+                self.identifier = with_opcode.unwrap_or(identifier);
+                return Some(());
+            }
+            self.identifier = identifier;
+            Some(())
+        }
+
+        fn read_opcode_register(&mut self, size: u8) {
+            let size = if size == 0 { self.register_size } else { size };
+            let number = ((self.rex_b() << 3) | (self.rex2_b2() << 4) | (self.opcode & 7)) as u16;
+            self.opcode_register = match size {
+                1 => {
+                    if self.rex != 0 && (4..8).contains(&number) {
+                        REGISTER_8_HIGH + (number - 4)
+                    } else {
+                        REGISTER_8 + number
+                    }
+                }
+                2 => REGISTER_16 + number,
+                4 => REGISTER_32 + number,
+                8 => REGISTER_64 + number,
+                _ => self.opcode_register,
+            };
+        }
+
+        fn read_immediate(&mut self, size: u8) -> Option<()> {
+            self.immediate_size = size;
+            let value = self.consume_bytes(size as usize)?;
+            if self.immediates_consumed < 3 {
+                self.immediates[self.immediates_consumed] = value;
+            }
+            self.immediates_consumed += 1;
+            Some(())
+        }
+
+        fn read_vvvv(&mut self) -> bool {
+            let value = match self.vector {
+                VectorExtension::Evex => {
+                    ((self.evex_v2() as u16) << 4) | ((!self.vector_prefix[2] >> 3) & 0xf) as u16
+                }
+                VectorExtension::Vex3 | VectorExtension::Xop => {
+                    ((!self.vector_prefix[2] >> 3) & 0xf) as u16
+                }
+                VectorExtension::Vex2 => ((!self.vector_prefix[1] >> 3) & 0xf) as u16,
+                VectorExtension::None => return false,
+            };
+            self.vvvv = if self.sixty_four() {
+                value
+            } else {
+                value & 0xf
+            };
+            true
+        }
+
+        fn read_operands(&mut self, specifier: &DecoderSpecifier) -> Option<()> {
+            let has_vvvv = self.read_vvvv();
+            let mut need_vvvv = has_vvvv && self.vvvv != 0;
+            let mut saw_register_immediate = false;
+            for (encoding, kind) in &specifier.operands {
+                match *encoding {
+                    OperandEncoding::None
+                    | OperandEncoding::SourceIndex
+                    | OperandEncoding::DestinationIndex
+                    | OperandEncoding::FloatingStack
+                    | OperandEncoding::Duplicate => {}
+                    OperandEncoding::VectorIndex(shift) => {
+                        if need_vvvv {
+                            need_vvvv = has_vvvv && self.vvvv & 0xf != 0;
+                        }
+                        self.read_modrm()?;
+                        if self.base != BASE_SIB && self.base != BASE_SIB_64 {
+                            return None;
+                        }
+                        if self.index == INDEX_NONE {
+                            self.index = self.index_base + 4;
+                        }
+                        if self.vector == VectorExtension::Evex
+                            && self.sixty_four()
+                            && self.evex_v2() != 0
+                        {
+                            self.index += 16;
+                        }
+                        let offset = self.index - self.index_base;
+                        self.index = match kind {
+                            DecoderOperandType::VectorIndexExtended => INDEX_XMM + offset,
+                            DecoderOperandType::VectorIndexYmm => INDEX_YMM + offset,
+                            DecoderOperandType::VectorIndexZmm => INDEX_ZMM + offset,
+                            _ => return None,
+                        };
+                        if self.displacement_kind == Displacement::Byte {
+                            self.displacement = self.displacement.wrapping_mul(1 << shift);
+                        }
+                    }
+                    OperandEncoding::ScaledIndexBase => {
+                        if self.base != BASE_SIB && self.base != BASE_SIB_64 {
+                            return None;
+                        }
+                        self.read_modrm()?;
+                        self.fixup(*encoding, *kind)?;
+                    }
+                    OperandEncoding::Register | OperandEncoding::RegisterMemory(_) => {
+                        self.read_modrm()?;
+                        self.fixup(*encoding, *kind)?;
+                        if let OperandEncoding::RegisterMemory(shift) = *encoding {
+                            if self.displacement_kind == Displacement::Byte {
+                                self.displacement = self.displacement.wrapping_mul(1 << shift);
+                            }
+                        }
+                    }
+                    OperandEncoding::Immediate8 => {
+                        if saw_register_immediate {
+                            let previous = self.immediates[self.immediates_consumed - 1] & 0xf;
+                            if self.immediates_consumed < 3 {
+                                self.immediates[self.immediates_consumed] = previous;
+                            }
+                            self.immediates_consumed += 1;
+                            continue;
+                        }
+                        self.read_immediate(1)?;
+                        if matches!(
+                            kind,
+                            DecoderOperandType::Vector128 | DecoderOperandType::Vector256
+                        ) {
+                            saw_register_immediate = true;
+                        }
+                    }
+                    OperandEncoding::Immediate16 => self.read_immediate(2)?,
+                    OperandEncoding::Immediate32 => self.read_immediate(4)?,
+                    OperandEncoding::Immediate64 => self.read_immediate(8)?,
+                    OperandEncoding::ImmediateOperandSize => {
+                        self.read_immediate(self.immediate_size)?
+                    }
+                    OperandEncoding::ImmediateAddressSize => {
+                        self.read_immediate(self.address_size)?
+                    }
+                    OperandEncoding::RoundingControl => {
+                        self.rounding = (self.evex_l2() << 1) | self.evex_l();
+                    }
+                    OperandEncoding::OpcodeRegister8 => self.read_opcode_register(1),
+                    OperandEncoding::OpcodeRegister64 => self.read_opcode_register(8),
+                    OperandEncoding::OpcodeRegisterOperandSize => self.read_opcode_register(0),
+                    OperandEncoding::ConditionFlags => {
+                        self.immediates[1] = self.evex_flags() as u64;
+                        need_vvvv = false;
+                    }
+                    OperandEncoding::ConditionCode => {
+                        if self.conditional_compare_or_test() {
+                            self.immediates[2] = self.evex_condition() as u64;
+                        } else {
+                            self.immediates[1] = (self.opcode & 0xf) as u64;
+                        }
+                    }
+                    OperandEncoding::VectorRegister => {
+                        need_vvvv = false;
+                        if !has_vvvv {
+                            return None;
+                        }
+                        if !self.sixty_four() {
+                            self.vvvv &= 7;
+                        }
+                        self.fixup(*encoding, *kind)?;
+                    }
+                    OperandEncoding::Writemask => {
+                        if self.vector != VectorExtension::Evex {
+                            return None;
+                        }
+                        self.writemask = self.evex_aaa() as u16;
+                    }
+                }
+            }
+            if need_vvvv {
+                return None;
+            }
+            Some(())
+        }
+    }
+
+    fn sixteen_bit_equivalent(original: &str, equivalent: &str) -> bool {
+        let original = original.as_bytes();
+        let equivalent = equivalent.as_bytes();
+        if original.len() != equivalent.len() {
+            return false;
+        }
+        original.iter().zip(equivalent).all(|(left, right)| {
+            left == right
+                || ((*left == b'Q' || *left == b'L') && *right == b'W')
+                || ((*left == b'6' || *left == b'3') && *right == b'1')
+                || ((*left == b'4' || *left == b'2') && *right == b'6')
+        })
+    }
+
+    struct Translation<'t> {
+        target: &'t Target,
+        operands: Vec<MachineOperand>,
+    }
+
+    impl Translation<'_> {
+        fn register(&mut self, name: &str) {
+            let register = if name.is_empty() {
+                NO_REGISTER
+            } else {
+                self.target.register(name)
+            };
+            self.operands.push(MachineOperand::Register(register));
+        }
+
+        fn decoder_register(&mut self, number: u16) {
+            let name = DECODER_REGISTERS
+                .get(number as usize)
+                .copied()
+                .unwrap_or("");
+            self.register(name);
+        }
+
+        fn immediate(&mut self, value: i64) {
+            self.operands.push(MachineOperand::Immediate(value));
+        }
+    }
+
+    const SEGMENT_REGISTERS: [&str; 7] = ["", "CS", "SS", "DS", "ES", "FS", "GS"];
+
+    fn sign_extended(value: u64, bytes: u8) -> u64 {
+        match bytes {
+            1 if value & 0x80 != 0 => value | !0xff,
+            2 if value & 0x8000 != 0 => value | !0xffff,
+            4 if value & 0x8000_0000 != 0 => value | !0xffff_ffff,
+            _ => value,
+        }
+    }
+
+    impl DecoderState<'_> {
+        fn translate_immediate(
+            &self,
+            out: &mut Translation,
+            immediate: u64,
+            encoding: OperandEncoding,
+            kind: DecoderOperandType,
+        ) {
+            let mut immediate = immediate;
+            if kind == DecoderOperandType::Relative {
+                immediate = match encoding {
+                    OperandEncoding::ImmediateOperandSize => {
+                        sign_extended(immediate, self.displacement_size)
+                    }
+                    OperandEncoding::Immediate8 => sign_extended(immediate, 1),
+                    OperandEncoding::Immediate16 => sign_extended(immediate, 2),
+                    OperandEncoding::Immediate32 => sign_extended(immediate, 4),
+                    _ => immediate,
+                };
+            } else if kind == DecoderOperandType::Immediate {
+                immediate = match encoding {
+                    OperandEncoding::Immediate8 => sign_extended(immediate, 1),
+                    OperandEncoding::Immediate16 => sign_extended(immediate, 2),
+                    OperandEncoding::Immediate32 => sign_extended(immediate, 4),
+                    _ => immediate,
+                };
+            }
+            match kind {
+                DecoderOperandType::Vector128 => {
+                    return out.register(&format!("XMM{}", immediate >> 4));
+                }
+                DecoderOperandType::Vector256 => {
+                    return out.register(&format!("YMM{}", immediate >> 4));
+                }
+                DecoderOperandType::Vector512 => {
+                    return out.register(&format!("ZMM{}", immediate >> 4));
+                }
+                _ => {}
+            }
+            out.immediate(immediate as i64);
+            if kind == DecoderOperandType::MemoryOffset {
+                out.register(SEGMENT_REGISTERS[self.segment as usize]);
+            }
+        }
+
+        fn translate_register_memory_register(&self, out: &mut Translation) -> Option<()> {
+            if self.base < BASE_REGISTER {
+                return None;
+            }
+            out.decoder_register(self.base - BASE_REGISTER);
+            Some(())
+        }
+
+        fn translate_memory(&self, out: &mut Translation, forced_sib: bool) -> Option<()> {
+            let base: String;
+            let index: String;
+            let scale: i64;
+            if self.base == BASE_SIB || self.base == BASE_SIB_64 {
+                base = if self.scaled_base == SCALED_BASE_NONE {
+                    String::new()
+                } else {
+                    DECODER_SCALED_BASES
+                        .get(self.scaled_base as usize - 1)?
+                        .to_string()
+                };
+                index = if self.index != INDEX_NONE {
+                    if self.index < BASE_32 {
+                        return None;
+                    }
+                    if self.index < INDEX_XMM {
+                        DECODER_BASES.get(self.index as usize - 1)?.to_string()
+                    } else {
+                        DECODER_SCALED_INDEX_EXTRA
+                            .get((self.index - INDEX_XMM) as usize)?
+                            .to_string()
+                    }
+                } else {
+                    let stack_like = matches!(
+                        DECODER_SCALED_BASES
+                            .get((self.scaled_base as usize).wrapping_sub(1))
+                            .copied(),
+                        Some("ESP" | "RSP" | "R12D" | "R12")
+                    );
+                    if !forced_sib
+                        && (self.scale != 1
+                            || (self.scaled_base == SCALED_BASE_NONE && !self.sixty_four())
+                            || (self.scaled_base != SCALED_BASE_NONE && !stack_like))
+                    {
+                        if self.address_size == 4 {
+                            "EIZ".to_string()
+                        } else {
+                            "RIZ".to_string()
+                        }
+                    } else {
+                        String::new()
+                    }
+                };
+                scale = self.scale as i64;
+            } else {
+                match self.base {
+                    BASE_NONE => {
+                        if self.displacement_kind == Displacement::None {
+                            return None;
+                        }
+                        base = if self.sixty_four() {
+                            if self.address_size == 4 {
+                                "EIP".to_string()
+                            } else {
+                                "RIP".to_string()
+                            }
+                        } else {
+                            String::new()
+                        };
+                        index = String::new();
+                    }
+                    _ if self.base < BASE_16 + 4 => {
+                        let (first, second) = match self.base - BASE_16 {
+                            0 => ("BX", "SI"),
+                            1 => ("BX", "DI"),
+                            2 => ("BP", "SI"),
+                            _ => ("BP", "DI"),
+                        };
+                        base = first.to_string();
+                        index = second.to_string();
+                    }
+                    _ if self.base < BASE_REGISTER => {
+                        base = DECODER_BASES.get(self.base as usize - 1)?.to_string();
+                        index = String::new();
+                    }
+                    _ => return None,
+                }
+                scale = 1;
+            }
+            out.register(&base);
+            out.immediate(scale);
+            out.register(&index);
+            out.immediate(self.displacement as i64);
+            out.register(SEGMENT_REGISTERS[self.segment as usize]);
+            Some(())
+        }
+
+        fn translate_register_memory(
+            &self,
+            out: &mut Translation,
+            kind: DecoderOperandType,
+        ) -> Option<()> {
+            match kind {
+                DecoderOperandType::Register8
+                | DecoderOperandType::Register16
+                | DecoderOperandType::Register32
+                | DecoderOperandType::Register64
+                | DecoderOperandType::RegisterOperandSize
+                | DecoderOperandType::Multimedia
+                | DecoderOperandType::Vector128
+                | DecoderOperandType::Vector256
+                | DecoderOperandType::Vector512
+                | DecoderOperandType::Tile
+                | DecoderOperandType::MaskPair
+                | DecoderOperandType::Mask
+                | DecoderOperandType::Debug
+                | DecoderOperandType::Control
+                | DecoderOperandType::Bound => self.translate_register_memory_register(out),
+                DecoderOperandType::Memory
+                | DecoderOperandType::VectorIndexExtended
+                | DecoderOperandType::VectorIndexYmm
+                | DecoderOperandType::VectorIndexZmm => self.translate_memory(out, false),
+                DecoderOperandType::MemoryScaledIndexBase => self.translate_memory(out, true),
+                _ => None,
+            }
+        }
+
+        fn translate_operand(
+            &self,
+            out: &mut Translation,
+            specifier: &DecoderSpecifier,
+            position: usize,
+            translated: &mut usize,
+        ) -> Option<()> {
+            let (encoding, kind) = specifier.operands[position];
+            match encoding {
+                OperandEncoding::None => return None,
+                OperandEncoding::Register => out.decoder_register(self.register),
+                OperandEncoding::Writemask => {
+                    if self.writemask >= 8 {
+                        return None;
+                    }
+                    out.register(&format!("K{}", self.writemask));
+                }
+                OperandEncoding::ScaledIndexBase
+                | OperandEncoding::RegisterMemory(_)
+                | OperandEncoding::VectorIndex(_) => self.translate_register_memory(out, kind)?,
+                OperandEncoding::Immediate8
+                | OperandEncoding::Immediate16
+                | OperandEncoding::Immediate32
+                | OperandEncoding::Immediate64
+                | OperandEncoding::ImmediateOperandSize
+                | OperandEncoding::ImmediateAddressSize => {
+                    let value = self.immediates.get(*translated).copied().unwrap_or(0);
+                    *translated += 1;
+                    self.translate_immediate(out, value, encoding, kind);
+                }
+                OperandEncoding::RoundingControl => out.immediate(self.rounding as i64),
+                OperandEncoding::SourceIndex => {
+                    let base = match self.mode {
+                        Mode::Bits64 if self.address_prefix => "ESI",
+                        Mode::Bits64 => "RSI",
+                        Mode::Bits32 if self.address_prefix => "SI",
+                        Mode::Bits32 => "ESI",
+                        Mode::Bits16 if self.address_prefix => "ESI",
+                        Mode::Bits16 => "SI",
+                    };
+                    out.register(base);
+                    out.register(SEGMENT_REGISTERS[self.segment as usize]);
+                }
+                OperandEncoding::DestinationIndex => {
+                    let base = match self.mode {
+                        Mode::Bits64 if self.address_prefix => "EDI",
+                        Mode::Bits64 => "RDI",
+                        Mode::Bits32 if self.address_prefix => "DI",
+                        Mode::Bits32 => "EDI",
+                        Mode::Bits16 if self.address_prefix => "EDI",
+                        Mode::Bits16 => "DI",
+                    };
+                    out.register(base);
+                }
+                OperandEncoding::OpcodeRegister8
+                | OperandEncoding::OpcodeRegister64
+                | OperandEncoding::OpcodeRegisterOperandSize => {
+                    out.decoder_register(self.opcode_register)
+                }
+                OperandEncoding::ConditionFlags => out.immediate(self.immediates[1] as i64),
+                OperandEncoding::ConditionCode => {
+                    if self.conditional_compare_or_test() {
+                        out.immediate(self.immediates[2] as i64);
+                    } else {
+                        out.immediate(self.immediates[1] as i64);
+                    }
+                }
+                OperandEncoding::FloatingStack => out.register(&format!("ST{}", self.modrm & 7)),
+                OperandEncoding::VectorRegister => out.decoder_register(self.vvvv),
+                OperandEncoding::Duplicate => {
+                    let DecoderOperandType::Duplicate(source) = kind else {
+                        return None;
+                    };
+                    return self.translate_operand(out, specifier, source as usize, translated);
+                }
+            }
+            Some(())
+        }
+    }
+
+    pub fn decode_instruction(
+        target: &Target,
+        mode: Mode,
+        bytes: &[u8],
+    ) -> (Option<MachineInstruction>, usize) {
+        let tables = decoder_tables(target);
+        let mut state = DecoderState::new(bytes, mode);
+        let decoded = (|| -> Option<()> {
+            if bytes.is_empty() {
+                return None;
+            }
+            state.read_prefixes()?;
+            state.read_opcode()?;
+            state.read_identifier(target, tables)?;
+            if state.identifier == 0 {
+                return None;
+            }
+            let specifier = tables.specifiers[state.identifier as usize - 1].as_ref()?;
+            state.read_operands(specifier)
+        })();
+        if decoded.is_none() {
+            return (None, state.cursor);
+        }
+        let length = state.cursor;
+        if length > 15 {
+            return (None, length);
+        }
+        let Some(specifier) = tables.specifiers[state.identifier as usize - 1].as_ref() else {
+            return (None, length);
+        };
+        let mut opcode = state.identifier as usize - 1;
+        if state.acquire_release {
+            let renamed = match target.instructions[opcode].record.as_str() {
+                "REP_PREFIX" => Some("XRELEASE_PREFIX"),
+                "REPNE_PREFIX" => Some("XACQUIRE_PREFIX"),
+                _ => None,
+            };
+            if let Some(index) = renamed.and_then(|name| target.instruction_by_record.get(name)) {
+                opcode = *index;
+            }
+        }
+        let mut translation = Translation {
+            target,
+            operands: Vec::new(),
+        };
+        let mut translated = 0usize;
+        for position in 0..specifier.operands.len() {
+            if specifier.operands[position].0 == OperandEncoding::None {
+                continue;
+            }
+            if state
+                .translate_operand(&mut translation, specifier, position, &mut translated)
+                .is_none()
+            {
+                return (None, length);
+            }
+        }
+        let mut instruction = MachineInstruction::new(opcode);
+        instruction.operands = translation.operands;
+        if state.address_prefix {
+            instruction.flags |= PREFIX_ADDRESS_SIZE;
+        }
+        if state.mandatory_prefix == 0 {
+            if state.operand_prefix {
+                instruction.flags |= PREFIX_OPERAND_SIZE;
+            }
+            if state.repeat == 0xf2 {
+                instruction.flags |= PREFIX_REPEAT_NOT_EQUAL;
+            } else if state.repeat == 0xf3 && state.opcode != 0x90 {
+                instruction.flags |= PREFIX_REPEAT;
+            }
+            if state.lock {
+                instruction.flags |= PREFIX_LOCK;
+            }
+        }
+        (Some(instruction), length)
+    }
 }
