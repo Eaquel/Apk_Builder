@@ -2313,6 +2313,11 @@ pub enum Message {
     PragmaFinalMacro,
     VisibilityNonMacro,
     NanInfinityDisabled,
+    EmptyTranslationUnit,
+    ExtraSemi,
+    ExtraneousClosingBrace,
+    ExpectedExternalDeclaration,
+    PragmaFenvRequiresPrecise,
     DefinedMacroName,
     DefinedInEmbed,
     PasteAtStart,
@@ -2866,6 +2871,23 @@ impl Message {
                 Warning,
                 "nan-infinity-disabled",
                 "use of %select{infinity|NaN}0%select{| via a macro}1 is undefined behavior due to the currently enabled floating-point options",
+            ),
+            Message::EmptyTranslationUnit => (
+                Extension,
+                "empty-translation-unit",
+                "ISO C requires a translation unit to contain at least one declaration",
+            ),
+            Message::ExtraSemi => (
+                Extension,
+                "extra-semi",
+                "extra ';' %select{outside of a function|inside a %1|inside instance variable list|after member function definition}0",
+            ),
+            Message::ExtraneousClosingBrace => (Error, "", "extraneous closing brace ('}')"),
+            Message::ExpectedExternalDeclaration => (Error, "", "expected external declaration"),
+            Message::PragmaFenvRequiresPrecise => (
+                Error,
+                "",
+                "'#pragma STDC FENV_ACCESS ON' is illegal when precise is disabled",
             ),
             Message::PragmaCommentIgnored => {
                 (Warning, "ignored-pragmas", "'#pragma comment %0' ignored")
@@ -18535,6 +18557,14 @@ impl<'files> Preprocessor<'files> {
             }
             return;
         }
+        if self.parser_pragmas_active() && known {
+            let annotation = format!("unsupported {prefix} {}", first.text());
+            if first.kind != TokenKind::EndOfDirective && self.in_directive() {
+                self.discard_until_end_of_directive();
+            }
+            self.push_pragma_annotation(&first, &annotation);
+            return;
+        }
         if self.options.syntax_only && !known {
             self.report_token(Message::UnknownPragma, &first, Vec::new());
         }
@@ -20168,7 +20198,7 @@ impl<'files> Preprocessor<'files> {
         out
     }
 
-    pub fn run(mut self, main_name: &str, main_bytes: Vec<u8>) -> PreprocessOutcome {
+    pub fn begin(&mut self, main_name: &str, main_bytes: Vec<u8>) {
         for flag in self.engine.unknown_flags.clone() {
             let nowhere = Place {
                 buffer: u32::MAX,
@@ -20209,6 +20239,19 @@ impl<'files> Preprocessor<'files> {
             },
         );
         self.builtin_buffer = Some(builtin);
+    }
+
+    pub fn next_token(&mut self) -> Token {
+        loop {
+            let token = self.lex();
+            if token.kind != TokenKind::Comment {
+                return token;
+            }
+        }
+    }
+
+    pub fn run(mut self, main_name: &str, main_bytes: Vec<u8>) -> PreprocessOutcome {
+        self.begin(main_name, main_bytes);
         let mut tokens = Vec::new();
         match self.options.output {
             OutputMode::Preprocessed => {
@@ -20250,6 +20293,12 @@ impl<'files> Preprocessor<'files> {
                 }
             },
         }
+        let mut outcome = self.finish();
+        outcome.tokens = tokens;
+        outcome
+    }
+
+    pub fn finish(mut self) -> PreprocessOutcome {
         let output = match self.options.output {
             OutputMode::MacrosOnly => self.macro_dump(),
             _ => self
@@ -20260,7 +20309,7 @@ impl<'files> Preprocessor<'files> {
         };
         PreprocessOutcome {
             output,
-            tokens,
+            tokens: Vec::new(),
             diagnostics: std::mem::take(&mut self.engine.diagnostics),
             comments: std::mem::take(&mut self.comments),
             errors: self.engine.errors,
@@ -21314,4 +21363,113 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     }
     options.syntax_only = invocation.action == FrontendAction::SyntaxOnly;
     invocation
+}
+
+pub struct Parser<'session, 'files> {
+    preprocessor: &'session mut Preprocessor<'files>,
+    token: Token,
+    unsupported: Option<String>,
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    pub fn new(preprocessor: &'session mut Preprocessor<'files>) -> Parser<'session, 'files> {
+        let token = preprocessor.next_token();
+        Parser {
+            preprocessor,
+            token,
+            unsupported: None,
+        }
+    }
+
+    fn consume(&mut self) -> Place {
+        let place = self.token.site;
+        self.token = self.preprocessor.next_token();
+        place
+    }
+
+    fn keyword(&self) -> Option<&'static str> {
+        if self.token.kind != TokenKind::Identifier {
+            return None;
+        }
+        keyword_kind(&self.preprocessor.language, &self.token.spelling)
+    }
+
+    fn unsupported(&mut self, what: String) {
+        if self.unsupported.is_none() {
+            self.unsupported = Some(what);
+        }
+    }
+
+    fn report(&mut self, message: Message, place: Place, arguments: Vec<String>) {
+        self.preprocessor.report(message, place, arguments);
+    }
+
+    pub fn parse_translation_unit(mut self) -> Option<String> {
+        let mut at_end = self.parse_top_level_declaration();
+        if at_end && !self.preprocessor.language.header_file {
+            let place = self.token.site;
+            self.report(Message::EmptyTranslationUnit, place, Vec::new());
+        }
+        while !at_end && self.unsupported.is_none() {
+            at_end = self.parse_top_level_declaration();
+        }
+        self.unsupported
+    }
+
+    fn parse_top_level_declaration(&mut self) -> bool {
+        if self.token.kind == TokenKind::EndOfFile {
+            return true;
+        }
+        self.parse_external_declaration();
+        false
+    }
+
+    fn parse_external_declaration(&mut self) {
+        match self.token.kind {
+            TokenKind::PragmaAnnotation => self.handle_pragma_annotation(),
+            TokenKind::Semi => self.consume_extra_semicolon(0),
+            TokenKind::RightBrace => {
+                let place = self.consume();
+                self.report(Message::ExtraneousClosingBrace, place, Vec::new());
+            }
+            TokenKind::EndOfFile => {
+                let place = self.token.site;
+                self.report(Message::ExpectedExternalDeclaration, place, Vec::new());
+            }
+            _ => {
+                let what = match self.keyword() {
+                    Some(keyword) => format!("declaration starting with '{keyword}'"),
+                    None => format!("declaration starting with {:?}", self.token.kind),
+                };
+                self.unsupported(what);
+            }
+        }
+    }
+
+    fn handle_pragma_annotation(&mut self) {
+        let value = String::from_utf8_lossy(&self.token.spelling).into_owned();
+        let place = self.consume();
+        let mut words = value.split(' ');
+        match (words.next(), words.next()) {
+            (Some("fp_contract" | "cx_limited_range" | "fenv_round"), _) => {}
+            (Some("fenv_access"), Some(state)) => {
+                if state == "ON" && self.preprocessor.options.fast_math {
+                    self.report(Message::PragmaFenvRequiresPrecise, place, Vec::new());
+                }
+            }
+            _ => self.unsupported(value),
+        }
+    }
+
+    fn consume_extra_semicolon(&mut self, kind: usize) {
+        let start = self.consume();
+        while self.token.kind == TokenKind::Semi && !self.token.at_start_of_line() {
+            self.consume();
+        }
+        self.report(
+            Message::ExtraSemi,
+            start,
+            vec![kind.to_string(), String::new()],
+        );
+    }
 }

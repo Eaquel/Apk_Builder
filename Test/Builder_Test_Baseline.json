@@ -8,15 +8,27 @@
     },
     "clang-c-lexer": {
       "failed": 1,
-      "out_of_scope": 126,
-      "passed": 14,
+      "out_of_scope": 125,
+      "passed": 15,
       "total": 141
+    },
+    "clang-c-parser": {
+      "failed": 0,
+      "out_of_scope": 425,
+      "passed": 0,
+      "total": 425
     },
     "clang-c-preprocessor": {
       "failed": 2,
       "out_of_scope": 252,
       "passed": 141,
       "total": 395
+    },
+    "clang-c-sema": {
+      "failed": 0,
+      "out_of_scope": 1381,
+      "passed": 1,
+      "total": 1382
     },
     "filecheck": {
       "failed": 0,

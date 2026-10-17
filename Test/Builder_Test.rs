@@ -71866,8 +71866,8 @@ mod c_front_end {
     use super::table_gen::publish_with_scope;
     use crate::compilers::cpp::{
         parse_compiler_arguments, render_diagnostic, BufferKind, CDiagnostic, CSeverity,
-        DiagnosticRenderer, FrontendAction, InputLanguage, Place, PreprocessOutcome, Preprocessor,
-        SourceFiles, SourceMap,
+        DiagnosticRenderer, FrontendAction, InputLanguage, Parser, Place, PreprocessOutcome,
+        Preprocessor, SourceFiles, SourceMap,
     };
     use std::collections::BTreeMap;
 
@@ -71971,12 +71971,19 @@ mod c_front_end {
         };
         invocation.preprocessor.working_directory = world.directory.clone();
         invocation.preprocessor.collect_comments = invocation.verify.is_some();
-        let outcome = {
+        let (outcome, parser_gap) = {
             let files = WorldFiles { world };
-            Preprocessor::new(&files, invocation.preprocessor.clone()).run(&name, bytes)
+            let mut preprocessor = Preprocessor::new(&files, invocation.preprocessor.clone());
+            if invocation.action == FrontendAction::SyntaxOnly {
+                preprocessor.begin(&name, bytes);
+                let gap = Parser::new(&mut preprocessor).parse_translation_unit();
+                (preprocessor.finish(), gap)
+            } else {
+                (preprocessor.run(&name, bytes), None)
+            }
         };
-        if invocation.action == FrontendAction::SyntaxOnly && !outcome.tokens.is_empty() {
-            return out_of_scope(world, "C parser".to_string());
+        if let Some(gap) = parser_gap {
+            return out_of_scope(world, format!("C parser: {gap}"));
         }
         let mut result = ToolOutcome::ok(Vec::new());
         world.errors_before_output = true;
@@ -73404,6 +73411,26 @@ mod c_front_end {
 
     #[test]
     #[ignore]
+    fn suite_clang_c_parser() {
+        run_clang_c_suite(
+            "clang-c-parser",
+            "Test_08_Clang_OpenMP_Sema_LLD",
+            "llvm-project/clang/test/Parser/",
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_clang_c_sema() {
+        run_clang_c_suite(
+            "clang-c-sema",
+            "Test_08_Clang_OpenMP_Sema_LLD",
+            "llvm-project/clang/test/Sema/",
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn suite_clang_c_lexer() {
         run_clang_c_suite(
             "clang-c-lexer",
@@ -73475,6 +73502,66 @@ mod c_front_end {
         assert_eq!(outcome.warnings, 1);
         let printed = preprocess(&["-E", "main.c"], &[("main.c", source)]).0;
         assert!(printed.contains("#pragma STDC SO_GREAT"), "{printed}");
+    }
+
+    fn parse(arguments: &[&str], source: &str) -> (Option<String>, String) {
+        let owned: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .chain(std::iter::once("main.c".to_string()))
+            .collect();
+        let invocation = parse_compiler_arguments(&owned);
+        let mut store = BTreeMap::new();
+        store.insert("main.c".to_string(), source.as_bytes().to_vec());
+        let memory = MemoryFiles { files: store };
+        let mut preprocessor = Preprocessor::new(&memory, invocation.preprocessor.clone());
+        preprocessor.begin("main.c", source.as_bytes().to_vec());
+        let gap = Parser::new(&mut preprocessor).parse_translation_unit();
+        let outcome = preprocessor.finish();
+        let mut stderr = String::new();
+        for diagnostic in &outcome.diagnostics {
+            stderr.push_str(&render_diagnostic(diagnostic, &outcome.sources, false));
+        }
+        (gap, stderr)
+    }
+
+    #[test]
+    fn parser_handles_the_top_level_of_a_translation_unit() {
+        let pedantic = ["-fsyntax-only", "-std=c99", "-pedantic"];
+        let (gap, stderr) = parse(&pedantic, "#define NOTHING 1\n");
+        assert_eq!(gap, None);
+        assert_eq!(
+            stderr,
+            "main.c:1:18: warning: ISO C requires a translation unit to contain at least one declaration [-Wempty-translation-unit]\n"
+        );
+        let (gap, stderr) = parse(&["-fsyntax-only", "-x", "c-header", "-pedantic"], "\n");
+        assert_eq!(gap, None);
+        assert_eq!(stderr, "");
+        let (gap, stderr) = parse(&pedantic, ";;\n;\n}\n");
+        assert_eq!(gap, None);
+        assert_eq!(
+            stderr,
+            "main.c:1:1: warning: extra ';' outside of a function [-Wextra-semi]\nmain.c:2:1: warning: extra ';' outside of a function [-Wextra-semi]\nmain.c:3:1: error: extraneous closing brace ('}')\n"
+        );
+        let (gap, stderr) = parse(&["-fsyntax-only"], ";\n");
+        assert_eq!(gap, None);
+        assert_eq!(stderr, "");
+        let fast = [
+            "-fsyntax-only",
+            "-triple",
+            "x86_64-linux-gnu",
+            "-ffast-math",
+        ];
+        let (gap, stderr) = parse(&fast, "#pragma STDC FENV_ACCESS ON\n;\n");
+        assert_eq!(gap, None);
+        assert_eq!(
+            stderr,
+            "main.c:1:14: error: '#pragma STDC FENV_ACCESS ON' is illegal when precise is disabled\n"
+        );
+        let (gap, _) = parse(&["-fsyntax-only"], "#pragma pack(1)\nint value;\n");
+        assert_eq!(gap.as_deref(), Some("unsupported #pragma pack"));
+        let (gap, _) = parse(&["-fsyntax-only"], "int value;\n");
+        assert_eq!(gap.as_deref(), Some("declaration starting with 'int'"));
     }
 
     fn predefined(arguments: &[&str]) -> String {
