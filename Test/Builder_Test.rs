@@ -71493,10 +71493,7 @@ mod x86_assembly {
                 "filetype" => match value.as_str() {
                     "asm" => options.output = OutputKind::Assembly,
                     "null" => options.output = OutputKind::Null,
-                    "obj" => {
-                        options.output = OutputKind::Object;
-                        unsupported.get_or_insert("llvm-mc -filetype=obj".to_string());
-                    }
+                    "obj" => options.output = OutputKind::Object,
                     _ => {
                         unsupported.get_or_insert(format!("llvm-mc -filetype={value}"));
                     }
@@ -71548,12 +71545,29 @@ mod x86_assembly {
                     disassemble = true;
                     unsupported.get_or_insert("llvm-mc --cdis".to_string());
                 }
-                "x86-align-branch-boundary"
-                | "x86-align-branch"
-                | "x86-pad-max-prefix-size"
-                | "x86-pad-for-align"
-                | "x86-branches-within-32B-boundaries" => {
-                    unsupported.get_or_insert(format!("llvm-mc -{name}"));
+                "x86-align-branch-boundary" => match value.parse::<u64>() {
+                    Ok(boundary) => options.align_branch_boundary = boundary,
+                    Err(_) => {
+                        unsupported.get_or_insert(format!("llvm-mc -{name}={value}"));
+                    }
+                },
+                "x86-align-branch" => {
+                    options.align_branch = value.split('+').map(str::to_string).collect();
+                }
+                "x86-pad-max-prefix-size" => match value.parse::<u32>() {
+                    Ok(size) => options.pad_max_prefix_size = Some(size),
+                    Err(_) => {
+                        unsupported.get_or_insert(format!("llvm-mc -{name}={value}"));
+                    }
+                },
+                "x86-pad-for-align" => {
+                    options.pad_for_align = value != "0" && value != "false";
+                }
+                "x86-relax-relocations" => {
+                    options.relax_relocations = value != "0" && value != "false";
+                }
+                "x86-branches-within-32B-boundaries" => {
+                    options.branches_within_32_byte_boundaries = value != "0" && value != "false";
                 }
                 "masm-integers" => options.masm_integers = true,
                 _ => {
@@ -71562,7 +71576,19 @@ mod x86_assembly {
             }
         }
         let triple = match (triple, architecture) {
-            (Some(triple), _) => triple,
+            (Some(triple), Some(architecture)) => {
+                let replaced = match architecture.as_str() {
+                    "x86" => Some("i386"),
+                    "x86-64" => Some("x86_64"),
+                    _ => None,
+                };
+                match (replaced, triple.split_once('-')) {
+                    (Some(name), Some((_, rest))) => format!("{name}-{rest}"),
+                    (Some(name), None) => name.to_string(),
+                    (None, _) => triple,
+                }
+            }
+            (Some(triple), None) => triple,
             (None, Some(architecture)) => match architecture.as_str() {
                 "x86" => "i386-unknown-unknown".to_string(),
                 _ => "x86_64-unknown-unknown".to_string(),
@@ -71626,7 +71652,7 @@ mod x86_assembly {
                     text.push_str(&field("Marker").unwrap_or_default());
                     text.push('\n');
                 }
-                None => text.push_str(&format!("llvm-mc: {kind}: {cause}\n")),
+                None => text.push_str(&format!("<unknown>:0: {kind}: {cause}\n")),
             }
         }
         text
@@ -72031,6 +72057,18 @@ mod x86_assembly {
         options.show_encoding = true;
         if std::env::var("APK_BUILDER_MC_INTEL").is_ok() {
             options.input_syntax = Syntax::Intel;
+        }
+        if let Ok(path) = std::env::var("APK_BUILDER_MC_OBJECT") {
+            options.output = OutputKind::Object;
+            options.show_encoding = false;
+            if let Ok(cpu) = std::env::var("APK_BUILDER_MC_CPU") {
+                options.cpu = cpu;
+            }
+            let result =
+                assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+            std::fs::write(&path, &result.output).expect("the object is written");
+            eprintln!("{}", format_assembly_messages(&render_messages(&result)));
+            return;
         }
         let result = if std::env::var("APK_BUILDER_MC_DISASSEMBLE").is_ok() {
             options.show_encoding = std::env::var("APK_BUILDER_MC_ENCODING").is_ok();
