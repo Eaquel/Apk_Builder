@@ -73328,6 +73328,71 @@ mod c_front_end {
         publish_with_scope(&report);
     }
 
+    #[test]
+    fn traditional_mode_keeps_whitespace_and_ignores_macro_operators() {
+        let source = "/* gone */\n\tindented!  spaced\n#define F(a) t(#a)\n#define G(a, b) u(b##a)\nF(x)\nG(p,q)\n";
+        let (output, stderr, status) =
+            preprocess(&["-traditional-cpp", "-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 0, "{stderr}");
+        assert!(!output.contains("gone"), "{output}");
+        let lines = body(&output);
+        let mut wanted = lines.lines().filter(|line| !line.trim().is_empty());
+        assert_eq!(wanted.next(), Some("\tindented!  spaced"));
+        assert_eq!(wanted.next(), Some("t(#x)"));
+        assert_eq!(wanted.next(), Some("u(q##p)"));
+        let kept = preprocess(
+            &["-traditional-cpp", "-E", "-C", "main.c"],
+            &[("main.c", source)],
+        )
+        .0;
+        assert!(kept.contains("/* gone */"), "{kept}");
+    }
+
+    #[test]
+    fn parser_pragmas_diagnose_their_arguments_in_syntax_only_mode() {
+        let source = "#pragma STDC FP_CONTRACT IN_BETWEEN\n#pragma STDC SO_GREAT\n#pragma STDC CX_LIMITED_RANGE ON\n#pragma comment(user, \"note\")\n#pragma comment(lib, \"m\")\n#pragma comment(bogus)\n#pragma comment lib\n";
+        let (_, stderr, status) = preprocess(
+            &["-fsyntax-only", "-triple", "x86_64-linux-gnu", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(status, 1);
+        for message in [
+            "expected 'ON' or 'OFF' or 'DEFAULT' in pragma",
+            "unknown pragma in STDC namespace",
+            "'#pragma comment user' ignored",
+            "unknown kind of pragma comment",
+            "pragma comment requires parenthesized identifier and optional string",
+        ] {
+            assert!(stderr.contains(message), "missing {message}\n{stderr}");
+        }
+        assert!(
+            !stderr.contains("'#pragma comment lib' ignored"),
+            "{stderr}"
+        );
+        let owned: Vec<String> = [
+            "-fsyntax-only",
+            "-triple",
+            "armv7-linux-gnueabihf",
+            "main.c",
+        ]
+        .iter()
+        .map(|item| item.to_string())
+        .collect();
+        let invocation = parse_compiler_arguments(&owned);
+        let mut store = BTreeMap::new();
+        store.insert(
+            "main.c".to_string(),
+            b"#pragma STDC FENV_ACCESS ON\n".to_vec(),
+        );
+        let memory = MemoryFiles { files: store };
+        let outcome = Preprocessor::new(&memory, invocation.preprocessor.clone())
+            .run("main.c", b"#pragma STDC FENV_ACCESS ON\n".to_vec());
+        assert!(outcome.tokens.is_empty());
+        assert_eq!(outcome.warnings, 1);
+        let printed = preprocess(&["-E", "main.c"], &[("main.c", source)]).0;
+        assert!(printed.contains("#pragma STDC SO_GREAT"), "{printed}");
+    }
+
     fn predefined(arguments: &[&str]) -> String {
         let mut owned = vec!["-E", "-dM"];
         owned.extend_from_slice(arguments);

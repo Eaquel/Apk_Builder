@@ -407,6 +407,7 @@ pub enum TokenKind {
     HeaderName,
     Comment,
     Unknown,
+    PragmaAnnotation,
     LeftSquare,
     RightSquare,
     LeftParen,
@@ -798,6 +799,8 @@ struct Lexer {
     parsing_filename: bool,
     keep_comments: bool,
     base_keep_comments: bool,
+    keep_whitespace: bool,
+    base_keep_whitespace: bool,
     line_comments: bool,
     raw: bool,
     pragma_lexer: bool,
@@ -819,6 +822,8 @@ impl Lexer {
             parsing_filename: false,
             keep_comments: false,
             base_keep_comments: false,
+            keep_whitespace: false,
+            base_keep_whitespace: false,
             line_comments: options.line_comments,
             raw: false,
             pragma_lexer: false,
@@ -994,7 +999,19 @@ impl Lexer {
         self.lex_internal(flags)
     }
 
-    fn skip_whitespace(&mut self, mut at: usize, flags: &mut u16) -> Option<usize> {
+    fn retains_comments(&self) -> bool {
+        self.keep_comments || self.keep_whitespace
+    }
+
+    fn reset_extended_mode(&mut self) {
+        if self.base_keep_whitespace {
+            self.keep_whitespace = true;
+        } else {
+            self.keep_comments = self.base_keep_comments;
+        }
+    }
+
+    fn skip_whitespace(&mut self, start: usize, mut at: usize, flags: &mut u16) -> Option<Token> {
         let mut saw_newline = at > 0 && is_vertical_space(self.byte(at - 1));
         loop {
             while !self.at_end(at) && is_horizontal_space(self.byte(at)) {
@@ -1009,6 +1026,14 @@ impl Lexer {
             }
             saw_newline = true;
             at += 1;
+        }
+        if self.keep_whitespace {
+            let token = self.form(start, at, TokenKind::Unknown, *flags);
+            if saw_newline {
+                self.at_start_of_line = true;
+                self.at_physical_start_of_line = true;
+            }
+            return Some(token);
         }
         let previous = if at > 0 { self.byte(at - 1) } else { b'\n' };
         if is_vertical_space(previous) {
@@ -1108,7 +1133,7 @@ impl Lexer {
             }
         }
         self.handle_comment(start, at);
-        if self.keep_comments {
+        if self.retains_comments() {
             let mut token = self.form(start, at, TokenKind::Comment, *flags);
             if self.in_directive {
                 let mut spelling = token.spelling.to_vec();
@@ -1243,13 +1268,13 @@ impl Lexer {
         }
         let at = cursor;
         self.handle_comment(start, at);
-        if self.keep_comments {
+        if self.retains_comments() {
             let token = self.form(start, at, TokenKind::Comment, *flags);
             self.at_physical_start_of_line = token.has(PHYSICAL_START_OF_LINE);
             return Ok(Some(token));
         }
         if !self.at_end(at) && is_horizontal_space(self.byte(at)) {
-            self.skip_whitespace(at + 1, flags);
+            self.skip_whitespace(at, at + 1, flags);
             *flags |= LEADING_SPACE;
             return Ok(None);
         }
@@ -1530,8 +1555,12 @@ impl Lexer {
         'restart: loop {
             let mut at = self.position;
             if !self.at_end(at) && is_horizontal_space(self.byte(at)) {
+                let begin = at;
                 while !self.at_end(at) && is_horizontal_space(self.byte(at)) {
                     at += 1;
+                }
+                if self.keep_whitespace {
+                    return self.form(begin, at, TokenKind::Unknown, flags);
                 }
                 self.position = at;
                 flags |= LEADING_SPACE;
@@ -1550,7 +1579,9 @@ impl Lexer {
                     }
                     self.report(Message::NullInFile, start, Vec::new());
                     flags |= LEADING_SPACE;
-                    self.skip_whitespace(at, &mut flags);
+                    if let Some(token) = self.skip_whitespace(start, at, &mut flags) {
+                        return token;
+                    }
                     flags &= !NEEDS_CLEANING;
                     continue 'restart;
                 }
@@ -1561,20 +1592,24 @@ impl Lexer {
                     if self.in_directive {
                         self.in_directive = false;
                         self.parsing_filename = false;
-                        self.keep_comments = self.base_keep_comments;
+                        self.reset_extended_mode();
                         self.at_start_of_line = true;
                         self.at_physical_start_of_line = true;
                         let token = self.form(start, at, TokenKind::EndOfDirective, flags);
                         return token;
                     }
                     flags &= !LEADING_SPACE;
-                    self.skip_whitespace(at, &mut flags);
+                    if let Some(token) = self.skip_whitespace(start, at, &mut flags) {
+                        return token;
+                    }
                     flags &= !NEEDS_CLEANING;
                     continue 'restart;
                 }
                 b' ' | b'\t' | 0x0c | 0x0b => {
                     flags |= LEADING_SPACE;
-                    self.skip_whitespace(at, &mut flags);
+                    if let Some(token) = self.skip_whitespace(start, at, &mut flags) {
+                        return token;
+                    }
                     continue 'restart;
                 }
                 b'0'..=b'9' => return self.lex_number(start, at, flags),
@@ -1999,7 +2034,7 @@ impl Lexer {
         if self.in_directive {
             self.in_directive = false;
             self.parsing_filename = false;
-            self.keep_comments = self.base_keep_comments;
+            self.reset_extended_mode();
             let mut token = Token::marker(TokenKind::EndOfDirective, self.place(at));
             token.flags = flags;
             self.position = at;
@@ -2257,6 +2292,16 @@ pub enum Message {
     PragmaDiagnosticUnknownWarning,
     OnOffSwitchSyntax,
     PragmaSyntaxEndOfDirective,
+    StdcPragmaIgnored,
+    StdcFenvRoundNotSupported,
+    StdcUnknownRoundingMode,
+    PragmaFloatingPointIgnored,
+    PragmaExpectedIdentifier,
+    PragmaExtraTokensAtEnd,
+    PragmaCommentMalformed,
+    PragmaCommentUnknownKind,
+    PragmaCommentIgnored,
+    PragmaCommentOnce,
     DefinedMacroName,
     DefinedInEmbed,
     PasteAtStart,
@@ -2753,6 +2798,46 @@ impl Message {
             Message::PragmaSyntaxEndOfDirective => {
                 (ExtWarn, "unknown-pragmas", "expected end of directive in pragma")
             }
+            Message::StdcPragmaIgnored => {
+                (ExtWarn, "unknown-pragmas", "unknown pragma in STDC namespace")
+            }
+            Message::StdcFenvRoundNotSupported => {
+                (Warning, "unknown-pragmas", "pragma STDC FENV_ROUND is not supported")
+            }
+            Message::StdcUnknownRoundingMode => (
+                Warning,
+                "ignored-pragmas",
+                "invalid or unsupported rounding mode in '#pragma STDC FENV_ROUND' - ignored",
+            ),
+            Message::PragmaFloatingPointIgnored => (
+                Warning,
+                "ignored-pragmas",
+                "'#pragma %0' is not supported on this target - ignored",
+            ),
+            Message::PragmaExpectedIdentifier => (
+                Warning,
+                "ignored-pragmas",
+                "expected identifier in '#pragma %0' - ignored",
+            ),
+            Message::PragmaExtraTokensAtEnd => (
+                Warning,
+                "ignored-pragmas",
+                "extra tokens at end of '#pragma %0' - ignored",
+            ),
+            Message::PragmaCommentMalformed => (
+                Error,
+                "",
+                "pragma comment requires parenthesized identifier and optional string",
+            ),
+            Message::PragmaCommentUnknownKind => (Error, "", "unknown kind of pragma comment"),
+            Message::PragmaCommentIgnored => {
+                (Warning, "ignored-pragmas", "'#pragma comment %0' ignored")
+            }
+            Message::PragmaCommentOnce => (
+                Warning,
+                "ignored-pragmas",
+                "'#pragma comment %0' ignored: it can be specified only once per translation unit",
+            ),
             Message::DefinedMacroName => (Error, "", "'defined' cannot be used as a macro name"),
             Message::DefinedInEmbed => (Error, "", "'defined' cannot appear within this context"),
             Message::PasteAtStart => (Error, "", "'##' cannot appear at start of macro expansion"),
@@ -9881,6 +9966,10 @@ impl TargetInfo {
         self.triple.is_windows()
     }
 
+    pub fn has_strict_floating_point(&self) -> bool {
+        matches!(self.family, TargetFamily::X86(_) | TargetFamily::AArch64(_))
+    }
+
     pub fn supports_cpu_is(&self) -> bool {
         matches!(self.family, TargetFamily::X86(_))
     }
@@ -10722,6 +10811,7 @@ pub struct PreprocessOutcome {
     pub main_buffer: Option<u32>,
     pub fatal: bool,
     pub unknown_warning_flags: Vec<String>,
+    pub linker_comments: Vec<(String, Vec<u8>)>,
 }
 
 struct Printer {
@@ -10806,6 +10896,8 @@ pub struct Preprocessor<'files> {
     arc_cf_audited: Option<Place>,
     directive_read_before: bool,
     last_expression_simple: bool,
+    seen_copyright_comment: bool,
+    linker_comments: Vec<(String, Vec<u8>)>,
 }
 
 impl<'files> Preprocessor<'files> {
@@ -10878,6 +10970,8 @@ impl<'files> Preprocessor<'files> {
             arc_cf_audited: None,
             directive_read_before: true,
             last_expression_simple: false,
+            seen_copyright_comment: false,
+            linker_comments: Vec::new(),
         };
         for (name, builtin) in BUILTIN_MACROS {
             let key: Rc<[u8]> = Rc::from(name.as_bytes());
@@ -12533,6 +12627,8 @@ impl<'files> Preprocessor<'files> {
         let mut lexer = Lexer::new(bytes, index, &self.language);
         lexer.keep_comments = self.options.keep_comments;
         lexer.base_keep_comments = self.options.keep_comments;
+        lexer.keep_whitespace = self.language.traditional;
+        lexer.base_keep_whitespace = self.language.traditional;
         self.stack.push(Source::File(FileSource {
             lexer,
             conditionals: Vec::new(),
@@ -12722,6 +12818,7 @@ impl<'files> Preprocessor<'files> {
         if let Some(Source::File(file)) = self.stack.last_mut() {
             file.lexer.in_directive = true;
             file.lexer.keep_comments = false;
+            file.lexer.keep_whitespace = false;
             read_before = file.guard.read_any;
         }
         self.directive_read_before = read_before;
@@ -13519,11 +13616,13 @@ impl<'files> Preprocessor<'files> {
                     return;
                 };
                 lexer.in_directive = true;
+                lexer.keep_whitespace = false;
                 lexer.lex()
             };
             if directive.kind != TokenKind::Identifier {
                 if let Some(lexer) = self.file_lexer_mut() {
                     lexer.in_directive = false;
+                    lexer.reset_extended_mode();
                 }
                 if directive.kind == TokenKind::EndOfDirective {
                     if let Some(lexer) = self.file_lexer_mut() {
@@ -13538,12 +13637,14 @@ impl<'files> Preprocessor<'files> {
             if first.is_ascii_lowercase() && first != b'i' && first != b'e' {
                 if let Some(lexer) = self.file_lexer_mut() {
                     lexer.in_directive = false;
+                    lexer.reset_extended_mode();
                 }
                 continue;
             }
             if name.len() >= 20 {
                 if let Some(lexer) = self.file_lexer_mut() {
                     lexer.in_directive = false;
+                    lexer.reset_extended_mode();
                 }
                 continue;
             }
@@ -17334,16 +17435,187 @@ impl<'files> Preprocessor<'files> {
                 let second = self.lex_unexpanded();
                 self.unknown_pragma("#pragma omp", second, true, true)
             }
+            "STDC" if self.parser_pragmas_active() => self.pragma_stdc(),
             "STDC" => {
                 let known = true;
                 self.unknown_pragma("#pragma", first, known, false);
             }
+            "comment" if self.parser_pragmas_active() => self.pragma_comment(&first),
             _ => {
                 let known = PARSER_PRAGMAS.contains(&name.as_str());
                 let expand = self.language.microsoft_extensions;
                 self.unknown_pragma("#pragma", first, known, expand);
             }
         }
+    }
+
+    fn parser_pragmas_active(&self) -> bool {
+        self.options.syntax_only && self.printer.is_none()
+    }
+
+    fn push_pragma_annotation(&mut self, at: &Token, value: &str) {
+        let mut annotation = Token::new(
+            TokenKind::PragmaAnnotation,
+            Rc::from(value.as_bytes()),
+            at.site,
+            0,
+        );
+        annotation.flags = at.flags & (START_OF_LINE | LEADING_SPACE);
+        self.push_tokens(vec![annotation], true);
+    }
+
+    fn lex_on_off_switch(&mut self) -> Option<&'static str> {
+        let token = self.lex_unexpanded();
+        let value = if token.kind != TokenKind::Identifier {
+            None
+        } else {
+            match token.text() {
+                "ON" => Some("ON"),
+                "OFF" => Some("OFF"),
+                "DEFAULT" => Some("DEFAULT"),
+                _ => None,
+            }
+        };
+        let Some(value) = value else {
+            self.report_token(Message::OnOffSwitchSyntax, &token, Vec::new());
+            return None;
+        };
+        let next = self.lex_unexpanded();
+        if next.kind != TokenKind::EndOfDirective {
+            self.report_token(Message::PragmaSyntaxEndOfDirective, &next, Vec::new());
+        }
+        Some(value)
+    }
+
+    fn pragma_stdc(&mut self) {
+        let name = self.lex_unexpanded();
+        let spelled = if name.kind == TokenKind::Identifier {
+            name.text().to_string()
+        } else {
+            String::new()
+        };
+        match spelled.as_str() {
+            "FP_CONTRACT" | "CX_LIMITED_RANGE" => {
+                if let Some(value) = self.lex_on_off_switch() {
+                    let annotation = format!("{} {value}", spelled.to_ascii_lowercase());
+                    self.push_pragma_annotation(&name, &annotation);
+                }
+            }
+            "FENV_ACCESS" => {
+                if !self.options.target.has_strict_floating_point() {
+                    self.report_token(
+                        Message::PragmaFloatingPointIgnored,
+                        &name,
+                        vec![spelled.clone()],
+                    );
+                    return;
+                }
+                if let Some(value) = self.lex_on_off_switch() {
+                    self.push_pragma_annotation(&name, &format!("fenv_access {value}"));
+                }
+            }
+            "FENV_ROUND" => self.pragma_stdc_rounding(&name),
+            _ => self.report_token(Message::StdcPragmaIgnored, &name, Vec::new()),
+        }
+    }
+
+    fn pragma_stdc_rounding(&mut self, name: &Token) {
+        if !self.options.target.has_strict_floating_point() {
+            self.report_token(
+                Message::PragmaFloatingPointIgnored,
+                name,
+                vec!["FENV_ROUND".to_string()],
+            );
+            return;
+        }
+        let mode = self.lex();
+        if mode.kind != TokenKind::Identifier {
+            self.report_token(
+                Message::PragmaExpectedIdentifier,
+                &mode,
+                vec!["FENV_ROUND".to_string()],
+            );
+            return;
+        }
+        if !matches!(
+            mode.text(),
+            "FE_TOWARDZERO"
+                | "FE_TONEAREST"
+                | "FE_UPWARD"
+                | "FE_DOWNWARD"
+                | "FE_TONEARESTFROMZERO"
+                | "FE_DYNAMIC"
+        ) {
+            self.report_token(Message::StdcUnknownRoundingMode, &mode, Vec::new());
+            return;
+        }
+        let end = self.lex();
+        if end.kind != TokenKind::EndOfDirective {
+            self.report_token(
+                Message::PragmaExtraTokensAtEnd,
+                &end,
+                vec!["STDC FENV_ROUND".to_string()],
+            );
+            return;
+        }
+        self.report_token(Message::StdcFenvRoundNotSupported, &end, Vec::new());
+        let annotation = format!("fenv_round {}", mode.text());
+        self.push_pragma_annotation(&end, &annotation);
+    }
+
+    fn pragma_comment(&mut self, introducer: &Token) {
+        let open = self.lex();
+        if open.kind != TokenKind::LeftParen {
+            self.report_token(Message::PragmaCommentMalformed, introducer, Vec::new());
+            return;
+        }
+        let kind = self.lex();
+        if kind.kind != TokenKind::Identifier {
+            self.report_token(Message::PragmaCommentMalformed, introducer, Vec::new());
+            return;
+        }
+        let name = kind.text().to_string();
+        if !matches!(
+            name.as_str(),
+            "linker" | "lib" | "compiler" | "exestr" | "user" | "copyright"
+        ) {
+            self.report_token(Message::PragmaCommentUnknownKind, &kind, Vec::new());
+            return;
+        }
+        let triple = &self.options.target.triple;
+        if (triple.os == "aix" && name != "copyright") || (triple.is_elf() && name != "lib") {
+            self.report_token(Message::PragmaCommentIgnored, &kind, vec![name]);
+            return;
+        }
+        if name == "copyright" {
+            if self.seen_copyright_comment {
+                self.report_token(Message::PragmaCommentOnce, &kind, vec![name]);
+                return;
+            }
+            self.seen_copyright_comment = true;
+        }
+        let mut token = self.lex();
+        let mut argument = Vec::new();
+        if token.kind == TokenKind::Comma {
+            token = self.lex();
+            match self.finish_string_literal(&mut token, "pragma comment", true) {
+                Some(value) => argument = value,
+                None => return,
+            }
+        }
+        if token.kind != TokenKind::RightParen {
+            self.report_token(Message::PragmaCommentMalformed, &token, Vec::new());
+            return;
+        }
+        let end = self.lex();
+        if end.kind != TokenKind::EndOfDirective {
+            self.report_token(Message::PragmaCommentMalformed, &end, Vec::new());
+            return;
+        }
+        if name == "copyright" && argument.is_empty() {
+            return;
+        }
+        self.linker_comments.push((name, argument));
     }
 
     fn unknown_pragma(&mut self, prefix: &str, first: Token, known: bool, expand: bool) {
@@ -19111,6 +19383,7 @@ impl<'files> Preprocessor<'files> {
             fatal: self.engine.fatal_occurred,
             unknown_warning_flags: std::mem::take(&mut self.engine.unknown_flags),
             sources: std::mem::take(&mut self.sources),
+            linker_comments: std::mem::take(&mut self.linker_comments),
         }
     }
 
