@@ -72034,6 +72034,163 @@ mod c_front_end {
         result
     }
 
+    fn basic_to_extended(pattern: &str) -> String {
+        let characters: Vec<char> = pattern.chars().collect();
+        let mut out = String::new();
+        let mut at = 0usize;
+        let mut in_bracket = false;
+        while at < characters.len() {
+            let character = characters[at];
+            if in_bracket {
+                out.push(character);
+                if character == ']' && !out.ends_with("[]") && !out.ends_with("[^]") {
+                    in_bracket = false;
+                }
+                at += 1;
+                continue;
+            }
+            match character {
+                '\\' if at + 1 < characters.len() => {
+                    let next = characters[at + 1];
+                    if "(){}|+?".contains(next) {
+                        out.push(next);
+                    } else {
+                        out.push('\\');
+                        out.push(next);
+                    }
+                    at += 2;
+                    continue;
+                }
+                '[' => in_bracket = true,
+                '*' if out.is_empty() || out == "^" || out.ends_with('(') => {
+                    out.push_str("\\*");
+                    at += 1;
+                    continue;
+                }
+                '+' | '?' | '|' | '(' | ')' | '{' | '}' => out.push('\\'),
+                _ => {}
+            }
+            out.push(character);
+            at += 1;
+        }
+        out
+    }
+
+    pub(super) fn tool_grep(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let mut invert = false;
+        let mut extended = false;
+        let mut fixed = false;
+        let mut count = false;
+        let mut quiet = false;
+        let mut ignore_case = false;
+        let mut whole_line = false;
+        let mut pattern: Option<String> = None;
+        let mut files: Vec<String> = Vec::new();
+        let mut options_done = false;
+        for argument in &arguments[1..] {
+            if !options_done && argument.starts_with('-') && argument.len() > 1 {
+                if argument == "--" {
+                    options_done = true;
+                    continue;
+                }
+                for flag in argument[1..].chars() {
+                    match flag {
+                        'v' => invert = true,
+                        'E' => extended = true,
+                        'F' => fixed = true,
+                        'c' => count = true,
+                        'q' | 's' => quiet = quiet || flag == 'q',
+                        'i' => ignore_case = true,
+                        'x' => whole_line = true,
+                        _ => {
+                            world.missing_tool = Some(format!("grep -{flag}"));
+                            return ToolOutcome::failed(
+                                2,
+                                format!("grep: unsupported option -{flag}\n"),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            if pattern.is_none() {
+                pattern = Some(argument.clone());
+            } else {
+                files.push(argument.clone());
+            }
+        }
+        let Some(pattern) = pattern else {
+            return ToolOutcome::failed(2, "grep: no pattern\n");
+        };
+        let source = if fixed {
+            regex_escape(&pattern)
+        } else if extended {
+            pattern.clone()
+        } else {
+            basic_to_extended(&pattern)
+        };
+        let source = if whole_line {
+            format!("^({source})$")
+        } else {
+            source
+        };
+        let Ok(regex) = Regex::new(&source, true, ignore_case) else {
+            return ToolOutcome::failed(2, format!("grep: invalid pattern '{pattern}'\n"));
+        };
+        let mut inputs: Vec<(String, Vec<u8>)> = Vec::new();
+        if files.is_empty() {
+            inputs.push(("(standard input)".to_string(), input.to_vec()));
+        } else {
+            for file in &files {
+                match world.read(file) {
+                    Some(bytes) => inputs.push((file.clone(), bytes)),
+                    None => {
+                        return ToolOutcome::failed(
+                            2,
+                            format!("grep: {file}: No such file or directory\n"),
+                        )
+                    }
+                }
+            }
+        }
+        let named = inputs.len() > 1;
+        let mut stdout = Vec::new();
+        let mut selected = 0usize;
+        for (name, bytes) in &inputs {
+            let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+            if bytes.ends_with(b"\n") {
+                lines.pop();
+            }
+            let mut matched_here = 0usize;
+            for line in lines {
+                if regex.is_match(line) != invert {
+                    matched_here += 1;
+                    if !count && !quiet {
+                        if named {
+                            stdout.extend_from_slice(name.as_bytes());
+                            stdout.push(b':');
+                        }
+                        stdout.extend_from_slice(line);
+                        stdout.push(b'\n');
+                    }
+                }
+            }
+            if count && !quiet {
+                if named {
+                    stdout.extend_from_slice(name.as_bytes());
+                    stdout.push(b':');
+                }
+                stdout.extend_from_slice(format!("{matched_here}\n").as_bytes());
+            }
+            selected += matched_here;
+        }
+        let mut outcome = ToolOutcome::ok(stdout);
+        if selected == 0 {
+            outcome.status = 1;
+        }
+        outcome
+    }
+
     #[derive(Clone, Copy, PartialEq, Eq)]
     enum ExpectedKind {
         Error,
@@ -73006,6 +73163,54 @@ mod c_front_end {
     }
 
     #[test]
+    fn the_grep_tool_reads_basic_regular_expressions() {
+        let tree = Tree::of(&[]).expect("an empty tree");
+        let tools = standard_tools();
+        let mut world = World {
+            tree: &tree,
+            files: BTreeMap::new(),
+            removed: Default::default(),
+            folders: Default::default(),
+            directory: "/work".to_string(),
+            environment: BTreeMap::new(),
+            tools: &tools,
+            missing_tool: None,
+            errors_before_output: false,
+        };
+        let input = b"foo{a, b}\nb: 2*9*g\nplain\n";
+        let run = |arguments: &[&str], world: &mut World| {
+            let owned: Vec<String> = arguments.iter().map(|item| item.to_string()).collect();
+            tool_grep(&owned, input, world)
+        };
+        let found = run(&["grep", "foo{a, b}"], &mut world);
+        assert_eq!(found.status, 0);
+        assert_eq!(found.stdout, b"foo{a, b}\n");
+        let starred = run(&["grep", "b: 2\\*9\\*g"], &mut world);
+        assert_eq!(starred.stdout, b"b: 2*9*g\n");
+        let inverted = run(&["grep", "-v", "-c", "plain"], &mut world);
+        assert_eq!(inverted.stdout, b"2\n");
+        assert_eq!(run(&["grep", "missing"], &mut world).status, 1);
+    }
+
+    #[test]
+    fn braced_initializers_in_macro_arguments_are_regrouped() {
+        let source = "#define F(x) [x]\nF(0 {, })\n";
+        let (output, stderr, status) = preprocess(&["-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains("too many arguments provided to function-like macro invocation"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "parentheses are required around macro argument containing braced initializer list"
+            ),
+            "{stderr}"
+        );
+        assert_eq!(body(&output), "[0 {, }]");
+    }
+
+    #[test]
     fn every_warning_option_named_by_a_message_exists() {
         for name in [
             "undef",
@@ -73108,6 +73313,7 @@ mod c_front_end {
         );
         let mut tools = standard_tools();
         tools.insert("clang-cc1".to_string(), tool_clang_cc1);
+        tools.insert("grep".to_string(), tool_grep);
         let suite =
             LitSuite {
                 tree: &tree,

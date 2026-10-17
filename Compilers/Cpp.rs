@@ -797,6 +797,7 @@ struct Lexer {
     in_directive: bool,
     parsing_filename: bool,
     keep_comments: bool,
+    base_keep_comments: bool,
     line_comments: bool,
     raw: bool,
     pragma_lexer: bool,
@@ -817,6 +818,7 @@ impl Lexer {
             in_directive: false,
             parsing_filename: false,
             keep_comments: false,
+            base_keep_comments: false,
             line_comments: options.line_comments,
             raw: false,
             pragma_lexer: false,
@@ -1559,6 +1561,7 @@ impl Lexer {
                     if self.in_directive {
                         self.in_directive = false;
                         self.parsing_filename = false;
+                        self.keep_comments = self.base_keep_comments;
                         self.at_start_of_line = true;
                         self.at_physical_start_of_line = true;
                         let token = self.form(start, at, TokenKind::EndOfDirective, flags);
@@ -1996,6 +1999,7 @@ impl Lexer {
         if self.in_directive {
             self.in_directive = false;
             self.parsing_filename = false;
+            self.keep_comments = self.base_keep_comments;
             let mut token = Token::marker(TokenKind::EndOfDirective, self.place(at));
             token.flags = flags;
             self.position = at;
@@ -2290,6 +2294,10 @@ pub enum Message {
     UnknownWarningOption,
     TooManyErrors,
     UnterminatedMicrosoftPragma,
+    FileNotFoundTypo,
+    HeaderShadowing,
+    SuggestParenthesesForMacro,
+    InitializerListAtArgumentStart,
     AuditSyntax,
     AuditDoubleBegin,
     AuditUnmatchedEnd,
@@ -2612,6 +2620,22 @@ impl Message {
                 "invalid preprocessing directive%select{|, did you mean '#%1'?}0",
             ),
             Message::FileNotFound => (Fatal, "", "'%0' file not found"),
+            Message::SuggestParenthesesForMacro => (
+                Note,
+                "",
+                "parentheses are required around macro argument containing braced initializer list",
+            ),
+            Message::InitializerListAtArgumentStart => (
+                Note,
+                "",
+                "cannot use initializer list at the beginning of a macro argument",
+            ),
+            Message::HeaderShadowing => (
+                WarningOff,
+                "shadow-header",
+                "multiple candidates for header '%0' found; directory '%1' chosen, ignoring others including '%2'",
+            ),
+            Message::FileNotFoundTypo => (Error, "", "'%0' file not found, did you mean '%1'?"),
             Message::FileNotFoundAngled => (
                 Error,
                 "",
@@ -4912,6 +4936,7 @@ pub struct PreprocessorOptions {
     pub pic_level: u32,
     pub pie: bool,
     pub embed_directories: Vec<String>,
+    pub spell_checking: bool,
 }
 
 impl Default for PreprocessorOptions {
@@ -4945,6 +4970,7 @@ impl Default for PreprocessorOptions {
             pic_level: 0,
             pie: false,
             embed_directories: Vec::new(),
+            spell_checking: true,
         }
     }
 }
@@ -5053,6 +5079,7 @@ pub struct Preprocessor<'files> {
     defined_state: Option<(bool, Rc<[u8]>)>,
     evaluated_defined: bool,
     assume_nonnull: Option<Place>,
+    shadow_checked: BTreeSet<(String, String)>,
     arc_cf_audited: Option<Place>,
     directive_read_before: bool,
     last_expression_simple: bool,
@@ -5124,6 +5151,7 @@ impl<'files> Preprocessor<'files> {
             defined_state: None,
             evaluated_defined: false,
             assume_nonnull: None,
+            shadow_checked: BTreeSet::new(),
             arc_cf_audited: None,
             directive_read_before: true,
             last_expression_simple: false,
@@ -5726,6 +5754,76 @@ impl<'files> Preprocessor<'files> {
         !definition.function_like || definition.parameter_index(&replacement.spelling).is_none()
     }
 
+    fn regroup_braced_arguments(
+        &mut self,
+        groups: &[Vec<Token>],
+    ) -> (Option<Vec<Vec<Token>>>, bool) {
+        let mut brackets: Vec<TokenKind> = Vec::new();
+        for token in groups.iter().flatten() {
+            let opener = match token.kind {
+                TokenKind::LeftParen | TokenKind::LeftBrace => {
+                    brackets.push(token.kind);
+                    continue;
+                }
+                TokenKind::RightParen => TokenKind::LeftParen,
+                TokenKind::RightBrace => TokenKind::LeftBrace,
+                _ => continue,
+            };
+            if brackets.pop() != Some(opener) {
+                return (None, false);
+            }
+        }
+        if !brackets.is_empty() {
+            return (None, false);
+        }
+        let mut braces = 0usize;
+        let mut current: Vec<Token> = Vec::new();
+        let mut merged = false;
+        let mut hints = 0usize;
+        let mut initializer_lists = 0usize;
+        let mut result: Vec<Vec<Token>> = Vec::new();
+        for group in groups {
+            for token in group {
+                match token.kind {
+                    TokenKind::LeftBrace => braces += 1,
+                    TokenKind::RightBrace => braces -= 1,
+                    _ => {}
+                }
+                current.push(token.clone());
+            }
+            if braces != 0 {
+                merged = true;
+                let site = current.last().map(|token| token.site).unwrap_or_default();
+                current.push(self.make_token(TokenKind::Comma, b",".to_vec(), (site, site)));
+                continue;
+            }
+            let mut argument = std::mem::take(&mut current);
+            if merged {
+                if argument
+                    .first()
+                    .is_some_and(|first| first.kind == TokenKind::LeftBrace)
+                {
+                    initializer_lists += 1;
+                }
+                let start = argument.first().map(|token| token.site).unwrap_or_default();
+                let end = argument.last().map(|token| token.site).unwrap_or_default();
+                argument.insert(
+                    0,
+                    self.make_token(TokenKind::LeftParen, Vec::new(), (start, start)),
+                );
+                argument.push(self.make_token(TokenKind::RightParen, Vec::new(), (end, end)));
+                hints += 1;
+            }
+            result.push(argument);
+            merged = false;
+        }
+        if hints > 0 && initializer_lists == 0 {
+            (Some(result), false)
+        } else {
+            (None, initializer_lists > 0)
+        }
+    }
+
     fn read_macro_arguments(
         &mut self,
         name: &Token,
@@ -5803,7 +5901,7 @@ impl<'files> Preprocessor<'files> {
             groups.push(current);
             fixed_left = fixed_left.saturating_sub(1);
         }
-        let actual_count = groups.len();
+        let mut actual_count = groups.len();
         if !variadic && actual_count > parameter_count {
             let place = too_many_place.unwrap_or(name.site);
             self.report(Message::TooManyArguments, place, Vec::new());
@@ -5812,7 +5910,19 @@ impl<'files> Preprocessor<'files> {
                 definition.defined_at,
                 vec![quoted(&definition.name)],
             );
-            return Err(None);
+            let (regrouped, initializer_list) = self.regroup_braced_arguments(&groups);
+            let Some(regrouped) = regrouped else {
+                if initializer_list {
+                    self.report_token(Message::InitializerListAtArgumentStart, name, Vec::new());
+                }
+                return Err(None);
+            };
+            if regrouped.len() != parameter_count {
+                return Err(None);
+            }
+            self.report_token(Message::SuggestParenthesesForMacro, name, Vec::new());
+            groups = regrouped;
+            actual_count = groups.len();
         }
         let mut varargs_elided = false;
         if actual_count < parameter_count {
@@ -6699,6 +6809,7 @@ impl<'files> Preprocessor<'files> {
         let index = self.sources.add(buffer);
         let mut lexer = Lexer::new(bytes, index, &self.language);
         lexer.keep_comments = self.options.keep_comments;
+        lexer.base_keep_comments = self.options.keep_comments;
         self.stack.push(Source::File(FileSource {
             lexer,
             conditionals: Vec::new(),
@@ -6751,12 +6862,84 @@ impl<'files> Preprocessor<'files> {
         }
     }
 
+    fn diagnose_header_shadowing(
+        &mut self,
+        name: &str,
+        found: &str,
+        site: Place,
+        angled: bool,
+        start_index: Option<usize>,
+        main_index: Option<usize>,
+    ) {
+        if self.message_ignored(Message::HeaderShadowing, site) {
+            return;
+        }
+        let quoted_count = self.options.quoted_directories.len();
+        let character_of = |preprocessor: &Self, index: usize| {
+            if index < quoted_count {
+                FileCharacter::User
+            } else {
+                preprocessor.options.directories[index - quoted_count].character
+            }
+        };
+        if let Some(index) = main_index {
+            if character_of(self, index) != FileCharacter::User {
+                return;
+            }
+        }
+        if !self
+            .shadow_checked
+            .insert((name.to_string(), self.canonical_key(found)))
+        {
+            return;
+        }
+        let total = quoted_count + self.options.directories.len();
+        let mut index = if let Some(main) = main_index {
+            main + 1
+        } else if let Some(start) = start_index {
+            start
+        } else if angled {
+            quoted_count
+        } else {
+            0
+        };
+        while index < total {
+            if character_of(self, index) == FileCharacter::User {
+                let directory = if index < quoted_count {
+                    self.options.quoted_directories[index].clone()
+                } else {
+                    self.options.directories[index - quoted_count].path.clone()
+                };
+                let candidate = Self::join_path(&directory, name);
+                let full =
+                    if candidate.starts_with('/') || self.options.working_directory.is_empty() {
+                        candidate.clone()
+                    } else {
+                        Self::join_path(&self.options.working_directory, &candidate)
+                    };
+                if self.canonical_key(&full) != self.canonical_key(found)
+                    && self.read_file(&full).is_some()
+                {
+                    let chosen = Self::directory_of(found);
+                    self.report(
+                        Message::HeaderShadowing,
+                        site,
+                        vec![name.to_string(), chosen, directory],
+                    );
+                    return;
+                }
+            }
+            index += 1;
+        }
+    }
+
     fn lookup_file(
         &mut self,
         name: &str,
         angled: bool,
         start_index: Option<usize>,
         include_next: bool,
+        site: Place,
     ) -> Option<FoundFile> {
         if name.starts_with('/') {
             let bytes = self.read_file(name)?;
@@ -6778,6 +6961,7 @@ impl<'files> Preprocessor<'files> {
                     Self::join_path(&self.options.working_directory, &path)
                 };
                 if let Some(bytes) = self.read_file(&full) {
+                    self.diagnose_header_shadowing(name, &full, site, angled, start_index, None);
                     return Some((path, bytes, None, true, character));
                 }
             }
@@ -6802,6 +6986,7 @@ impl<'files> Preprocessor<'files> {
                 Self::join_path(&self.options.working_directory, &path)
             };
             if let Some(bytes) = self.read_file(&full) {
+                self.diagnose_header_shadowing(name, &full, site, angled, start_index, Some(index));
                 return Some((path, bytes, Some(index), false, character));
             }
             index += 1;
@@ -6813,6 +6998,7 @@ impl<'files> Preprocessor<'files> {
         let mut read_before = true;
         if let Some(Source::File(file)) = self.stack.last_mut() {
             file.lexer.in_directive = true;
+            file.lexer.keep_comments = false;
             read_before = file.guard.read_any;
         }
         self.directive_read_before = read_before;
@@ -7007,8 +7193,6 @@ impl<'files> Preprocessor<'files> {
         let keep_macro_comments = self.options.keep_macro_comments;
         self.set_directive_comment_retention(keep_macro_comments);
         let definition = self.read_macro_definition(&name);
-        let keep = self.options.keep_comments;
-        self.set_directive_comment_retention(keep);
         if self.in_directive() {
             self.discard_until_end_of_directive();
         }
@@ -11014,25 +11198,50 @@ impl<'files> Preprocessor<'files> {
                 start_index = search.map(|index| index + 1);
             }
         }
-        let found = self.lookup_file(&name, angled, start_index, include_next);
-        let Some((path, bytes, search_index, relative, character)) = found else {
-            if angled && self.lookup_file(&name, false, None, false).is_some() {
+        let mut found = self.lookup_file(
+            &name,
+            angled,
+            start_index,
+            include_next,
+            filename_token.site,
+        );
+        if found.is_none() && angled {
+            found = self.lookup_file(&name, false, start_index, include_next, filename_token.site);
+            if found.is_some() {
+                let import = if kind == IncludeKind::Import {
+                    "1"
+                } else {
+                    "0"
+                };
                 self.report_token(
                     Message::FileNotFoundAngled,
                     &filename_token,
-                    vec![
-                        name,
-                        if kind == IncludeKind::Import {
-                            "1"
-                        } else {
-                            "0"
-                        }
-                        .to_string(),
-                    ],
+                    vec![name.clone(), import.to_string()],
                 );
-            } else {
-                self.report_token(Message::FileNotFound, &filename_token, vec![name]);
             }
+        }
+        if found.is_none() && self.options.spell_checking {
+            let corrected = name
+                .trim_start_matches(|character: char| !character.is_ascii_alphanumeric())
+                .trim_end_matches(|character: char| !character.is_ascii_alphanumeric())
+                .to_string();
+            found = self.lookup_file(
+                &corrected,
+                angled,
+                start_index,
+                include_next,
+                filename_token.site,
+            );
+            if found.is_some() {
+                self.report_token(
+                    Message::FileNotFoundTypo,
+                    &filename_token,
+                    vec![name.clone(), corrected],
+                );
+            }
+        }
+        let Some((path, bytes, search_index, relative, character)) = found else {
+            self.report_token(Message::FileNotFound, &filename_token, vec![name]);
             return;
         };
         let key = self.canonical_key(&path);
@@ -11181,19 +11390,15 @@ impl<'files> Preprocessor<'files> {
         if u64::from(line) >= limit {
             self.report_token(Message::LineTooBig, &digit, vec![limit.to_string()]);
         }
-        let string = self.lex();
+        let string = self.lex_header_name(true).unwrap_or_else(|end| end);
         let mut name: Option<Rc<str>> = None;
         if string.kind == TokenKind::EndOfDirective {
-        } else if string.kind != TokenKind::String(LiteralPrefix::Plain) {
+        } else if string.kind != TokenKind::HeaderName {
             self.report_token(Message::LineInvalidFilename, &string, Vec::new());
             self.discard_until_end_of_directive();
             return;
         } else {
-            let Some(value) = evaluate_string_literal(&string.spelling) else {
-                self.discard_until_end_of_directive();
-                return;
-            };
-            name = Some(Rc::from(String::from_utf8_lossy(&value).as_ref()));
+            name = Some(self.line_directive_filename(&string));
             self.check_end_of_directive("line", true);
         }
         let character = self.sources.presumed(digit.site).character;
@@ -11204,11 +11409,20 @@ impl<'files> Preprocessor<'files> {
         }
     }
 
+    fn line_directive_filename(&mut self, token: &Token) -> Rc<str> {
+        let spelling = &token.spelling;
+        if spelling.len() < 2 || spelling[0] != b'"' || spelling[spelling.len() - 1] != b'"' {
+            self.report_token(Message::LineInvalidFilename, token, Vec::new());
+            return Rc::from("");
+        }
+        Rc::from(String::from_utf8_lossy(&spelling[1..spelling.len() - 1]).as_ref())
+    }
+
     fn handle_digit_directive(&mut self, digit: Token) {
         let Some(line) = self.line_value(&digit, Message::LinemarkerRequiresInteger, true) else {
             return;
         };
-        let string = self.lex();
+        let string = self.lex_header_name(true).unwrap_or_else(|end| end);
         let mut entry = false;
         let mut exit = false;
         let mut name: Option<Rc<str>> = None;
@@ -11216,15 +11430,12 @@ impl<'files> Preprocessor<'files> {
         if string.kind == TokenKind::EndOfDirective {
             self.report_token(Message::GnuLineMarker, &string, Vec::new());
             character = self.sources.presumed(digit.site).character;
-        } else if string.kind != TokenKind::String(LiteralPrefix::Plain) {
+        } else if string.kind != TokenKind::HeaderName {
             self.report_token(Message::LinemarkerInvalidFilename, &string, Vec::new());
             self.discard_until_end_of_directive();
             return;
         } else {
-            let Some(value) = evaluate_string_literal(&string.spelling) else {
-                self.discard_until_end_of_directive();
-                return;
-            };
+            let value = self.line_directive_filename(&string);
             let mut flag = self.lex();
             if flag.kind != TokenKind::EndOfDirective {
                 let Some(mut value_flag) =
@@ -11301,7 +11512,7 @@ impl<'files> Preprocessor<'files> {
                 self.report_token(Message::GnuLineMarker, &string, Vec::new());
             }
             if !(exit && value.is_empty()) {
-                name = Some(Rc::from(String::from_utf8_lossy(&value).as_ref()));
+                name = Some(value);
             }
         }
         let entry_exit = if entry {
@@ -11472,7 +11683,10 @@ impl<'files> Preprocessor<'files> {
                     }
                 }
             }
-            "omp" => self.unknown_pragma("#pragma omp", first, true, true),
+            "omp" => {
+                let second = self.lex_unexpanded();
+                self.unknown_pragma("#pragma omp", second, true, true)
+            }
             "STDC" => {
                 let known = true;
                 self.unknown_pragma("#pragma", first, known, false);
@@ -11659,7 +11873,10 @@ impl<'files> Preprocessor<'files> {
         if name.is_empty() {
             return;
         }
-        if self.lookup_file(&name, angled, None, false).is_none() {
+        if self
+            .lookup_file(&name, angled, None, false, token.site)
+            .is_none()
+        {
             self.report_token(Message::FileNotFound, &token, vec![name]);
         }
     }
@@ -12643,7 +12860,7 @@ impl<'files> Preprocessor<'files> {
             return (Some(false), close);
         }
         let found = self
-            .lookup_file(&name, angled, start, include_next)
+            .lookup_file(&name, angled, start, include_next, filename.site)
             .is_some();
         (Some(found), close)
     }
@@ -14244,7 +14461,6 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
             | "-fno-gnu-keywords"
             | "-fno-signed-wchar"
             | "-fsigned-wchar"
-            | "-fno-spell-checking"
             | "-fno-diagnostics-fixit-info"
             | "-fdiagnostics-parseable-fixits"
             | "-fno-common"
@@ -14261,6 +14477,7 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
             | "-fno-integrated-cc1"
             | "-fgnuc-version=0" => {}
             "-fno-caret-diagnostics" => invocation.show_source = false,
+            "-fno-spell-checking" => options.spell_checking = false,
             "-pic-is-pie" => options.pie = true,
             "-fno-inline" | "-fno-inline-functions" => options.no_inline = true,
             "-finline-functions" | "-finline-hint-functions" => options.no_inline = false,
