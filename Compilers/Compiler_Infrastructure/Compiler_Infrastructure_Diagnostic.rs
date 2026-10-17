@@ -115,6 +115,9 @@ pub const CATALOGUE: &[(&str, &str)] = &[
     ("EI302", "The assembly source has an error."),
     ("EI303", "The assembly source has a warning."),
     ("EI304", "The assembly source has a note."),
+    ("EI500", "The native code generator does not support this yet."),
+    ("EI501", "The generated machine code could not be assembled."),
+    ("EI502", "The generated program could not be linked."),
 ];
 
 pub fn english_of(code: &str) -> Option<&'static str> {

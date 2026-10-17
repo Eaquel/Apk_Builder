@@ -30340,3 +30340,2737 @@ pub mod object {
             .map(|(_, value)| *value)
     }
 }
+
+pub mod codegen {
+    use super::*;
+    use crate::compilers::compiler_infrastructure::{
+        AtomicOp, BinaryOp, BlockCall, ClassId, Comparison, Conversion, DataLayout,
+        FloatComparison, Function, FunctionId, GlobalContent, Instruction, Linkage, Module,
+        Operation, Scalar, Signature, Symbol, Terminator, Type, UnaryOp, Value,
+    };
+
+    pub const TRAP_NULL_REFERENCE: i64 = 1;
+    pub const TRAP_INDEX_OUT_OF_BOUNDS: i64 = 2;
+    pub const TRAP_DIVISION_BY_ZERO: i64 = 3;
+    pub const TRAP_CONVERSION_RANGE: i64 = 4;
+    pub const TRAP_NEGATIVE_LENGTH: i64 = 5;
+    pub const TRAP_MEMORY_EXHAUSTED: i64 = 6;
+    pub const TRAP_ABSTRACT_METHOD: i64 = 7;
+    pub const TRAP_MISSING_IMPLEMENTATION: i64 = 8;
+    pub const TRAP_UNREACHABLE: i64 = 9;
+    pub const TRAP_OVERLAPPING_COPY: i64 = 10;
+    pub const TRAP_EXPLICIT: i64 = 11;
+    pub const TRAP_ABORT: i64 = 12;
+
+    pub const INSTANCE_HEADER: u32 = 16;
+    pub const ARRAY_LENGTH_OFFSET: u32 = 16;
+    pub const ARRAY_HEADER: u32 = 24;
+
+    const INTRINSIC_SYSCALL: &str = "omni.machine.syscall";
+    const INTRINSIC_ADDRESS: &str = "omni.machine.address";
+    const INTRINSIC_REFERENCE: &str = "omni.machine.reference";
+
+    pub fn unsupported(feature: &str) -> Diagnostic {
+        fail(
+            "EI500",
+            "The native code generator does not support this yet.",
+        )
+        .with_context(format!("Feature: {feature}"))
+    }
+
+    fn assembly_failed(text: &str) -> Diagnostic {
+        fail(
+            "EI501",
+            "The generated machine code could not be assembled.",
+        )
+        .with_context(format!("Cause: {text}"))
+    }
+
+    fn link_failed(text: &str) -> Diagnostic {
+        fail("EI502", "The generated program could not be linked.")
+            .with_context(format!("Cause: {text}"))
+    }
+
+    fn plain_name(name: &str) -> bool {
+        let mut bytes = name.bytes();
+        let Some(first) = bytes.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == b'_' || first == b'.')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$'))
+    }
+
+    pub fn function_symbol(module: &Module, id: FunctionId) -> String {
+        let function = &module.functions[id.index()];
+        if function.linkage != Linkage::Internal && plain_name(&function.name) {
+            function.name.clone()
+        } else if function.linkage != Linkage::Internal {
+            let hex: String = function
+                .name
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("__omni_n_{hex}")
+        } else {
+            format!("__omni_f{}", id.0)
+        }
+    }
+
+    fn global_symbol(module: &Module, index: usize) -> String {
+        let global = &module.globals[index];
+        if global.linkage != Linkage::Internal && plain_name(&global.name) {
+            global.name.clone()
+        } else if global.linkage != Linkage::Internal {
+            let hex: String = global
+                .name
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("__omni_n_{hex}")
+        } else {
+            format!("__omni_g{index}")
+        }
+    }
+
+    fn type_bits(ty: Type) -> u32 {
+        ty.element().bits()
+    }
+
+    fn is_float(ty: Type) -> bool {
+        ty.is_scalar_float()
+    }
+
+    fn single(ty: Type) -> bool {
+        ty == Type::F32
+    }
+
+    fn suffix(ty: Type) -> &'static str {
+        if single(ty) {
+            "ss"
+        } else {
+            "sd"
+        }
+    }
+
+    fn register_32(register: &str) -> String {
+        match register {
+            "rax" => "eax".into(),
+            "rcx" => "ecx".into(),
+            "rdx" => "edx".into(),
+            "rsi" => "esi".into(),
+            "rdi" => "edi".into(),
+            other => format!("{other}d"),
+        }
+    }
+
+    fn register_16(register: &str) -> String {
+        match register {
+            "rax" => "ax".into(),
+            "rcx" => "cx".into(),
+            "rdx" => "dx".into(),
+            "rsi" => "si".into(),
+            "rdi" => "di".into(),
+            other => format!("{other}w"),
+        }
+    }
+
+    fn register_8(register: &str) -> String {
+        match register {
+            "rax" => "al".into(),
+            "rcx" => "cl".into(),
+            "rdx" => "dl".into(),
+            "rsi" => "sil".into(),
+            "rdi" => "dil".into(),
+            other => format!("{other}b"),
+        }
+    }
+
+    fn all_ones(bits: u32) -> u64 {
+        if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
+    }
+
+    const ARGUMENT_REGISTERS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+
+    #[derive(Clone, Copy)]
+    enum Place {
+        Integer(usize),
+        Float(usize),
+        Stack(usize),
+    }
+
+    fn classify(types: &[Type]) -> (Vec<Place>, usize) {
+        let mut integers = 0;
+        let mut floats = 0;
+        let mut stack = 0;
+        let mut places = Vec::with_capacity(types.len());
+        for ty in types {
+            if is_float(*ty) {
+                if floats < 8 {
+                    places.push(Place::Float(floats));
+                    floats += 1;
+                } else {
+                    places.push(Place::Stack(stack));
+                    stack += 1;
+                }
+            } else if integers < 6 {
+                places.push(Place::Integer(integers));
+                integers += 1;
+            } else {
+                places.push(Place::Stack(stack));
+                stack += 1;
+            }
+        }
+        (places, stack)
+    }
+
+    fn ancestors_of(module: &Module, class: ClassId) -> Vec<u32> {
+        let mut pending = vec![class];
+        let mut seen = BTreeSet::new();
+        while let Some(at) = pending.pop() {
+            if !seen.insert(at.0) {
+                continue;
+            }
+            let Some(data) = module.classes.get(at.index()) else {
+                continue;
+            };
+            pending.extend(data.implementations.iter().map(|(interface, _)| *interface));
+            pending.extend(data.parent);
+        }
+        seen.into_iter().collect()
+    }
+
+    fn interface_tables(module: &Module, class: ClassId) -> Vec<(u32, Vec<Option<FunctionId>>)> {
+        let mut tables: Vec<(u32, Vec<Option<FunctionId>>)> = Vec::new();
+        let mut current = Some(class);
+        let mut steps = 0;
+        while let Some(at) = current {
+            let data = &module.classes[at.index()];
+            for (interface, slots) in &data.implementations {
+                if tables.iter().any(|(held, _)| *held == interface.0) {
+                    continue;
+                }
+                let defaults = &module.classes[interface.index()].methods;
+                let length = slots.len().max(defaults.len());
+                let resolved = (0..length)
+                    .map(|slot| {
+                        slots
+                            .get(slot)
+                            .copied()
+                            .flatten()
+                            .or_else(|| defaults.get(slot).copied().flatten())
+                    })
+                    .collect();
+                tables.push((interface.0, resolved));
+            }
+            current = data.parent;
+            steps += 1;
+            if steps > module.classes.len() {
+                break;
+            }
+        }
+        tables
+    }
+
+    pub fn field_offsets(module: &Module, layout: &DataLayout, class: ClassId) -> (Vec<u32>, u32) {
+        let mut offset = INSTANCE_HEADER;
+        let mut offsets = Vec::new();
+        for ty in module.field_types(class) {
+            let align = layout.align_of(ty).max(1);
+            offset = offset.div_ceil(align) * align;
+            offsets.push(offset);
+            offset += layout.size_of(ty);
+        }
+        (offsets, offset.div_ceil(8) * 8)
+    }
+
+    fn check_supported(module: &Module) -> Result<(), Diagnostic> {
+        for global in &module.globals {
+            if global.thread_local {
+                return Err(unsupported("thread-local globals"));
+            }
+        }
+        if module.layout.data().pointer_bytes != 8 {
+            return Err(unsupported("a layout other than lp64"));
+        }
+        for function in &module.functions {
+            let types = function
+                .value_types
+                .iter()
+                .chain(function.signature.parameters.iter())
+                .chain(function.signature.result.iter());
+            for ty in types {
+                if matches!(ty, Type::Vector { .. }) {
+                    return Err(unsupported("vector values"));
+                }
+                if ty.element() == Scalar::I128 {
+                    return Err(unsupported("128-bit integers"));
+                }
+            }
+            for instruction in &function.instructions {
+                if matches!(
+                    instruction.operation,
+                    Operation::Splat | Operation::ExtractLane(_) | Operation::InsertLane(_)
+                ) {
+                    return Err(unsupported("vector lanes"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    struct Emitter<'m> {
+        module: &'m Module,
+        layout: DataLayout,
+        out: String,
+        labels: usize,
+        fields: BTreeMap<u32, (Vec<u32>, u32)>,
+    }
+
+    struct Frame {
+        function: FunctionId,
+        slots: BTreeMap<usize, i64>,
+    }
+
+    impl<'m> Emitter<'m> {
+        fn line(&mut self, text: &str) {
+            self.out.push('\t');
+            self.out.push_str(text);
+            self.out.push('\n');
+        }
+
+        fn label(&mut self, name: &str) {
+            self.out.push_str(name);
+            self.out.push_str(":\n");
+        }
+
+        fn fresh(&mut self) -> String {
+            self.labels += 1;
+            format!(".LT{}", self.labels)
+        }
+
+        fn slot(value: Value) -> i64 {
+            -16 * (i64::from(value.0) + 1)
+        }
+
+        fn load(&mut self, value: Value, register: &str) {
+            self.line(&format!("movq {}(%rbp), %{register}", Self::slot(value)));
+        }
+
+        fn store(&mut self, register: &str, value: Value) {
+            self.line(&format!("movq %{register}, {}(%rbp)", Self::slot(value)));
+        }
+
+        fn load_signed(&mut self, value: Value, register: &str, bits: u32) {
+            let at = Self::slot(value);
+            match bits {
+                1 => {
+                    self.line(&format!("movq {at}(%rbp), %{register}"));
+                    self.line(&format!("negq %{register}"));
+                }
+                8 => self.line(&format!("movsbq {at}(%rbp), %{register}")),
+                16 => self.line(&format!("movswq {at}(%rbp), %{register}")),
+                32 => self.line(&format!("movslq {at}(%rbp), %{register}")),
+                _ => self.line(&format!("movq {at}(%rbp), %{register}")),
+            }
+        }
+
+        fn load_float(&mut self, value: Value, register: &str, ty: Type) {
+            self.line(&format!(
+                "movs{} {}(%rbp), %{register}",
+                if single(ty) { "s" } else { "d" },
+                Self::slot(value)
+            ));
+        }
+
+        fn store_float(&mut self, register: &str, value: Value, ty: Type) {
+            self.line(&format!(
+                "movs{} %{register}, {}(%rbp)",
+                if single(ty) { "s" } else { "d" },
+                Self::slot(value)
+            ));
+        }
+
+        fn mask(&mut self, register: &str, bits: u32) {
+            match bits {
+                1 => self.line(&format!("andl $1, %{}", register_32(register))),
+                8 => self.line(&format!(
+                    "movzbl %{}, %{}",
+                    register_8(register),
+                    register_32(register)
+                )),
+                16 => self.line(&format!(
+                    "movzwl %{}, %{}",
+                    register_16(register),
+                    register_32(register)
+                )),
+                32 => self.line(&format!(
+                    "movl %{}, %{}",
+                    register_32(register),
+                    register_32(register)
+                )),
+                _ => {}
+            }
+        }
+
+        fn sign_extend_register(&mut self, register: &str, bits: u32) {
+            match bits {
+                1 => {
+                    self.line(&format!("andq $1, %{register}"));
+                    self.line(&format!("negq %{register}"));
+                }
+                8 => self.line(&format!("movsbq %{}, %{register}", register_8(register))),
+                16 => self.line(&format!("movswq %{}, %{register}", register_16(register))),
+                32 => self.line(&format!("movslq %{}, %{register}", register_32(register))),
+                _ => {}
+            }
+        }
+
+        fn constant(&mut self, value: u64, register: &str) {
+            if value == 0 {
+                self.line(&format!("xorl %{0}, %{0}", register_32(register)));
+            } else if value <= u64::from(u32::MAX) {
+                self.line(&format!("movl ${value}, %{}", register_32(register)));
+            } else {
+                self.line(&format!("movabsq ${}, %{register}", value as i64));
+            }
+        }
+
+        fn trap(&mut self, code: i64) {
+            self.line(&format!("movl ${code}, %edi"));
+            self.line("xorl %esi, %esi");
+            self.line("call __omni_trap");
+        }
+
+        fn trap_unless_nonzero(&mut self, register: &str, code: i64) {
+            let skip = self.fresh();
+            self.line(&format!("testq %{register}, %{register}"));
+            self.line(&format!("jne {skip}"));
+            self.trap(code);
+            self.label(&skip);
+        }
+
+        fn canonical_nan(&mut self, register: &str, ty: Type) {
+            let skip = self.fresh();
+            self.line(&format!("ucomi{} %{register}, %{register}", suffix(ty)));
+            self.line(&format!("jnp {skip}"));
+            if single(ty) {
+                self.line("movl $0x7fc00000, %r11d");
+                self.line(&format!("movd %r11d, %{register}"));
+            } else {
+                self.line("movabsq $0x7ff8000000000000, %r11");
+                self.line(&format!("movq %r11, %{register}"));
+            }
+            self.label(&skip);
+        }
+
+        fn memory_load(&mut self, ty: Type, address: &str, offset: i64, register: &str) {
+            let size = self.layout.size_of(ty);
+            match size {
+                1 => self.line(&format!(
+                    "movzbl {offset}(%{address}), %{}",
+                    register_32(register)
+                )),
+                2 => self.line(&format!(
+                    "movzwl {offset}(%{address}), %{}",
+                    register_32(register)
+                )),
+                4 => self.line(&format!(
+                    "movl {offset}(%{address}), %{}",
+                    register_32(register)
+                )),
+                _ => self.line(&format!("movq {offset}(%{address}), %{register}")),
+            }
+        }
+
+        fn memory_store(&mut self, ty: Type, register: &str, address: &str, offset: i64) {
+            let size = self.layout.size_of(ty);
+            match size {
+                1 => self.line(&format!(
+                    "movb %{}, {offset}(%{address})",
+                    register_8(register)
+                )),
+                2 => self.line(&format!(
+                    "movw %{}, {offset}(%{address})",
+                    register_16(register)
+                )),
+                4 => self.line(&format!(
+                    "movl %{}, {offset}(%{address})",
+                    register_32(register)
+                )),
+                _ => self.line(&format!("movq %{register}, {offset}(%{address})")),
+            }
+        }
+
+        fn field_layout(&mut self, class: ClassId) -> (Vec<u32>, u32) {
+            if let Some(found) = self.fields.get(&class.0) {
+                return found.clone();
+            }
+            let computed = field_offsets(self.module, &self.layout, class);
+            self.fields.insert(class.0, computed.clone());
+            computed
+        }
+
+        fn function_by_name(&self, id: FunctionId) -> &'m Function {
+            &self.module.functions[id.index()]
+        }
+
+        fn emit_module(&mut self) -> Result<(), Diagnostic> {
+            check_supported(self.module)?;
+            for index in 0..self.module.functions.len() {
+                let id = FunctionId(index as u32);
+                if !self.module.functions[index].is_declaration() {
+                    self.emit_function(id)?;
+                }
+            }
+            self.emit_globals();
+            self.emit_strings();
+            self.emit_classes();
+            Ok(())
+        }
+
+        fn emit_globals(&mut self) {
+            for index in 0..self.module.globals.len() {
+                let global = &self.module.globals[index];
+                if global.linkage == Linkage::Import {
+                    continue;
+                }
+                let symbol = global_symbol(self.module, index);
+                let zero =
+                    matches!(global.content, GlobalContent::Zero) && global.relocations.is_empty();
+                if zero && global.mutable {
+                    self.line(".bss");
+                } else if global.mutable || !global.relocations.is_empty() {
+                    self.line(".data");
+                } else {
+                    self.line(".section .rodata");
+                }
+                match global.linkage {
+                    Linkage::Export => self.line(&format!(".globl {symbol}")),
+                    Linkage::Weak => self.line(&format!(".weak {symbol}")),
+                    _ => {}
+                }
+                self.line(&format!(
+                    ".p2align {}",
+                    global.align.max(1).trailing_zeros()
+                ));
+                self.line(&format!(".type {symbol}, @object"));
+                self.label(&symbol);
+                let mut bytes = match &global.content {
+                    GlobalContent::Zero => vec![0u8; global.size as usize],
+                    GlobalContent::Bytes(bytes) => bytes.clone(),
+                };
+                bytes.resize(global.size as usize, 0);
+                if zero {
+                    self.line(&format!(".zero {}", global.size.max(1)));
+                } else {
+                    let mut relocations: Vec<_> = global.relocations.iter().collect();
+                    relocations.sort_by_key(|relocation| relocation.offset);
+                    let mut at = 0usize;
+                    for relocation in relocations {
+                        let start = relocation.offset as usize;
+                        if start > at {
+                            self.emit_bytes(&bytes[at..start.min(bytes.len())]);
+                        }
+                        let target = match relocation.target {
+                            Symbol::Global(id) => global_symbol(self.module, id.index()),
+                            Symbol::Function(id) => function_symbol(self.module, id),
+                        };
+                        if relocation.addend == 0 {
+                            self.line(&format!(".quad {target}"));
+                        } else {
+                            self.line(&format!(".quad {target}{:+}", relocation.addend));
+                        }
+                        at = start + 8;
+                    }
+                    if at < bytes.len() {
+                        self.emit_bytes(&bytes[at..]);
+                    }
+                    if global.size == 0 {
+                        self.line(".zero 1");
+                    }
+                }
+                self.line(&format!(".size {symbol}, {}", global.size.max(1)));
+            }
+        }
+
+        fn emit_bytes(&mut self, bytes: &[u8]) {
+            for chunk in bytes.chunks(16) {
+                let listed: Vec<String> = chunk.iter().map(|byte| byte.to_string()).collect();
+                self.line(&format!(".byte {}", listed.join(", ")));
+            }
+        }
+
+        fn emit_strings(&mut self) {
+            if self.module.strings.is_empty() {
+                return;
+            }
+            self.line(".data");
+            for index in 0..self.module.strings.len() {
+                let text = self.module.strings[index].clone();
+                self.line(".p2align 3");
+                self.label(&format!("__omni_s{index}"));
+                self.line(".quad __omni_text_descriptor");
+                self.line(".quad 0");
+                self.line(&format!(".quad {}", text.len()));
+                self.emit_bytes(text.as_bytes());
+                self.line(".byte 0");
+            }
+        }
+
+        fn emit_classes(&mut self) {
+            if self.module.classes.is_empty() {
+                return;
+            }
+            self.line(".section .rodata");
+            for index in 0..self.module.classes.len() {
+                let class = ClassId(index as u32);
+                let ancestors = ancestors_of(self.module, class);
+                let methods: Vec<Option<FunctionId>> = self.module.classes[index].methods.clone();
+                let interfaces = interface_tables(self.module, class);
+                self.line(".p2align 3");
+                self.label(&format!("__omni_c{index}"));
+                self.line(&format!(".quad {index}"));
+                self.line(&format!(".quad __omni_ca{index}"));
+                self.line(&format!(".quad {}", ancestors.len()));
+                self.line(&format!(".quad __omni_cv{index}"));
+                self.line(&format!(".quad {}", methods.len()));
+                self.line(&format!(".quad __omni_ci{index}"));
+                self.line(&format!(".quad {}", interfaces.len()));
+                self.label(&format!("__omni_ca{index}"));
+                for ancestor in &ancestors {
+                    self.line(&format!(".long {ancestor}"));
+                }
+                self.line(".p2align 3");
+                self.label(&format!("__omni_cv{index}"));
+                for method in &methods {
+                    match method {
+                        Some(function) => {
+                            let symbol = function_symbol(self.module, *function);
+                            self.line(&format!(".quad {symbol}"));
+                        }
+                        None => self.line(".quad 0"),
+                    }
+                }
+                self.label(&format!("__omni_ci{index}"));
+                for (position, (interface, slots)) in interfaces.iter().enumerate() {
+                    self.line(&format!(".quad {interface}"));
+                    self.line(&format!(".quad __omni_cis{index}_{position}"));
+                    self.line(&format!(".quad {}", slots.len()));
+                }
+                for (position, (_, slots)) in interfaces.iter().enumerate() {
+                    self.label(&format!("__omni_cis{index}_{position}"));
+                    for slot in slots {
+                        match slot {
+                            Some(function) => {
+                                let symbol = function_symbol(self.module, *function);
+                                self.line(&format!(".quad {symbol}"));
+                            }
+                            None => self.line(".quad 0"),
+                        }
+                    }
+                }
+            }
+        }
+
+        fn block_label(function: FunctionId, block: usize) -> String {
+            format!(".LF{}B{block}", function.0)
+        }
+
+        fn emit_function(&mut self, id: FunctionId) -> Result<(), Diagnostic> {
+            let function = self.function_by_name(id);
+            let symbol = function_symbol(self.module, id);
+            let values = function.value_types.len() as i64;
+            let mut base = 16 * values;
+            let mut slots = BTreeMap::new();
+            let mut outgoing = 0usize;
+            let mut calls: Vec<&Instruction> = function.instructions.iter().collect();
+            for block in &function.blocks {
+                if let Terminator::Invoke { call, .. } = &block.terminator {
+                    calls.push(call);
+                }
+            }
+            for (index, instruction) in function.instructions.iter().enumerate() {
+                if let Operation::StackSlot { size, align } = instruction.operation {
+                    let align = i64::from(align.clamp(1, 16));
+                    base = (base + i64::from(size.max(1)) + align - 1) / align * align;
+                    slots.insert(index, -base);
+                }
+            }
+            for call in &calls {
+                let types: Vec<Type> = match &call.operation {
+                    Operation::Call(_) => call
+                        .arguments
+                        .iter()
+                        .map(|value| function.type_of(*value))
+                        .collect(),
+                    Operation::CallIndirect(_) => call.arguments[1..]
+                        .iter()
+                        .map(|value| function.type_of(*value))
+                        .collect(),
+                    _ => continue,
+                };
+                let (_, stack) = classify(&types);
+                outgoing = outgoing.max(stack);
+            }
+            let frame_size = (base + 15) / 16 * 16 + (outgoing as i64 * 8 + 15) / 16 * 16;
+            self.line(".text");
+            self.line(".p2align 4");
+            match function.linkage {
+                Linkage::Export => self.line(&format!(".globl {symbol}")),
+                Linkage::Weak => self.line(&format!(".weak {symbol}")),
+                _ => {}
+            }
+            self.line(&format!(".type {symbol}, @function"));
+            self.label(&symbol);
+            self.line("pushq %rbp");
+            self.line("movq %rsp, %rbp");
+            if frame_size > 0 {
+                self.line(&format!("subq ${frame_size}, %rsp"));
+            }
+            let parameters = function.blocks[0].parameters.clone();
+            let types: Vec<Type> = parameters
+                .iter()
+                .map(|value| function.type_of(*value))
+                .collect();
+            let (places, _) = classify(&types);
+            for ((parameter, ty), place) in parameters.iter().zip(&types).zip(&places) {
+                match place {
+                    Place::Integer(index) => self.store(ARGUMENT_REGISTERS[*index], *parameter),
+                    Place::Float(index) => {
+                        self.store_float(&format!("xmm{index}"), *parameter, *ty)
+                    }
+                    Place::Stack(index) => {
+                        self.line(&format!("movq {}(%rbp), %rax", 16 + 8 * *index as i64));
+                        self.store("rax", *parameter);
+                    }
+                }
+            }
+            let frame = Frame {
+                function: id,
+                slots,
+            };
+            for (index, block) in function.blocks.iter().enumerate() {
+                self.label(&Self::block_label(id, index));
+                for inst in &block.instructions {
+                    let instruction = &function.instructions[inst.index()];
+                    self.emit_instruction(&frame, function, inst.index(), instruction)?;
+                }
+                self.emit_terminator(&frame, function, &block.terminator)?;
+            }
+            self.label(&format!(".LF{}R", id.0));
+            self.line("leave");
+            self.line("ret");
+            self.label(&format!(".LF{}O", id.0));
+            self.line("xorl %eax, %eax");
+            self.line("leave");
+            self.line("ret");
+            self.line(&format!(".size {symbol}, .-{symbol}"));
+            Ok(())
+        }
+
+        fn edge(&mut self, frame: &Frame, function: &Function, call: &BlockCall, prefix: bool) {
+            let parameters = &function.blocks[call.block.index()].parameters;
+            let mut incoming = 0;
+            if prefix {
+                self.line("pushq %rax");
+                incoming += 1;
+            }
+            for argument in &call.arguments {
+                self.line(&format!("pushq {}(%rbp)", Self::slot(*argument)));
+                incoming += 1;
+            }
+            for parameter in parameters.iter().take(incoming).rev() {
+                self.line(&format!("popq {}(%rbp)", Self::slot(*parameter)));
+            }
+            for _ in parameters.len()..incoming {
+                self.line("addq $8, %rsp");
+            }
+            let target = Self::block_label(frame.function, call.block.index());
+            self.line(&format!("jmp {target}"));
+        }
+
+        fn may_throw(&self, instruction: &Instruction) -> bool {
+            match &instruction.operation {
+                Operation::Call(callee) => !self.module.functions[callee.index()].is_declaration(),
+                Operation::CallIndirect(_) => true,
+                _ => false,
+            }
+        }
+
+        fn emit_call(
+            &mut self,
+            function: &Function,
+            instruction: &Instruction,
+        ) -> Result<(), Diagnostic> {
+            let (arguments, signature, target): (&[Value], Signature, Option<FunctionId>) =
+                match &instruction.operation {
+                    Operation::Call(callee) => (
+                        &instruction.arguments,
+                        self.module.functions[callee.index()].signature.clone(),
+                        Some(*callee),
+                    ),
+                    Operation::CallIndirect(signature) => {
+                        (&instruction.arguments[1..], signature.clone(), None)
+                    }
+                    _ => return Ok(()),
+                };
+            if let Some(callee) = target {
+                let name = self.module.functions[callee.index()].name.as_str();
+                if self.module.functions[callee.index()].is_declaration() {
+                    match name {
+                        INTRINSIC_SYSCALL => {
+                            let registers = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"];
+                            for (argument, register) in arguments.iter().zip(registers) {
+                                self.load(*argument, register);
+                            }
+                            self.line("syscall");
+                            if let Some(result) = instruction.result {
+                                self.store("rax", result);
+                            }
+                            return Ok(());
+                        }
+                        INTRINSIC_ADDRESS | INTRINSIC_REFERENCE => {
+                            self.load(arguments[0], "rax");
+                            if let Some(result) = instruction.result {
+                                self.store("rax", result);
+                            }
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let types: Vec<Type> = arguments
+                .iter()
+                .map(|value| function.type_of(*value))
+                .collect();
+            let (places, _) = classify(&types);
+            let mut floats = 0;
+            for (argument, place) in arguments.iter().zip(&places) {
+                if let Place::Stack(index) = place {
+                    self.load(*argument, "rax");
+                    self.line(&format!("movq %rax, {}(%rsp)", 8 * index));
+                }
+            }
+            if target.is_none() {
+                self.load(instruction.arguments[0], "r11");
+            }
+            for ((argument, place), ty) in arguments.iter().zip(&places).zip(&types) {
+                match place {
+                    Place::Integer(index) => self.load(*argument, ARGUMENT_REGISTERS[*index]),
+                    Place::Float(index) => {
+                        floats += 1;
+                        self.load_float(*argument, &format!("xmm{index}"), *ty)
+                    }
+                    Place::Stack(_) => {}
+                }
+            }
+            if signature.variadic {
+                self.line(&format!("movl ${floats}, %eax"));
+            }
+            match target {
+                Some(callee) => {
+                    let symbol = function_symbol(self.module, callee);
+                    self.line(&format!("call {symbol}"));
+                }
+                None => self.line("call *%r11"),
+            }
+            if let Some(result) = instruction.result {
+                let ty = function.type_of(result);
+                if is_float(ty) {
+                    self.store_float("xmm0", result, ty);
+                } else {
+                    self.mask("rax", type_bits(ty));
+                    self.store("rax", result);
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_terminator(
+            &mut self,
+            frame: &Frame,
+            function: &Function,
+            terminator: &Terminator,
+        ) -> Result<(), Diagnostic> {
+            match terminator {
+                Terminator::Jump(call) => self.edge(frame, function, call, false),
+                Terminator::Branch {
+                    condition,
+                    taken,
+                    otherwise,
+                } => {
+                    let label = self.fresh();
+                    self.load(*condition, "rax");
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jne {label}"));
+                    self.edge(frame, function, otherwise, false);
+                    self.label(&label);
+                    self.edge(frame, function, taken, false);
+                }
+                Terminator::Switch {
+                    value,
+                    cases,
+                    default,
+                } => {
+                    let bits = type_bits(function.type_of(*value));
+                    self.load(*value, "rax");
+                    let mut targets = Vec::new();
+                    for (case, _) in cases {
+                        let label = self.fresh();
+                        self.constant((*case as u64) & all_ones(bits), "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line(&format!("je {label}"));
+                        targets.push(label);
+                    }
+                    self.edge(frame, function, default, false);
+                    for ((_, call), label) in cases.iter().zip(targets) {
+                        self.label(&label);
+                        self.edge(frame, function, call, false);
+                    }
+                }
+                Terminator::Return(value) => {
+                    if let Some(value) = value {
+                        let ty = function.type_of(*value);
+                        if is_float(ty) {
+                            self.load_float(*value, "xmm0", ty);
+                        } else {
+                            self.load(*value, "rax");
+                        }
+                    }
+                    self.line(&format!("jmp .LF{}R", frame.function.0));
+                }
+                Terminator::Unreachable => self.trap(TRAP_UNREACHABLE),
+                Terminator::Throw(value) => {
+                    self.load(*value, "rax");
+                    self.trap_unless_nonzero("rax", TRAP_NULL_REFERENCE);
+                    self.line("movq %rax, __omni_pending(%rip)");
+                    self.line(&format!("jmp .LF{}O", frame.function.0));
+                }
+                Terminator::Invoke {
+                    call,
+                    normal,
+                    unwind,
+                } => {
+                    self.emit_call(function, call)?;
+                    if self.may_throw(call) {
+                        let caught = self.fresh();
+                        self.line("movq __omni_pending(%rip), %rax");
+                        self.line("testq %rax, %rax");
+                        self.line(&format!("jne {caught}"));
+                        self.edge(frame, function, normal, false);
+                        self.label(&caught);
+                        self.line("movq $0, __omni_pending(%rip)");
+                        self.edge(frame, function, unwind, true);
+                    } else {
+                        self.edge(frame, function, normal, false);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_instruction(
+            &mut self,
+            frame: &Frame,
+            function: &Function,
+            index: usize,
+            instruction: &Instruction,
+        ) -> Result<(), Diagnostic> {
+            let arguments = &instruction.arguments;
+            let result = instruction.result;
+            let result_type = result.map(|value| function.type_of(value));
+            let argument_type = |at: usize| function.type_of(arguments[at]);
+            match &instruction.operation {
+                Operation::IntegerConstant(value) => {
+                    let bits = type_bits(result_type.unwrap_or(Type::I64));
+                    self.constant((*value as u64) & all_ones(bits), "rax");
+                    self.store_result("rax", result);
+                }
+                Operation::FloatConstant(bits) => {
+                    let ty = result_type.unwrap_or(Type::F64);
+                    let raw = if single(ty) {
+                        bits & 0xffff_ffff
+                    } else {
+                        *bits
+                    };
+                    self.constant(raw, "rax");
+                    self.store_result("rax", result);
+                }
+                Operation::Null | Operation::Poison => {
+                    self.line("xorl %eax, %eax");
+                    self.store_result("rax", result);
+                }
+                Operation::GlobalAddress(id) => {
+                    let symbol = global_symbol(self.module, id.index());
+                    self.line(&format!("leaq {symbol}(%rip), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::FunctionAddress(id) => {
+                    let symbol = function_symbol(self.module, *id);
+                    self.line(&format!("leaq {symbol}(%rip), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::StringConstant(index) => {
+                    self.line(&format!("leaq __omni_s{index}(%rip), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::Binary(op) => {
+                    let ty = argument_type(0);
+                    if op.is_float() {
+                        self.float_binary(*op, ty, arguments[0], arguments[1], result);
+                    } else {
+                        self.integer_binary(*op, type_bits(ty), arguments[0], arguments[1], result);
+                    }
+                }
+                Operation::Unary(op) => {
+                    let ty = argument_type(0);
+                    if op.is_float() {
+                        self.float_unary(*op, ty, arguments[0], result);
+                    } else {
+                        self.integer_unary(*op, type_bits(ty), arguments[0], result);
+                    }
+                }
+                Operation::Compare(comparison) => {
+                    let bits = type_bits(argument_type(0));
+                    let signed = matches!(
+                        comparison,
+                        Comparison::LessSigned
+                            | Comparison::LessEqualSigned
+                            | Comparison::GreaterSigned
+                            | Comparison::GreaterEqualSigned
+                    );
+                    if signed {
+                        self.load_signed(arguments[0], "rax", bits);
+                        self.load_signed(arguments[1], "rcx", bits);
+                    } else {
+                        self.load(arguments[0], "rax");
+                        self.load(arguments[1], "rcx");
+                    }
+                    let condition = match comparison {
+                        Comparison::Equal => "e",
+                        Comparison::NotEqual => "ne",
+                        Comparison::LessSigned => "l",
+                        Comparison::LessEqualSigned => "le",
+                        Comparison::GreaterSigned => "g",
+                        Comparison::GreaterEqualSigned => "ge",
+                        Comparison::LessUnsigned => "b",
+                        Comparison::LessEqualUnsigned => "be",
+                        Comparison::GreaterUnsigned => "a",
+                        Comparison::GreaterEqualUnsigned => "ae",
+                    };
+                    self.line("cmpq %rcx, %rax");
+                    self.line(&format!("set{condition} %al"));
+                    self.line("movzbl %al, %eax");
+                    self.store_result("rax", result);
+                }
+                Operation::FloatCompare(comparison) => {
+                    self.float_compare(*comparison, argument_type(0), arguments, result);
+                }
+                Operation::Convert(conversion) => {
+                    let to = result_type.unwrap_or(Type::I64);
+                    self.convert(*conversion, arguments[0], argument_type(0), to, result);
+                }
+                Operation::Select => {
+                    self.load(arguments[0], "rdx");
+                    self.load(arguments[1], "rax");
+                    self.load(arguments[2], "rcx");
+                    self.line("testq %rdx, %rdx");
+                    self.line("cmoveq %rcx, %rax");
+                    self.store_result("rax", result);
+                }
+                Operation::Splat | Operation::ExtractLane(_) | Operation::InsertLane(_) => {
+                    return Err(unsupported("vector lanes"));
+                }
+                Operation::StackSlot { .. } => {
+                    let at = frame.slots.get(&index).copied().unwrap_or(0);
+                    self.line(&format!("leaq {at}(%rbp), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::Load { .. } => {
+                    let ty = result_type.unwrap_or(Type::I64);
+                    self.load(arguments[0], "rcx");
+                    self.memory_load(ty, "rcx", 0, "rax");
+                    self.store_result("rax", result);
+                }
+                Operation::Store { .. } => {
+                    let ty = argument_type(0);
+                    self.load(arguments[0], "rax");
+                    self.load(arguments[1], "rcx");
+                    self.memory_store(ty, "rax", "rcx", 0);
+                }
+                Operation::Offset => {
+                    let bits = type_bits(argument_type(1));
+                    self.load(arguments[0], "rax");
+                    self.load_signed(arguments[1], "rcx", bits);
+                    self.line("addq %rcx, %rax");
+                    self.store_result("rax", result);
+                }
+                Operation::FieldAddress(structure, field) => {
+                    let (offsets, _, _) = self
+                        .layout
+                        .struct_layout(&self.module.structs[structure.index()]);
+                    let offset = offsets.get(*field as usize).copied().unwrap_or(0);
+                    self.load(arguments[0], "rax");
+                    if offset != 0 {
+                        self.line(&format!("addq ${offset}, %rax"));
+                    }
+                    self.store_result("rax", result);
+                }
+                Operation::ElementAddress(ty) => {
+                    let bits = type_bits(argument_type(1));
+                    let size = self.layout.size_of(*ty);
+                    self.load(arguments[0], "rax");
+                    self.load_signed(arguments[1], "rcx", bits);
+                    self.line(&format!("imulq ${size}, %rcx, %rcx"));
+                    self.line("addq %rcx, %rax");
+                    self.store_result("rax", result);
+                }
+                Operation::AtomicUpdate(op, _) => {
+                    let ty = argument_type(1);
+                    let bits = type_bits(ty);
+                    self.load(arguments[0], "rdi");
+                    self.memory_load(ty, "rdi", 0, "rax");
+                    let signed = matches!(op, AtomicOp::MinimumSigned | AtomicOp::MaximumSigned);
+                    if signed {
+                        self.load_signed(arguments[1], "rcx", bits);
+                        self.line("movq %rax, %rdx");
+                        self.sign_extend_register("rdx", bits);
+                    } else {
+                        self.load(arguments[1], "rcx");
+                        self.line("movq %rax, %rdx");
+                    }
+                    match op {
+                        AtomicOp::Exchange => self.line("movq %rcx, %rdx"),
+                        AtomicOp::Add => self.line("addq %rcx, %rdx"),
+                        AtomicOp::Subtract => self.line("subq %rcx, %rdx"),
+                        AtomicOp::And => self.line("andq %rcx, %rdx"),
+                        AtomicOp::Nand => {
+                            self.line("andq %rcx, %rdx");
+                            self.line("notq %rdx");
+                        }
+                        AtomicOp::Or => self.line("orq %rcx, %rdx"),
+                        AtomicOp::Xor => self.line("xorq %rcx, %rdx"),
+                        AtomicOp::MinimumSigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovgq %rcx, %rdx");
+                        }
+                        AtomicOp::MaximumSigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovlq %rcx, %rdx");
+                        }
+                        AtomicOp::MinimumUnsigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovaq %rcx, %rdx");
+                        }
+                        AtomicOp::MaximumUnsigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovbq %rcx, %rdx");
+                        }
+                    }
+                    self.memory_store(ty, "rdx", "rdi", 0);
+                    self.store_result("rax", result);
+                }
+                Operation::CompareExchange(..) => {
+                    let ty = argument_type(1);
+                    let skip = self.fresh();
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rcx");
+                    self.load(arguments[2], "rdx");
+                    self.memory_load(ty, "rdi", 0, "rax");
+                    self.line("cmpq %rcx, %rax");
+                    self.line(&format!("jne {skip}"));
+                    self.memory_store(ty, "rdx", "rdi", 0);
+                    self.label(&skip);
+                    self.store_result("rax", result);
+                }
+                Operation::Fence(_) => self.line("mfence"),
+                Operation::MemoryCopy => {
+                    let skip = self.fresh();
+                    let fine = self.fresh();
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rsi");
+                    self.load(arguments[2], "rcx");
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("je {skip}"));
+                    self.line("leaq (%rsi,%rcx), %rax");
+                    self.line("cmpq %rax, %rdi");
+                    self.line(&format!("jae {fine}"));
+                    self.line("leaq (%rdi,%rcx), %rax");
+                    self.line("cmpq %rax, %rsi");
+                    self.line(&format!("jae {fine}"));
+                    self.trap(TRAP_OVERLAPPING_COPY);
+                    self.label(&fine);
+                    self.line("rep movsb");
+                    self.label(&skip);
+                }
+                Operation::MemoryMove => {
+                    let forward = self.fresh();
+                    let done = self.fresh();
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rsi");
+                    self.load(arguments[2], "rcx");
+                    self.line("cmpq %rsi, %rdi");
+                    self.line(&format!("jbe {forward}"));
+                    self.line("leaq (%rsi,%rcx), %rax");
+                    self.line("cmpq %rax, %rdi");
+                    self.line(&format!("jae {forward}"));
+                    self.line("leaq -1(%rsi,%rcx), %rsi");
+                    self.line("leaq -1(%rdi,%rcx), %rdi");
+                    self.line("std");
+                    self.line("rep movsb");
+                    self.line("cld");
+                    self.line(&format!("jmp {done}"));
+                    self.label(&forward);
+                    self.line("rep movsb");
+                    self.label(&done);
+                }
+                Operation::MemoryFill => {
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rax");
+                    self.load(arguments[2], "rcx");
+                    self.line("rep stosb");
+                }
+                Operation::Call(_) | Operation::CallIndirect(_) => {
+                    self.emit_call(function, instruction)?;
+                    if self.may_throw(instruction) {
+                        self.line("cmpq $0, __omni_pending(%rip)");
+                        self.line(&format!("jne .LF{}O", frame.function.0));
+                    }
+                }
+                Operation::Allocate(class) => {
+                    let (_, size) = self.field_layout(*class);
+                    self.constant(u64::from(size), "rdi");
+                    self.line(&format!("leaq __omni_c{}(%rip), %rsi", class.0));
+                    self.line("call __omni_allocate");
+                    self.store_result("rax", result);
+                }
+                Operation::AllocateArray(class) => {
+                    let element = self.module.classes[class.index()]
+                        .element
+                        .unwrap_or(Type::I8);
+                    let size = self.layout.size_of(element);
+                    let bits = type_bits(argument_type(0));
+                    self.load_signed(arguments[0], "rdi", bits);
+                    self.constant(u64::from(size), "rsi");
+                    self.line(&format!("leaq __omni_c{}(%rip), %rdx", class.0));
+                    self.line("call __omni_allocate_array");
+                    self.store_result("rax", result);
+                }
+                Operation::LoadField(class, field) | Operation::StoreField(class, field) => {
+                    let (offsets, _) = self.field_layout(*class);
+                    let offset = i64::from(offsets.get(*field as usize).copied().unwrap_or(0));
+                    let ty = self
+                        .module
+                        .field_types(*class)
+                        .get(*field as usize)
+                        .copied()
+                        .unwrap_or(Type::I64);
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    if matches!(instruction.operation, Operation::StoreField(..)) {
+                        self.load(arguments[1], "rax");
+                        self.memory_store(ty, "rax", "rcx", offset);
+                    } else {
+                        self.memory_load(ty, "rcx", offset, "rax");
+                        self.store_result("rax", result);
+                    }
+                }
+                Operation::LoadElement(ty) | Operation::StoreElement(ty) => {
+                    let bits = type_bits(argument_type(1));
+                    let size = i64::from(self.layout.size_of(*ty));
+                    let fine = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.load_signed(arguments[1], "rdx", bits);
+                    self.line(&format!("cmpq {ARRAY_LENGTH_OFFSET}(%rcx), %rdx"));
+                    self.line(&format!("jb {fine}"));
+                    self.trap(TRAP_INDEX_OUT_OF_BOUNDS);
+                    self.label(&fine);
+                    self.line(&format!("imulq ${size}, %rdx, %rdx"));
+                    self.line("addq %rdx, %rcx");
+                    let offset = i64::from(ARRAY_HEADER);
+                    if matches!(instruction.operation, Operation::StoreElement(_)) {
+                        self.load(arguments[2], "rax");
+                        self.memory_store(*ty, "rax", "rcx", offset);
+                    } else {
+                        self.memory_load(*ty, "rcx", offset, "rax");
+                        self.store_result("rax", result);
+                    }
+                }
+                Operation::ArrayLength => {
+                    let bits = type_bits(result_type.unwrap_or(Type::I32));
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.line(&format!("movq {ARRAY_LENGTH_OFFSET}(%rcx), %rax"));
+                    self.mask("rax", bits);
+                    self.store_result("rax", result);
+                }
+                Operation::InstanceOf(class) => {
+                    let done = self.fresh();
+                    let scan = self.fresh();
+                    let found = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.line("xorl %eax, %eax");
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("je {done}"));
+                    self.line("movq (%rcx), %rdx");
+                    self.line("movq 8(%rdx), %rsi");
+                    self.line("movq 16(%rdx), %rcx");
+                    self.label(&scan);
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("je {done}"));
+                    self.line(&format!("cmpl ${}, (%rsi)", class.0));
+                    self.line(&format!("je {found}"));
+                    self.line("addq $4, %rsi");
+                    self.line("decq %rcx");
+                    self.line(&format!("jmp {scan}"));
+                    self.label(&found);
+                    self.line("movl $1, %eax");
+                    self.label(&done);
+                    self.store_result("rax", result);
+                }
+                Operation::VirtualMethod(_, slot) => {
+                    let fine = self.fresh();
+                    let present = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.line("movq (%rcx), %rdx");
+                    self.line(&format!("cmpq ${slot}, 32(%rdx)"));
+                    self.line(&format!("ja {fine}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&fine);
+                    self.line("movq 24(%rdx), %rdx");
+                    self.line(&format!("movq {}(%rdx), %rax", 8 * *slot as i64));
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jne {present}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&present);
+                    self.store_result("rax", result);
+                }
+                Operation::InterfaceMethod(class, slot) => {
+                    let scan = self.fresh();
+                    let found = self.fresh();
+                    let fine = self.fresh();
+                    let present = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.line("movq (%rcx), %rdx");
+                    self.line("movq 40(%rdx), %rsi");
+                    self.line("movq 48(%rdx), %rcx");
+                    self.label(&scan);
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("jne {found}"));
+                    self.trap(TRAP_MISSING_IMPLEMENTATION);
+                    self.label(&found);
+                    let next = self.fresh();
+                    self.line(&format!("cmpq ${}, (%rsi)", class.0));
+                    self.line(&format!("je {next}"));
+                    self.line("addq $24, %rsi");
+                    self.line("decq %rcx");
+                    self.line(&format!("jmp {scan}"));
+                    self.label(&next);
+                    self.line(&format!("cmpq ${slot}, 16(%rsi)"));
+                    self.line(&format!("ja {fine}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&fine);
+                    self.line("movq 8(%rsi), %rdx");
+                    self.line(&format!("movq {}(%rdx), %rax", 8 * *slot as i64));
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jne {present}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&present);
+                    self.store_result("rax", result);
+                }
+                Operation::SameObject => {
+                    self.load(arguments[0], "rax");
+                    self.load(arguments[1], "rcx");
+                    self.line("cmpq %rcx, %rax");
+                    self.line("sete %al");
+                    self.line("movzbl %al, %eax");
+                    self.store_result("rax", result);
+                }
+                Operation::Trap(code) => {
+                    self.line(&format!("movl ${TRAP_EXPLICIT}, %edi"));
+                    self.line(&format!("movl ${code}, %esi"));
+                    self.line("call __omni_trap");
+                }
+            }
+            Ok(())
+        }
+
+        fn store_result(&mut self, register: &str, result: Option<Value>) {
+            if let Some(result) = result {
+                self.store(register, result);
+            }
+        }
+
+        fn integer_binary(
+            &mut self,
+            op: BinaryOp,
+            bits: u32,
+            left: Value,
+            right: Value,
+            result: Option<Value>,
+        ) {
+            let wide = bits >= 64;
+            let highest = if wide {
+                i64::MAX
+            } else {
+                (1i64 << (bits.max(1) - 1)) - 1
+            };
+            let lowest = if wide { i64::MIN } else { -highest - 1 };
+            match op {
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    let mnemonic = match op {
+                        BinaryOp::Add => "addq",
+                        BinaryOp::Subtract => "subq",
+                        BinaryOp::Multiply => "imulq",
+                        BinaryOp::And => "andq",
+                        BinaryOp::Or => "orq",
+                        _ => "xorq",
+                    };
+                    self.line(&format!("{mnemonic} %rcx, %rax"));
+                    self.mask("rax", bits);
+                }
+                BinaryOp::DivideSigned | BinaryOp::RemainderSigned => {
+                    let general = self.fresh();
+                    let done = self.fresh();
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    self.trap_unless_nonzero("rcx", TRAP_DIVISION_BY_ZERO);
+                    self.line("cmpq $-1, %rcx");
+                    self.line(&format!("jne {general}"));
+                    if op == BinaryOp::DivideSigned {
+                        self.line("negq %rax");
+                    } else {
+                        self.line("xorl %eax, %eax");
+                    }
+                    self.line(&format!("jmp {done}"));
+                    self.label(&general);
+                    self.line("cqto");
+                    self.line("idivq %rcx");
+                    if op == BinaryOp::RemainderSigned {
+                        self.line("movq %rdx, %rax");
+                    }
+                    self.label(&done);
+                    self.mask("rax", bits);
+                }
+                BinaryOp::DivideUnsigned | BinaryOp::RemainderUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_DIVISION_BY_ZERO);
+                    self.line("xorl %edx, %edx");
+                    self.line("divq %rcx");
+                    if op == BinaryOp::RemainderUnsigned {
+                        self.line("movq %rdx, %rax");
+                    }
+                }
+                BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRightLogical
+                | BinaryOp::ShiftRightArithmetic => {
+                    if op == BinaryOp::ShiftRightArithmetic {
+                        self.load_signed(left, "rax", bits);
+                    } else {
+                        self.load(left, "rax");
+                    }
+                    self.load(right, "rcx");
+                    self.line(&format!("andl ${}, %ecx", bits.max(1) - 1));
+                    let mnemonic = match op {
+                        BinaryOp::ShiftLeft => "shlq",
+                        BinaryOp::ShiftRightLogical => "shrq",
+                        _ => "sarq",
+                    };
+                    self.line(&format!("{mnemonic} %cl, %rax"));
+                    self.mask("rax", bits);
+                }
+                BinaryOp::RotateLeft | BinaryOp::RotateRight => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    if bits >= 8 {
+                        self.line(&format!("andl ${}, %ecx", bits - 1));
+                        let direction = if op == BinaryOp::RotateLeft {
+                            "rol"
+                        } else {
+                            "ror"
+                        };
+                        let (width, register) = match bits {
+                            8 => ("b", "al"),
+                            16 => ("w", "ax"),
+                            32 => ("l", "eax"),
+                            _ => ("q", "rax"),
+                        };
+                        self.line(&format!("{direction}{width} %cl, %{register}"));
+                        self.mask("rax", bits);
+                    }
+                }
+                BinaryOp::MinimumSigned | BinaryOp::MaximumSigned => {
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    self.line("cmpq %rcx, %rax");
+                    if op == BinaryOp::MinimumSigned {
+                        self.line("cmovgq %rcx, %rax");
+                    } else {
+                        self.line("cmovlq %rcx, %rax");
+                    }
+                    self.mask("rax", bits);
+                }
+                BinaryOp::MinimumUnsigned | BinaryOp::MaximumUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("cmpq %rcx, %rax");
+                    if op == BinaryOp::MinimumUnsigned {
+                        self.line("cmovaq %rcx, %rax");
+                    } else {
+                        self.line("cmovbq %rcx, %rax");
+                    }
+                }
+                BinaryOp::AddSaturatingSigned | BinaryOp::SubtractSaturatingSigned => {
+                    let adding = op == BinaryOp::AddSaturatingSigned;
+                    let mnemonic = if adding { "addq" } else { "subq" };
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    if wide {
+                        let done = self.fresh();
+                        self.line(&format!("{mnemonic} %rcx, %rax"));
+                        self.line(&format!("jno {done}"));
+                        self.constant(i64::MAX as u64, "rax");
+                        self.line("testq %rcx, %rcx");
+                        self.line(&format!("{} {done}", if adding { "jns" } else { "js" }));
+                        self.constant(i64::MIN as u64, "rax");
+                        self.label(&done);
+                    } else {
+                        self.line(&format!("{mnemonic} %rcx, %rax"));
+                        self.constant(highest as u64, "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line("cmovgq %rcx, %rax");
+                        self.constant(lowest as u64, "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line("cmovlq %rcx, %rax");
+                        self.mask("rax", bits);
+                    }
+                }
+                BinaryOp::AddSaturatingUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("addq %rcx, %rax");
+                    if wide {
+                        let done = self.fresh();
+                        self.line(&format!("jnc {done}"));
+                        self.line("movq $-1, %rax");
+                        self.label(&done);
+                    } else {
+                        self.constant(all_ones(bits), "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line("cmovaq %rcx, %rax");
+                    }
+                }
+                BinaryOp::SubtractSaturatingUnsigned => {
+                    let done = self.fresh();
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("subq %rcx, %rax");
+                    self.line(&format!("jnc {done}"));
+                    self.line("xorl %eax, %eax");
+                    self.label(&done);
+                }
+                BinaryOp::AddOverflowsSigned
+                | BinaryOp::SubtractOverflowsSigned
+                | BinaryOp::MultiplyOverflowsSigned => {
+                    let mnemonic = match op {
+                        BinaryOp::AddOverflowsSigned => "addq",
+                        BinaryOp::SubtractOverflowsSigned => "subq",
+                        _ => "imulq",
+                    };
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    self.line(&format!("{mnemonic} %rcx, %rax"));
+                    if wide {
+                        self.line("seto %al");
+                    } else {
+                        self.line("movq %rax, %rdx");
+                        self.sign_extend_register("rdx", bits);
+                        self.line("cmpq %rdx, %rax");
+                        self.line("setne %al");
+                    }
+                    self.line("movzbl %al, %eax");
+                }
+                BinaryOp::AddOverflowsUnsigned | BinaryOp::MultiplyOverflowsUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    if wide {
+                        if op == BinaryOp::AddOverflowsUnsigned {
+                            self.line("addq %rcx, %rax");
+                            self.line("setc %al");
+                        } else {
+                            self.line("mulq %rcx");
+                            self.line("seto %al");
+                        }
+                    } else {
+                        if op == BinaryOp::AddOverflowsUnsigned {
+                            self.line("addq %rcx, %rax");
+                        } else {
+                            self.line("imulq %rcx, %rax");
+                        }
+                        self.line(&format!("shrq ${bits}, %rax"));
+                        self.line("setne %al");
+                    }
+                    self.line("movzbl %al, %eax");
+                }
+                BinaryOp::SubtractOverflowsUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("cmpq %rcx, %rax");
+                    self.line("setb %al");
+                    self.line("movzbl %al, %eax");
+                }
+                BinaryOp::MultiplyHighSigned | BinaryOp::MultiplyHighUnsigned => {
+                    let signed = op == BinaryOp::MultiplyHighSigned;
+                    if signed {
+                        self.load_signed(left, "rax", bits);
+                        self.load_signed(right, "rcx", bits);
+                    } else {
+                        self.load(left, "rax");
+                        self.load(right, "rcx");
+                    }
+                    if wide {
+                        self.line(if signed { "imulq %rcx" } else { "mulq %rcx" });
+                        self.line("movq %rdx, %rax");
+                    } else {
+                        self.line("imulq %rcx, %rax");
+                        self.line(&format!(
+                            "{} ${bits}, %rax",
+                            if signed { "sarq" } else { "shrq" }
+                        ));
+                        self.mask("rax", bits);
+                    }
+                }
+                _ => {}
+            }
+            self.store_result("rax", result);
+        }
+
+        fn integer_unary(&mut self, op: UnaryOp, bits: u32, value: Value, result: Option<Value>) {
+            match op {
+                UnaryOp::Negate => {
+                    self.load(value, "rax");
+                    self.line("negq %rax");
+                    self.mask("rax", bits);
+                }
+                UnaryOp::Not => {
+                    self.load(value, "rax");
+                    self.line("notq %rax");
+                    self.mask("rax", bits);
+                }
+                UnaryOp::PopulationCount => {
+                    self.load(value, "rax");
+                    self.line("popcntq %rax, %rax");
+                }
+                UnaryOp::LeadingZeros => {
+                    let done = self.fresh();
+                    self.load(value, "rax");
+                    self.line("bsrq %rax, %rcx");
+                    self.line(&format!("movl ${bits}, %eax"));
+                    self.line(&format!("je {done}"));
+                    self.line(&format!("movl ${}, %eax", bits - 1));
+                    self.line("subl %ecx, %eax");
+                    self.label(&done);
+                }
+                UnaryOp::TrailingZeros => {
+                    let done = self.fresh();
+                    self.load(value, "rcx");
+                    self.line(&format!("movl ${bits}, %eax"));
+                    self.line("bsfq %rcx, %rcx");
+                    self.line(&format!("je {done}"));
+                    self.line("movq %rcx, %rax");
+                    self.label(&done);
+                }
+                UnaryOp::ByteSwap => {
+                    self.load(value, "rax");
+                    match bits {
+                        16 => self.line("rolw $8, %ax"),
+                        32 => self.line("bswapl %eax"),
+                        64 => self.line("bswapq %rax"),
+                        _ => {}
+                    }
+                }
+                UnaryOp::BitReverse => {
+                    self.load(value, "rax");
+                    for (shift, pattern) in [
+                        (1, 0x5555_5555_5555_5555u64),
+                        (2, 0x3333_3333_3333_3333),
+                        (4, 0x0f0f_0f0f_0f0f_0f0f),
+                    ] {
+                        self.line("movq %rax, %rcx");
+                        self.line(&format!("shrq ${shift}, %rcx"));
+                        self.line(&format!("movabsq ${}, %rdx", pattern as i64));
+                        self.line("andq %rdx, %rcx");
+                        self.line("andq %rdx, %rax");
+                        self.line(&format!("shlq ${shift}, %rax"));
+                        self.line("orq %rcx, %rax");
+                    }
+                    self.line("bswapq %rax");
+                    if bits < 64 {
+                        self.line(&format!("shrq ${}, %rax", 64 - bits));
+                    }
+                }
+                UnaryOp::AbsoluteSigned => {
+                    let done = self.fresh();
+                    self.load_signed(value, "rax", bits);
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jns {done}"));
+                    self.line("negq %rax");
+                    self.label(&done);
+                    self.mask("rax", bits);
+                }
+                _ => self.load(value, "rax"),
+            }
+            self.store_result("rax", result);
+        }
+
+        fn float_binary(
+            &mut self,
+            op: BinaryOp,
+            ty: Type,
+            left: Value,
+            right: Value,
+            result: Option<Value>,
+        ) {
+            let s = suffix(ty);
+            let Some(result) = result else {
+                return;
+            };
+            match op {
+                BinaryOp::FloatAdd
+                | BinaryOp::FloatSubtract
+                | BinaryOp::FloatMultiply
+                | BinaryOp::FloatDivide => {
+                    self.load_float(left, "xmm0", ty);
+                    self.load_float(right, "xmm1", ty);
+                    let mnemonic = match op {
+                        BinaryOp::FloatAdd => "add",
+                        BinaryOp::FloatSubtract => "sub",
+                        BinaryOp::FloatMultiply => "mul",
+                        _ => "div",
+                    };
+                    self.line(&format!("{mnemonic}{s} %xmm1, %xmm0"));
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                BinaryOp::FloatRemainder => {
+                    let again = self.fresh();
+                    let width = if single(ty) { "s" } else { "l" };
+                    self.line(&format!("fld{width} {}(%rbp)", Self::slot(right)));
+                    self.line(&format!("fld{width} {}(%rbp)", Self::slot(left)));
+                    self.label(&again);
+                    self.line("fprem");
+                    self.line("fnstsw %ax");
+                    self.line("testw $1024, %ax");
+                    self.line(&format!("jne {again}"));
+                    self.line(&format!("fstp{width} {}(%rbp)", Self::slot(result)));
+                    self.line("fstp %st(0)");
+                    self.load_float(result, "xmm0", ty);
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                BinaryOp::FloatMinimum
+                | BinaryOp::FloatMaximum
+                | BinaryOp::FloatMinimumNumber
+                | BinaryOp::FloatMaximumNumber => {
+                    let lower = matches!(op, BinaryOp::FloatMinimum | BinaryOp::FloatMinimumNumber);
+                    let number = matches!(
+                        op,
+                        BinaryOp::FloatMinimumNumber | BinaryOp::FloatMaximumNumber
+                    );
+                    let nan = self.fresh();
+                    let differ = self.fresh();
+                    let done = self.fresh();
+                    let take_left = self.fresh();
+                    let take_right = self.fresh();
+                    self.load_float(left, "xmm0", ty);
+                    self.load_float(right, "xmm1", ty);
+                    self.line(&format!("ucomi{s} %xmm1, %xmm0"));
+                    self.line(&format!("jp {nan}"));
+                    self.line(&format!("jne {differ}"));
+                    self.line("movq %xmm0, %rax");
+                    self.line("movq %xmm1, %rcx");
+                    self.line(if lower {
+                        "orq %rcx, %rax"
+                    } else {
+                        "andq %rcx, %rax"
+                    });
+                    self.line("movq %rax, %xmm0");
+                    self.line(&format!("jmp {done}"));
+                    self.label(&differ);
+                    self.line(&format!(
+                        "{}{s} %xmm1, %xmm0",
+                        if lower { "min" } else { "max" }
+                    ));
+                    self.line(&format!("jmp {done}"));
+                    self.label(&nan);
+                    if number {
+                        self.line(&format!("ucomi{s} %xmm0, %xmm0"));
+                        self.line(&format!("jnp {take_left}"));
+                        self.line(&format!("ucomi{s} %xmm1, %xmm1"));
+                        self.line(&format!("jnp {take_right}"));
+                    }
+                    self.canonical_nan_forced("xmm0", ty);
+                    self.line(&format!("jmp {done}"));
+                    self.label(&take_right);
+                    self.line(&format!(
+                        "movap{} %xmm1, %xmm0",
+                        if single(ty) { "s" } else { "d" }
+                    ));
+                    self.label(&take_left);
+                    self.label(&done);
+                    self.store_float("xmm0", result, ty);
+                }
+                BinaryOp::CopySign => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    if single(ty) {
+                        self.line("andl $0x7fffffff, %eax");
+                        self.line("andl $0x80000000, %ecx");
+                        self.line("orl %ecx, %eax");
+                    } else {
+                        self.line("movabsq $0x7fffffffffffffff, %rdx");
+                        self.line("andq %rdx, %rax");
+                        self.line("notq %rdx");
+                        self.line("andq %rdx, %rcx");
+                        self.line("orq %rcx, %rax");
+                    }
+                    self.store("rax", result);
+                }
+                _ => {}
+            }
+        }
+
+        fn canonical_nan_forced(&mut self, register: &str, ty: Type) {
+            if single(ty) {
+                self.line("movl $0x7fc00000, %r11d");
+                self.line(&format!("movd %r11d, %{register}"));
+            } else {
+                self.line("movabsq $0x7ff8000000000000, %r11");
+                self.line(&format!("movq %r11, %{register}"));
+            }
+        }
+
+        fn float_unary(&mut self, op: UnaryOp, ty: Type, value: Value, result: Option<Value>) {
+            let Some(result) = result else {
+                return;
+            };
+            let s = suffix(ty);
+            match op {
+                UnaryOp::FloatNegate | UnaryOp::FloatAbsolute => {
+                    self.load(value, "rax");
+                    let negate = op == UnaryOp::FloatNegate;
+                    if single(ty) {
+                        self.line(if negate {
+                            "xorl $0x80000000, %eax"
+                        } else {
+                            "andl $0x7fffffff, %eax"
+                        });
+                    } else if negate {
+                        self.line("btcq $63, %rax");
+                    } else {
+                        self.line("btrq $63, %rax");
+                    }
+                    self.store("rax", result);
+                }
+                UnaryOp::SquareRoot => {
+                    self.load_float(value, "xmm0", ty);
+                    self.line(&format!("sqrt{s} %xmm0, %xmm0"));
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                UnaryOp::Floor
+                | UnaryOp::Ceiling
+                | UnaryOp::TruncateFloat
+                | UnaryOp::RoundNearestEven => {
+                    let mode = match op {
+                        UnaryOp::Floor => 9,
+                        UnaryOp::Ceiling => 10,
+                        UnaryOp::TruncateFloat => 11,
+                        _ => 8,
+                    };
+                    self.load_float(value, "xmm0", ty);
+                    self.line(&format!("round{s} ${mode}, %xmm0, %xmm0"));
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                _ => {
+                    self.load(value, "rax");
+                    self.store("rax", result);
+                }
+            }
+        }
+
+        fn float_compare(
+            &mut self,
+            comparison: FloatComparison,
+            ty: Type,
+            arguments: &[Value],
+            result: Option<Value>,
+        ) {
+            let s = suffix(ty);
+            self.load_float(arguments[0], "xmm0", ty);
+            self.load_float(arguments[1], "xmm1", ty);
+            let normal = format!("ucomi{s} %xmm1, %xmm0");
+            let swapped = format!("ucomi{s} %xmm0, %xmm1");
+            match comparison {
+                FloatComparison::OrderedEqual => {
+                    self.line(&normal);
+                    self.line("sete %al");
+                    self.line("setnp %cl");
+                    self.line("andb %cl, %al");
+                }
+                FloatComparison::UnorderedNotEqual => {
+                    self.line(&normal);
+                    self.line("setne %al");
+                    self.line("setp %cl");
+                    self.line("orb %cl, %al");
+                }
+                other => {
+                    let (order, condition) = match other {
+                        FloatComparison::OrderedNotEqual => (&normal, "ne"),
+                        FloatComparison::OrderedLess => (&swapped, "a"),
+                        FloatComparison::OrderedLessEqual => (&swapped, "ae"),
+                        FloatComparison::OrderedGreater => (&normal, "a"),
+                        FloatComparison::OrderedGreaterEqual => (&normal, "ae"),
+                        FloatComparison::Ordered => (&normal, "np"),
+                        FloatComparison::Unordered => (&normal, "p"),
+                        FloatComparison::UnorderedEqual => (&normal, "e"),
+                        FloatComparison::UnorderedLess => (&normal, "b"),
+                        FloatComparison::UnorderedLessEqual => (&normal, "be"),
+                        FloatComparison::UnorderedGreater => (&swapped, "b"),
+                        _ => (&swapped, "be"),
+                    };
+                    let order = order.clone();
+                    self.line(&order);
+                    self.line(&format!("set{condition} %al"));
+                }
+            }
+            self.line("movzbl %al, %eax");
+            self.store_result("rax", result);
+        }
+
+        fn convert(
+            &mut self,
+            conversion: Conversion,
+            value: Value,
+            from: Type,
+            to: Type,
+            result: Option<Value>,
+        ) {
+            let Some(result) = result else {
+                return;
+            };
+            let from_bits = type_bits(from);
+            let to_bits = type_bits(to);
+            match conversion {
+                Conversion::ZeroExtend | Conversion::IntegerToPointer => {
+                    self.load(value, "rax");
+                    self.store("rax", result);
+                }
+                Conversion::SignExtend => {
+                    self.load_signed(value, "rax", from_bits);
+                    self.mask("rax", to_bits);
+                    self.store("rax", result);
+                }
+                Conversion::Truncate | Conversion::PointerToInteger => {
+                    self.load(value, "rax");
+                    self.mask("rax", to_bits);
+                    self.store("rax", result);
+                }
+                Conversion::Bitcast => {
+                    let size = self.layout.size_of(from).min(self.layout.size_of(to));
+                    self.line(&format!("leaq {}(%rbp), %rcx", Self::slot(value)));
+                    let carrier = match size {
+                        1 => Type::I8,
+                        2 => Type::I16,
+                        4 => Type::I32,
+                        _ => Type::I64,
+                    };
+                    self.memory_load(carrier, "rcx", 0, "rax");
+                    self.store("rax", result);
+                }
+                Conversion::FloatExtend | Conversion::FloatTruncate => {
+                    if from == to {
+                        self.load(value, "rax");
+                        self.store("rax", result);
+                        return;
+                    }
+                    self.load_float(value, "xmm0", from);
+                    if single(from) {
+                        self.line("cvtss2sd %xmm0, %xmm0");
+                    } else {
+                        self.line("cvtsd2ss %xmm0, %xmm0");
+                    }
+                    self.canonical_nan("xmm0", to);
+                    self.store_float("xmm0", result, to);
+                }
+                Conversion::SignedToFloat => {
+                    self.load_signed(value, "rax", from_bits);
+                    self.line(&format!("cvtsi2{}q %rax, %xmm0", suffix(to)));
+                    self.store_float("xmm0", result, to);
+                }
+                Conversion::UnsignedToFloat => {
+                    self.load(value, "rax");
+                    let s = suffix(to);
+                    if from_bits < 64 {
+                        self.line(&format!("cvtsi2{s}q %rax, %xmm0"));
+                    } else {
+                        let large = self.fresh();
+                        let done = self.fresh();
+                        self.line("testq %rax, %rax");
+                        self.line(&format!("js {large}"));
+                        self.line(&format!("cvtsi2{s}q %rax, %xmm0"));
+                        self.line(&format!("jmp {done}"));
+                        self.label(&large);
+                        self.line("movq %rax, %rcx");
+                        self.line("shrq $1, %rcx");
+                        self.line("andl $1, %eax");
+                        self.line("orq %rax, %rcx");
+                        self.line(&format!("cvtsi2{s}q %rcx, %xmm0"));
+                        self.line(&format!("add{s} %xmm0, %xmm0"));
+                        self.label(&done);
+                    }
+                    self.store_float("xmm0", result, to);
+                }
+                Conversion::FloatToSigned
+                | Conversion::FloatToUnsigned
+                | Conversion::FloatToSignedSaturating
+                | Conversion::FloatToUnsignedSaturating => {
+                    let signed = matches!(
+                        conversion,
+                        Conversion::FloatToSigned | Conversion::FloatToSignedSaturating
+                    );
+                    let saturating = matches!(
+                        conversion,
+                        Conversion::FloatToSignedSaturating | Conversion::FloatToUnsignedSaturating
+                    );
+                    let bits = to_bits;
+                    let (lowest, limit) = if signed {
+                        (-(2f64.powi(bits as i32 - 1)), 2f64.powi(bits as i32 - 1))
+                    } else {
+                        (0.0, 2f64.powi(bits as i32))
+                    };
+                    let nan = self.fresh();
+                    let low = self.fresh();
+                    let high = self.fresh();
+                    let done = self.fresh();
+                    self.load_float(value, "xmm0", from);
+                    if single(from) {
+                        self.line("cvtss2sd %xmm0, %xmm0");
+                    }
+                    self.line("ucomisd %xmm0, %xmm0");
+                    self.line(&format!("jp {nan}"));
+                    self.line("roundsd $11, %xmm0, %xmm1");
+                    self.line(&format!("movabsq ${}, %rax", lowest.to_bits() as i64));
+                    self.line("movq %rax, %xmm2");
+                    self.line("ucomisd %xmm2, %xmm1");
+                    self.line(&format!("jb {low}"));
+                    self.line(&format!("movabsq ${}, %rax", limit.to_bits() as i64));
+                    self.line("movq %rax, %xmm2");
+                    self.line("ucomisd %xmm2, %xmm1");
+                    self.line(&format!("jae {high}"));
+                    if !signed && bits >= 64 {
+                        let small = self.fresh();
+                        let joined = self.fresh();
+                        self.line(&format!(
+                            "movabsq ${}, %rax",
+                            (2f64.powi(63)).to_bits() as i64
+                        ));
+                        self.line("movq %rax, %xmm2");
+                        self.line("ucomisd %xmm2, %xmm1");
+                        self.line(&format!("jb {small}"));
+                        self.line("subsd %xmm2, %xmm1");
+                        self.line("cvttsd2siq %xmm1, %rax");
+                        self.line("btcq $63, %rax");
+                        self.line(&format!("jmp {joined}"));
+                        self.label(&small);
+                        self.line("cvttsd2siq %xmm1, %rax");
+                        self.label(&joined);
+                    } else {
+                        self.line("cvttsd2siq %xmm1, %rax");
+                    }
+                    self.mask("rax", bits);
+                    self.line(&format!("jmp {done}"));
+                    self.label(&nan);
+                    if saturating {
+                        self.line("xorl %eax, %eax");
+                        self.line(&format!("jmp {done}"));
+                    } else {
+                        self.trap(TRAP_CONVERSION_RANGE);
+                    }
+                    self.label(&low);
+                    if saturating {
+                        let floor = if signed { 1u64 << (bits - 1) } else { 0 };
+                        self.constant(floor & all_ones(bits), "rax");
+                        self.line(&format!("jmp {done}"));
+                    } else {
+                        self.trap(TRAP_CONVERSION_RANGE);
+                    }
+                    self.label(&high);
+                    if saturating {
+                        let ceiling = if signed {
+                            all_ones(bits - 1)
+                        } else {
+                            all_ones(bits)
+                        };
+                        self.constant(ceiling, "rax");
+                    } else {
+                        self.trap(TRAP_CONVERSION_RANGE);
+                    }
+                    self.label(&done);
+                    self.store("rax", result);
+                }
+            }
+        }
+    }
+
+    pub fn emit_assembly(module: &Module) -> Result<String, Diagnostic> {
+        let mut emitter = Emitter {
+            module,
+            layout: module.layout.data(),
+            out: String::new(),
+            labels: 0,
+            fields: BTreeMap::new(),
+        };
+        emitter.emit_module()?;
+        Ok(emitter.out)
+    }
+
+    pub fn start_assembly(entry: &str) -> String {
+        format!(
+            "\t.text\n\t.globl _start\n\t.type _start, @function\n_start:\n\txorl %ebp, %ebp\n\tandq $-16, %rsp\n\tcall {entry}\n\tcmpq $0, __omni_pending(%rip)\n\tje .Lstart_exit\n\tcall __omni_uncaught\n.Lstart_exit:\n\tmovl %eax, %edi\n\tmovl $231, %eax\n\tsyscall\n\thlt\n"
+        )
+    }
+
+    pub fn assemble(text: &str) -> Result<Vec<u8>, Diagnostic> {
+        let mut options = AssemblerOptions::new("x86_64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        let result = assemble_source(&options, text.as_bytes(), None)?;
+        if let Some(message) = result
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::Error)
+        {
+            let place = message
+                .location
+                .map(|location| {
+                    let start = result.buffers[location.buffer]
+                        .text
+                        .get(..location.position)
+                        .map(|before| before.iter().filter(|byte| **byte == b'\n').count() + 1)
+                        .unwrap_or(0);
+                    format!(" at line {start}")
+                })
+                .unwrap_or_default();
+            return Err(assembly_failed(&format!("{}{place}", message.text)));
+        }
+        Ok(result.output)
+    }
+
+    pub fn runtime_module() -> Result<Module, Diagnostic> {
+        Module::from_text(RUNTIME)
+    }
+
+    pub fn runtime_names() -> BTreeSet<String> {
+        let mut names: BTreeSet<String> =
+            [INTRINSIC_SYSCALL, INTRINSIC_ADDRESS, INTRINSIC_REFERENCE]
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+        if let Ok(runtime) = runtime_module() {
+            for function in &runtime.functions {
+                if !function.is_declaration() && function.linkage != Linkage::Internal {
+                    names.insert(function.name.clone());
+                }
+            }
+        }
+        names
+    }
+
+    pub fn build_executable(module: &Module, entry: &str) -> Result<Vec<u8>, Diagnostic> {
+        let provided = runtime_names();
+        let defined: BTreeSet<&str> = module
+            .functions
+            .iter()
+            .filter(|function| !function.is_declaration())
+            .map(|function| function.name.as_str())
+            .collect();
+        for function in &module.functions {
+            if function.is_declaration()
+                && !provided.contains(&function.name)
+                && !defined.contains(function.name.as_str())
+            {
+                return Err(unsupported(&format!(
+                    "the runtime function {}",
+                    function.name
+                )));
+            }
+        }
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let start = assemble(&start_assembly(entry))?;
+        let objects = [
+            ("program.o", user),
+            ("runtime.o", support),
+            ("start.o", start),
+        ];
+        let arguments: Vec<String> = ["-o", "program", "program.o", "runtime.o", "start.o"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect();
+        let reader = |path: &str| {
+            objects
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, bytes)| bytes.clone())
+        };
+        let outcome = crate::compilers::linker::link(&arguments, &reader);
+        if !outcome.succeeded() {
+            let cause = outcome
+                .diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    let mut text = diagnostic.message.clone();
+                    for line in &diagnostic.context {
+                        text.push_str("; ");
+                        text.push_str(line);
+                    }
+                    text
+                })
+                .chain(outcome.messages.iter().cloned())
+                .collect::<Vec<String>>()
+                .join(" | ");
+            return Err(link_failed(&cause));
+        }
+        outcome
+            .outputs
+            .into_iter()
+            .find(|(name, _)| name == "program")
+            .map(|(_, bytes)| bytes)
+            .ok_or_else(|| link_failed("the linker wrote no program"))
+    }
+
+    pub const RUNTIME: &str = r#"omni 1
+module "omni.runtime"
+layout lp64
+global @__omni_pending size 8 align 8 mutable export zero
+global @__omni_heap_next size 8 align 8 mutable internal zero
+global @__omni_heap_end size 8 align 8 mutable internal zero
+global @__omni_identity size 8 align 8 mutable internal zero
+global @__omni_text_descriptor size 56 align 8 export bytes "ffffffffffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+global @__omni_trap_text size 11 align 1 internal bytes "6f6d6e693a207472617020"
+global @__omni_uncaught_text size 25 align 1 internal bytes "6f6d6e693a20756e63617567687420657863657074696f6e0a"
+function @omni.machine.syscall(i64, i64, i64, i64, i64, i64, i64) -> i64 import
+function @omni.machine.address(ref) -> ptr import
+function @omni.machine.reference(ptr) -> ref import
+function @__omni_exit(i64) internal noreturn {
+block0(%code: i64):
+    %number: i64 = const 231
+    %zero: i64 = const 0
+    %ignored: i64 = call @omni.machine.syscall(%number, %code, %zero, %zero, %zero, %zero, %zero)
+    unreachable
+}
+function @__omni_write(i64, ptr, i64) -> i64 internal {
+block0(%descriptor: i64, %start: ptr, %length: i64):
+    %zero: i64 = const 0
+    jump block1(%start, %length)
+block1(%at: ptr, %left: i64):
+    %done: bool = icmp eq %left, %zero
+    branch %done, block5, block2
+block2:
+    %number: i64 = const 1
+    %address: i64 = ptrtoint %at
+    %wrote: i64 = call @omni.machine.syscall(%number, %descriptor, %address, %left, %zero, %zero, %zero)
+    %failed: bool = icmp sle %wrote, %zero
+    branch %failed, block4, block3
+block3:
+    %next: ptr = offset %at, %wrote
+    %rest: i64 = sub %left, %wrote
+    jump block1(%next, %rest)
+block4:
+    %minus: i64 = const -1
+    return %minus
+block5:
+    return %length
+}
+function @__omni_write_number(i64, i64) internal {
+block0(%descriptor: i64, %value: i64):
+    %buffer: ptr = stack_slot size 32 align 8
+    %ten: i64 = const 10
+    %end: i64 = const 31
+    %last: ptr = offset %buffer, %end
+    %newline: i8 = const 10
+    store align 1 %newline, %last
+    jump block1(%value, %end)
+block1(%rest: i64, %position: i64):
+    %digit: i64 = urem %rest, %ten
+    %higher: i64 = udiv %rest, %ten
+    %one: i64 = const 1
+    %at: i64 = sub %position, %one
+    %place: ptr = offset %buffer, %at
+    %base: i64 = const 48
+    %character: i64 = add %digit, %base
+    %byte: i8 = trunc %character
+    store align 1 %byte, %place
+    %zero: i64 = const 0
+    %more: bool = icmp ne %higher, %zero
+    branch %more, block1(%higher, %at), block2(%at)
+block2(%first: i64):
+    %start: ptr = offset %buffer, %first
+    %size: i64 = const 32
+    %count: i64 = sub %size, %first
+    %wrote: i64 = call @__omni_write(%descriptor, %start, %count)
+    return
+}
+function @__omni_trap(i64, i64) export noreturn {
+block0(%kind: i64, %value: i64):
+    %error: i64 = const 2
+    %text: ptr = global_address @__omni_trap_text
+    %length: i64 = const 11
+    %wrote: i64 = call @__omni_write(%error, %text, %length)
+    call @__omni_write_number(%error, %kind)
+    %code: i64 = const 134
+    call @__omni_exit(%code)
+    unreachable
+}
+function @__omni_uncaught() -> i32 export {
+block0:
+    %error: i64 = const 2
+    %text: ptr = global_address @__omni_uncaught_text
+    %length: i64 = const 25
+    %wrote: i64 = call @__omni_write(%error, %text, %length)
+    %code: i64 = const 1
+    call @__omni_exit(%code)
+    unreachable
+}
+function @__omni_heap(i64) -> ptr internal {
+block0(%size: i64):
+    %fifteen: i64 = const 15
+    %mask: i64 = const -16
+    %padded: i64 = add %size, %fifteen
+    %rounded: i64 = and %padded, %mask
+    %next_slot: ptr = global_address @__omni_heap_next
+    %end_slot: ptr = global_address @__omni_heap_end
+    %next: i64 = load align 8 %next_slot
+    %end: i64 = load align 8 %end_slot
+    %wanted: i64 = add %next, %rounded
+    %zero: i64 = const 0
+    %started: bool = icmp ne %next, %zero
+    %room: bool = icmp ule %wanted, %end
+    %fits: bool = and %started, %room
+    branch %fits, block1, block2
+block1:
+    store align 8 %wanted, %next_slot
+    %found: ptr = inttoptr %next
+    return %found
+block2:
+    %least: i64 = const 268435456
+    %large: bool = icmp ugt %rounded, %least
+    %chunk: i64 = select %large, %rounded, %least
+    %number: i64 = const 9
+    %protection: i64 = const 3
+    %flags: i64 = const 16418
+    %none: i64 = const -1
+    %mapped: i64 = call @omni.machine.syscall(%number, %zero, %chunk, %protection, %flags, %none, %zero)
+    %limit: i64 = const -4096
+    %bad: bool = icmp ugt %mapped, %limit
+    branch %bad, block3, block4
+block3:
+    %exhausted: i64 = const 6
+    call @__omni_trap(%exhausted, %zero)
+    unreachable
+block4:
+    %fresh_next: i64 = add %mapped, %rounded
+    %fresh_end: i64 = add %mapped, %chunk
+    store align 8 %fresh_next, %next_slot
+    store align 8 %fresh_end, %end_slot
+    %memory: ptr = inttoptr %mapped
+    return %memory
+}
+function @__omni_allocate(i64, ptr) -> ref export {
+block0(%size: i64, %descriptor: ptr):
+    %memory: ptr = call @__omni_heap(%size)
+    store align 8 %descriptor, %memory
+    %counter: ptr = global_address @__omni_identity
+    %last: i64 = load align 8 %counter
+    %one: i64 = const 1
+    %next: i64 = add %last, %one
+    store align 8 %next, %counter
+    %eight: i64 = const 8
+    %slot: ptr = offset %memory, %eight
+    store align 8 %next, %slot
+    %object: ref = call @omni.machine.reference(%memory)
+    return %object
+}
+function @__omni_allocate_array(i64, i64, ptr) -> ref export {
+block0(%length: i64, %size: i64, %descriptor: ptr):
+    %zero: i64 = const 0
+    %negative: bool = icmp slt %length, %zero
+    branch %negative, block1, block2
+block1:
+    %code: i64 = const 5
+    call @__omni_trap(%code, %zero)
+    unreachable
+block2:
+    %limit: i64 = const 1099511627776
+    %huge: bool = icmp ugt %length, %limit
+    branch %huge, block3, block4
+block3:
+    %exhausted: i64 = const 6
+    call @__omni_trap(%exhausted, %zero)
+    unreachable
+block4:
+    %bytes: i64 = mul %length, %size
+    %header: i64 = const 24
+    %total: i64 = add %bytes, %header
+    %object: ref = call @__omni_allocate(%total, %descriptor)
+    %memory: ptr = call @omni.machine.address(%object)
+    %sixteen: i64 = const 16
+    %slot: ptr = offset %memory, %sixteen
+    store align 8 %length, %slot
+    return %object
+}
+function @exit(i32) export noreturn {
+block0(%code: i32):
+    %wide: i64 = zext %code
+    call @__omni_exit(%wide)
+    unreachable
+}
+function @abort() export noreturn {
+block0:
+    %code: i64 = const 12
+    %zero: i64 = const 0
+    call @__omni_trap(%code, %zero)
+    unreachable
+}
+function @write(i32, ptr, i64) -> i64 export {
+block0(%descriptor: i32, %start: ptr, %length: i64):
+    %wide: i64 = zext %descriptor
+    %wrote: i64 = call @__omni_write(%wide, %start, %length)
+    return %wrote
+}
+function @putchar(i32) -> i32 export {
+block0(%character: i32):
+    %buffer: ptr = stack_slot size 8 align 8
+    %byte: i8 = trunc %character
+    store align 1 %byte, %buffer
+    %out: i64 = const 1
+    %one: i64 = const 1
+    %wrote: i64 = call @__omni_write(%out, %buffer, %one)
+    %answer: i32 = zext %byte
+    return %answer
+}
+function @strlen(ptr) -> i64 export {
+block0(%text: ptr):
+    %zero: i64 = const 0
+    jump block1(%zero)
+block1(%count: i64):
+    %at: ptr = offset %text, %count
+    %byte: i8 = load align 1 %at
+    %nothing: i8 = const 0
+    %ended: bool = icmp eq %byte, %nothing
+    branch %ended, block3, block2
+block2:
+    %one: i64 = const 1
+    %next: i64 = add %count, %one
+    jump block1(%next)
+block3:
+    return %count
+}
+function @puts(ptr) -> i32 export {
+block0(%text: ptr):
+    %length: i64 = call @strlen(%text)
+    %out: i64 = const 1
+    %wrote: i64 = call @__omni_write(%out, %text, %length)
+    %newline: i32 = const 10
+    %again: i32 = call @putchar(%newline)
+    %answer: i32 = const 1
+    return %answer
+}
+function @memcpy(ptr, ptr, i64) -> ptr export {
+block0(%target: ptr, %source: ptr, %length: i64):
+    memory_copy %target, %source, %length
+    return %target
+}
+function @memmove(ptr, ptr, i64) -> ptr export {
+block0(%target: ptr, %source: ptr, %length: i64):
+    memory_move %target, %source, %length
+    return %target
+}
+function @memset(ptr, i32, i64) -> ptr export {
+block0(%target: ptr, %value: i32, %length: i64):
+    %byte: i8 = trunc %value
+    memory_fill %target, %byte, %length
+    return %target
+}
+function @malloc(i64) -> ptr export {
+block0(%size: i64):
+    %header: i64 = const 16
+    %total: i64 = add %size, %header
+    %memory: ptr = call @__omni_heap(%total)
+    store align 8 %size, %memory
+    %user: ptr = offset %memory, %header
+    return %user
+}
+function @calloc(i64, i64) -> ptr export {
+block0(%count: i64, %size: i64):
+    %over: bool = umul_overflows %count, %size
+    branch %over, block1, block2
+block1:
+    %none: ptr = null
+    return %none
+block2:
+    %total: i64 = mul %count, %size
+    %memory: ptr = call @malloc(%total)
+    return %memory
+}
+function @free(ptr) export {
+block0(%memory: ptr):
+    return
+}
+function @realloc(ptr, i64) -> ptr export {
+block0(%old: ptr, %size: i64):
+    %fresh: ptr = call @malloc(%size)
+    %start: i64 = ptrtoint %old
+    %zero: i64 = const 0
+    %empty: bool = icmp eq %start, %zero
+    branch %empty, block1, block2
+block1:
+    return %fresh
+block2:
+    %back: i64 = const -16
+    %header: ptr = offset %old, %back
+    %held: i64 = load align 8 %header
+    %fewer: bool = icmp ult %held, %size
+    %copied: i64 = select %fewer, %held, %size
+    memory_copy %fresh, %old, %copied
+    return %fresh
+}
+function @omni.identity(ref) -> i64 export {
+block0(%object: ref):
+    %memory: ptr = call @omni.machine.address(%object)
+    %eight: i64 = const 8
+    %slot: ptr = offset %memory, %eight
+    %identity: i64 = load align 8 %slot
+    return %identity
+}
+function @omni.clock() -> i64 export {
+block0:
+    %time: ptr = stack_slot size 16 align 8
+    %number: i64 = const 228
+    %zero: i64 = const 0
+    %address: i64 = ptrtoint %time
+    %status: i64 = call @omni.machine.syscall(%number, %zero, %address, %zero, %zero, %zero, %zero)
+    %seconds: i64 = load align 8 %time
+    %eight: i64 = const 8
+    %rest: ptr = offset %time, %eight
+    %nanoseconds: i64 = load align 8 %rest
+    %billion: i64 = const 1000000000
+    %scaled: i64 = mul %seconds, %billion
+    %total: i64 = add %scaled, %nanoseconds
+    return %total
+}
+function @omni.print(ref) export {
+block0(%text: ref):
+    %memory: ptr = call @omni.machine.address(%text)
+    %sixteen: i64 = const 16
+    %size_slot: ptr = offset %memory, %sixteen
+    %length: i64 = load align 8 %size_slot
+    %header: i64 = const 24
+    %bytes: ptr = offset %memory, %header
+    %out: i64 = const 1
+    %wrote: i64 = call @__omni_write(%out, %bytes, %length)
+    return
+}
+function @omni.print_line(ref) export {
+block0(%text: ref):
+    call @omni.print(%text)
+    %newline: i32 = const 10
+    %again: i32 = call @putchar(%newline)
+    return
+}
+function @omni.write_chars(i32, ref, i32, i32) export {
+block0(%descriptor: i32, %array: ref, %from: i32, %count: i32):
+    %fd: i64 = zext %descriptor
+    %memory: ptr = call @omni.machine.address(%array)
+    %sixteen: i64 = const 16
+    %size_slot: ptr = offset %memory, %sixteen
+    %length: i64 = load align 8 %size_slot
+    %start: i64 = sext %from
+    %amount: i64 = sext %count
+    %finish: i64 = add %start, %amount
+    %zero: i64 = const 0
+    %before: bool = icmp slt %start, %zero
+    %backwards: bool = icmp slt %amount, %zero
+    %beyond: bool = icmp ugt %finish, %length
+    %bad_start: bool = or %before, %backwards
+    %bad: bool = or %bad_start, %beyond
+    branch %bad, block1, block2
+block1:
+    %code: i64 = const 2
+    call @__omni_trap(%code, %zero)
+    unreachable
+block2:
+    %buffer: ptr = stack_slot size 1040 align 8
+    %header: i64 = const 24
+    %units: ptr = offset %memory, %header
+    jump block3(%start, %zero)
+block3(%index: i64, %filled: i64):
+    %limit: i64 = const 1024
+    %full: bool = icmp uge %filled, %limit
+    branch %full, block4, block5(%filled)
+block4:
+    %flushed: i64 = call @__omni_write(%fd, %buffer, %filled)
+    jump block5(%zero)
+block5(%used: i64):
+    %ended: bool = icmp uge %index, %finish
+    branch %ended, block18, block6
+block6:
+    %unit_at: ptr = element_address i16 %units, %index
+    %unit16: i16 = load align 2 %unit_at
+    %unit: i64 = zext %unit16
+    %one: i64 = const 1
+    %after: i64 = add %index, %one
+    %high_start: i64 = const 55296
+    %low_start: i64 = const 56320
+    %low_end: i64 = const 57344
+    %is_surrogate_low: bool = icmp uge %unit, %high_start
+    %is_surrogate_high: bool = icmp ult %unit, %low_end
+    %surrogate: bool = and %is_surrogate_low, %is_surrogate_high
+    branch %surrogate, block7, block11(%unit, %after)
+block7:
+    %leading: bool = icmp ult %unit, %low_start
+    %more: bool = icmp ult %after, %finish
+    %pairable: bool = and %leading, %more
+    branch %pairable, block8, block10
+block8:
+    %next_at: ptr = element_address i16 %units, %after
+    %next16: i16 = load align 2 %next_at
+    %next: i64 = zext %next16
+    %trailing_low: bool = icmp uge %next, %low_start
+    %trailing_high: bool = icmp ult %next, %low_end
+    %trailing: bool = and %trailing_low, %trailing_high
+    branch %trailing, block9, block10
+block9:
+    %high_part: i64 = sub %unit, %high_start
+    %low_part: i64 = sub %next, %low_start
+    %ten: i64 = const 10
+    %shifted: i64 = shl %high_part, %ten
+    %joined: i64 = or %shifted, %low_part
+    %plane: i64 = const 65536
+    %point: i64 = add %joined, %plane
+    %two: i64 = const 2
+    %skip: i64 = add %index, %two
+    jump block11(%point, %skip)
+block10:
+    %question: i64 = const 63
+    jump block11(%question, %after)
+block11(%code_point: i64, %continue: i64):
+    %place: ptr = offset %buffer, %used
+    %one_limit: i64 = const 128
+    %two_limit: i64 = const 2048
+    %three_limit: i64 = const 65536
+    %small: bool = icmp ult %code_point, %one_limit
+    branch %small, block12, block13
+block12:
+    %ascii: i8 = trunc %code_point
+    store align 1 %ascii, %place
+    %used1: i64 = add %used, %one
+    jump block3(%continue, %used1)
+block13:
+    %six: i64 = const 6
+    %twelve: i64 = const 12
+    %eighteen: i64 = const 18
+    %continuation: i64 = const 128
+    %low_bits: i64 = const 63
+    %medium: bool = icmp ult %code_point, %two_limit
+    branch %medium, block14, block15
+block14:
+    %lead2_bits: i64 = lshr %code_point, %six
+    %lead2_mark: i64 = const 192
+    %lead2: i64 = or %lead2_bits, %lead2_mark
+    %tail2_bits: i64 = and %code_point, %low_bits
+    %tail2: i64 = or %tail2_bits, %continuation
+    %lead2_byte: i8 = trunc %lead2
+    %tail2_byte: i8 = trunc %tail2
+    store align 1 %lead2_byte, %place
+    %place2: ptr = offset %place, %one
+    store align 1 %tail2_byte, %place2
+    %two_bytes: i64 = const 2
+    %used2: i64 = add %used, %two_bytes
+    jump block3(%continue, %used2)
+block15:
+    %large: bool = icmp ult %code_point, %three_limit
+    branch %large, block16, block17
+block16:
+    %lead3_bits: i64 = lshr %code_point, %twelve
+    %lead3_mark: i64 = const 224
+    %lead3: i64 = or %lead3_bits, %lead3_mark
+    %middle3_shift: i64 = lshr %code_point, %six
+    %middle3_bits: i64 = and %middle3_shift, %low_bits
+    %middle3: i64 = or %middle3_bits, %continuation
+    %tail3_bits: i64 = and %code_point, %low_bits
+    %tail3: i64 = or %tail3_bits, %continuation
+    %lead3_byte: i8 = trunc %lead3
+    %middle3_byte: i8 = trunc %middle3
+    %tail3_byte: i8 = trunc %tail3
+    store align 1 %lead3_byte, %place
+    %place3a: ptr = offset %place, %one
+    store align 1 %middle3_byte, %place3a
+    %two3: i64 = const 2
+    %place3b: ptr = offset %place, %two3
+    store align 1 %tail3_byte, %place3b
+    %three_bytes: i64 = const 3
+    %used3: i64 = add %used, %three_bytes
+    jump block3(%continue, %used3)
+block17:
+    %lead4_bits: i64 = lshr %code_point, %eighteen
+    %lead4_mark: i64 = const 240
+    %lead4: i64 = or %lead4_bits, %lead4_mark
+    %second4_shift: i64 = lshr %code_point, %twelve
+    %second4_bits: i64 = and %second4_shift, %low_bits
+    %second4: i64 = or %second4_bits, %continuation
+    %third4_shift: i64 = lshr %code_point, %six
+    %third4_bits: i64 = and %third4_shift, %low_bits
+    %third4: i64 = or %third4_bits, %continuation
+    %tail4_bits: i64 = and %code_point, %low_bits
+    %tail4: i64 = or %tail4_bits, %continuation
+    %lead4_byte: i8 = trunc %lead4
+    %second4_byte: i8 = trunc %second4
+    %third4_byte: i8 = trunc %third4
+    %tail4_byte: i8 = trunc %tail4
+    store align 1 %lead4_byte, %place
+    %place4a: ptr = offset %place, %one
+    store align 1 %second4_byte, %place4a
+    %two4: i64 = const 2
+    %place4b: ptr = offset %place, %two4
+    store align 1 %third4_byte, %place4b
+    %three4: i64 = const 3
+    %place4c: ptr = offset %place, %three4
+    store align 1 %tail4_byte, %place4c
+    %four_bytes: i64 = const 4
+    %used4: i64 = add %used, %four_bytes
+    jump block3(%continue, %used4)
+block18:
+    %last: i64 = call @__omni_write(%fd, %buffer, %used)
+    return
+}
+"#;
+}

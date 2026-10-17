@@ -72186,3 +72186,568 @@ mod x86_assembly {
         assert_eq!(status.code(), Some(42), "the program computes 40 + 2");
     }
 }
+
+mod native_x86_64 {
+    use crate::compilers::compiler_infrastructure::{
+        Datum, Finish, Interpreter, Limits, Module, StandardHost,
+    };
+    use crate::compilers::x86_64::codegen;
+
+    fn interpreted(module: &Module, entry: &str) -> (Option<i32>, Vec<u8>) {
+        let mut host = StandardHost;
+        let mut interpreter =
+            Interpreter::new(module, &mut host, Limits::default()).expect("the module loads");
+        let id = module.function_named(entry).expect("the entry exists");
+        let code = match interpreter.call(id, Vec::new()) {
+            Ok(Finish::Returned(Some(Datum::Integer(value)))) => Some(value as u32 as i32),
+            Ok(Finish::Exited(code)) => Some(code),
+            _ => None,
+        };
+        (code, interpreter.machine().stdout().to_vec())
+    }
+
+    pub(super) fn run_native(program: &[u8], name: &str) -> Option<(Option<i32>, Vec<u8>)> {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return None;
+        }
+        let path =
+            std::env::temp_dir().join(format!("apk_builder_native_{name}_{}", std::process::id()));
+        std::fs::write(&path, program).expect("the program is written");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the program becomes executable");
+        }
+        let mut child = std::process::Command::new(&path)
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .expect("the program starts");
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() < std::time::Duration::from_secs(20) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => {
+                    child.kill().ok();
+                    child.wait().ok();
+                    break None;
+                }
+            }
+        };
+        let mut said = Vec::new();
+        if let Some(mut out) = child.stdout.take() {
+            std::io::Read::read_to_end(&mut out, &mut said).ok();
+        }
+        let _ = std::fs::remove_file(&path);
+        Some((status.and_then(|status| status.code()), said))
+    }
+
+    fn agree(text: &str, entry: &str, name: &str) {
+        let module = Module::from_text(text).expect("the program reads");
+        module.verify().expect("the program keeps every rule");
+        let expected = interpreted(&module, entry);
+        let program = codegen::build_executable(&module, entry)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        let Some(native) = run_native(&program, name) else {
+            return;
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&native.1),
+            String::from_utf8_lossy(&expected.1),
+            "the native program prints what the interpreter prints"
+        );
+        assert_eq!(
+            native.0, expected.0,
+            "the native program exits as the interpreter does"
+        );
+    }
+
+    #[test]
+    fn the_native_runtime_reads_keeps_its_rules_and_assembles() {
+        let runtime = codegen::runtime_module().expect("the runtime reads");
+        runtime.verify().expect("the runtime keeps every rule");
+        let text = codegen::emit_assembly(&runtime).expect("the runtime compiles");
+        let object = codegen::assemble(&text).expect("the runtime assembles");
+        assert_eq!(&object[..4], b"\x7fELF");
+    }
+
+    const PRINTER: &str = r#"function @putchar(i32) -> i32 c import
+function @print(i64) internal {
+block0(%value: i64):
+    %zero: i64 = const 0
+    %negative: bool = icmp slt %value, %zero
+    branch %negative, block1, block2(%value)
+block1:
+    %minus: i32 = const 45
+    %ignored: i32 = call @putchar(%minus)
+    %positive: i64 = sub %zero, %value
+    jump block2(%positive)
+block2(%magnitude: i64):
+    %ten: i64 = const 10
+    %higher: i64 = udiv %magnitude, %ten
+    %more: bool = icmp ne %higher, %zero
+    branch %more, block3, block4
+block3:
+    call @print(%higher)
+    jump block4
+block4:
+    %digit: i64 = urem %magnitude, %ten
+    %base: i64 = const 48
+    %character: i64 = add %digit, %base
+    %narrow: i32 = trunc %character
+    %shown: i32 = call @putchar(%narrow)
+    return
+}
+function @line(i64) internal {
+block0(%value: i64):
+    call @print(%value)
+    %newline: i32 = const 10
+    %shown: i32 = call @putchar(%newline)
+    return
+}
+"#;
+
+    fn program(body: &str) -> String {
+        format!("omni 1\nmodule \"native\"\nlayout lp64\n{PRINTER}{body}")
+    }
+
+    #[test]
+    fn integer_arithmetic_runs_natively_as_it_interprets() {
+        let body = r#"function @main() -> i32 export {
+block0:
+    %a: i32 = const -7
+    %b: i32 = const 3
+    %sum: i32 = add %a, %b
+    %s1: i64 = sext %sum
+    call @line(%s1)
+    %quotient: i32 = sdiv %a, %b
+    %s2: i64 = sext %quotient
+    call @line(%s2)
+    %remainder: i32 = srem %a, %b
+    %s3: i64 = sext %remainder
+    call @line(%s3)
+    %uq: i32 = udiv %a, %b
+    %s4: i64 = zext %uq
+    call @line(%s4)
+    %ur: i32 = urem %a, %b
+    %s5: i64 = zext %ur
+    call @line(%s5)
+    %five: i8 = const 5
+    %two: i8 = const 2
+    %nine: i8 = const 9
+    %shifted: i8 = shl %five, %nine
+    %s6: i64 = zext %shifted
+    call @line(%s6)
+    %big: i8 = const -100
+    %arith: i8 = ashr %big, %two
+    %s7: i64 = sext %arith
+    call @line(%s7)
+    %logic: i8 = lshr %big, %two
+    %s8: i64 = zext %logic
+    call @line(%s8)
+    %rotated: i8 = rotl %big, %two
+    %s9: i64 = zext %rotated
+    call @line(%s9)
+    %rr: i16 = const 4660
+    %four: i16 = const 4
+    %rotr: i16 = rotr %rr, %four
+    %s10: i64 = zext %rotr
+    call @line(%s10)
+    %low: i32 = smin %a, %b
+    %s11: i64 = sext %low
+    call @line(%s11)
+    %high: i32 = umax %a, %b
+    %s12: i64 = zext %high
+    call @line(%s12)
+    %max: i32 = const 2147483647
+    %one: i32 = const 1
+    %saturated: i32 = sadd_sat %max, %one
+    %s13: i64 = sext %saturated
+    call @line(%s13)
+    %over: bool = sadd_overflows %max, %one
+    %s14: i64 = zext %over
+    call @line(%s14)
+    %wide_max: i64 = const 9223372036854775807
+    %wide_one: i64 = const 1
+    %wide_sat: i64 = sadd_sat %wide_max, %wide_one
+    call @line(%wide_sat)
+    %wide_over: bool = sadd_overflows %wide_max, %wide_one
+    %s15: i64 = zext %wide_over
+    call @line(%s15)
+    %product_high: i64 = umulh %wide_max, %wide_max
+    call @line(%product_high)
+    %small: i32 = const 40000
+    %mul_over: bool = smul_overflows %small, %small
+    %s16: i64 = zext %mul_over
+    call @line(%s16)
+    %usub: bool = usub_overflows %b, %a
+    %s17: i64 = zext %usub
+    call @line(%s17)
+    %bits: i32 = const 1311768467
+    %count: i32 = popcount %bits
+    %s18: i64 = zext %count
+    call @line(%s18)
+    %leading: i32 = clz %bits
+    %s19: i64 = zext %leading
+    call @line(%s19)
+    %trailing: i32 = ctz %bits
+    %s20: i64 = zext %trailing
+    call @line(%s20)
+    %nothing: i32 = const 0
+    %none: i32 = ctz %nothing
+    %s21: i64 = zext %none
+    call @line(%s21)
+    %swapped: i32 = bswap %bits
+    %s22: i64 = zext %swapped
+    call @line(%s22)
+    %reversed: i32 = bitreverse %bits
+    %s23: i64 = zext %reversed
+    call @line(%s23)
+    %minimum: i32 = const -2147483648
+    %absolute: i32 = abs %minimum
+    %s24: i64 = zext %absolute
+    call @line(%s24)
+    %minus_one: i32 = const -1
+    %wrapped: i32 = sdiv %minimum, %minus_one
+    %s25: i64 = sext %wrapped
+    call @line(%s25)
+    %negated: i32 = neg %a
+    %s26: i64 = sext %negated
+    call @line(%s26)
+    %inverted: i16 = not %rr
+    %s27: i64 = zext %inverted
+    call @line(%s27)
+    %less: bool = icmp slt %a, %b
+    %below: bool = icmp ult %a, %b
+    %l1: i64 = zext %less
+    %l2: i64 = zext %below
+    call @line(%l1)
+    call @line(%l2)
+    %picked: i32 = select %less, %a, %b
+    %s28: i64 = sext %picked
+    call @line(%s28)
+    %code: i32 = const 17
+    return %code
+}
+"#;
+        agree(&program(body), "main", "integers");
+    }
+
+    #[test]
+    fn floating_point_runs_natively_as_it_interprets() {
+        let body = r#"function @main() -> i32 export {
+block0:
+    %x: f64 = fconst 0x4024000000000000
+    %y: f64 = fconst 0x4008000000000000
+    %sum: f64 = fadd %x, %y
+    %product: f64 = fmul %sum, %y
+    %quotient: f64 = fdiv %product, %y
+    %remainder: f64 = frem %x, %y
+    %million: f64 = fconst 0x412e848000000000
+    %scaled: f64 = fmul %quotient, %million
+    %i1: i64 = fptosi %scaled
+    call @line(%i1)
+    %scaled2: f64 = fmul %remainder, %million
+    %i2: i64 = fptosi %scaled2
+    call @line(%i2)
+    %root: f64 = sqrt %x
+    %scaled3: f64 = fmul %root, %million
+    %i3: i64 = fptosi %scaled3
+    call @line(%i3)
+    %negative: f64 = fneg %root
+    %down: f64 = floor %negative
+    %i4: i64 = fptosi %down
+    call @line(%i4)
+    %up: f64 = ceil %negative
+    %i5: i64 = fptosi %up
+    call @line(%i5)
+    %half: f64 = fconst 0x4004000000000000
+    %even: f64 = nearest %half
+    %i6: i64 = fptosi %even
+    call @line(%i6)
+    %zero: f64 = fconst 0x0
+    %nan: f64 = fdiv %zero, %zero
+    %bits: i64 = bitcast %nan
+    call @line(%bits)
+    %saturated: i32 = fptosi_sat %nan
+    %i7: i64 = sext %saturated
+    call @line(%i7)
+    %huge: f64 = fconst 0x7ff0000000000000
+    %clamped: i32 = fptosi_sat %huge
+    %i8: i64 = sext %clamped
+    call @line(%i8)
+    %unsigned: i64 = fptoui_sat %huge
+    call @line(%unsigned)
+    %neg_zero: f64 = fneg %zero
+    %smallest: f64 = fmin %zero, %neg_zero
+    %b9: i64 = bitcast %smallest
+    call @line(%b9)
+    %largest: f64 = fmax %zero, %neg_zero
+    %b10: i64 = bitcast %largest
+    call @line(%b10)
+    %minnum: f64 = fminnum %nan, %y
+    %b11: i64 = bitcast %minnum
+    call @line(%b11)
+    %signed: f64 = copysign %x, %neg_zero
+    %b12: i64 = bitcast %signed
+    call @line(%b12)
+    %single: f32 = fptrunc %x
+    %third: f32 = fconst 0x40400000
+    %fsum: f32 = fdiv %single, %third
+    %fbits: i32 = bitcast %fsum
+    %b13: i64 = zext %fbits
+    call @line(%b13)
+    %back: f64 = fpext %fsum
+    %b14: i64 = bitcast %back
+    call @line(%b14)
+    %count: i64 = const -3
+    %from_int: f64 = sitofp %count
+    %b15: i64 = bitcast %from_int
+    call @line(%b15)
+    %all: i64 = const -1
+    %from_unsigned: f64 = uitofp %all
+    %b16: i64 = bitcast %from_unsigned
+    call @line(%b16)
+    %ordered: bool = fcmp olt %x, %y
+    %unordered: bool = fcmp ult %nan, %y
+    %notequal: bool = fcmp une %nan, %nan
+    %equal: bool = fcmp oeq %nan, %nan
+    %c1: i64 = zext %ordered
+    %c2: i64 = zext %unordered
+    %c3: i64 = zext %notequal
+    %c4: i64 = zext %equal
+    call @line(%c1)
+    call @line(%c2)
+    call @line(%c3)
+    call @line(%c4)
+    %code: i32 = const 0
+    return %code
+}
+"#;
+        agree(&program(body), "main", "floats");
+    }
+
+    #[test]
+    fn control_calls_and_memory_run_natively_as_they_interpret() {
+        let body = r#"global @table size 16 align 8 internal bytes "00000000000000000000000000000000" relocate 0 function @square 0 relocate 8 function @twice 0
+global @counter size 8 align 8 mutable internal zero
+function @square(i64) -> i64 internal {
+block0(%x: i64):
+    %y: i64 = mul %x, %x
+    return %y
+}
+function @twice(i64) -> i64 internal {
+block0(%x: i64):
+    %y: i64 = add %x, %x
+    return %y
+}
+function @fib(i64) -> i64 internal {
+block0(%n: i64):
+    %two: i64 = const 2
+    %small: bool = icmp slt %n, %two
+    branch %small, block1, block2
+block1:
+    return %n
+block2:
+    %one: i64 = const 1
+    %a: i64 = sub %n, %one
+    %b: i64 = sub %n, %two
+    %fa: i64 = call @fib(%a)
+    %fb: i64 = call @fib(%b)
+    %sum: i64 = add %fa, %fb
+    return %sum
+}
+function @many(i64, f64, i64, i64, i64, i64, i64, i64, f64, i64) -> i64 internal {
+block0(%a: i64, %b: f64, %c: i64, %d: i64, %e: i64, %f: i64, %g: i64, %h: i64, %i: f64, %j: i64):
+    %ib: i64 = fptosi %b
+    %ii: i64 = fptosi %i
+    %s1: i64 = add %a, %ib
+    %s2: i64 = add %s1, %c
+    %s3: i64 = add %s2, %d
+    %s4: i64 = add %s3, %e
+    %s5: i64 = add %s4, %f
+    %s6: i64 = add %s5, %g
+    %s7: i64 = add %s6, %h
+    %s8: i64 = add %s7, %ii
+    %ten: i64 = const 10
+    %s9: i64 = mul %s8, %ten
+    %s10: i64 = add %s9, %j
+    return %s10
+}
+function @main() -> i32 export {
+block0:
+    %ten: i64 = const 10
+    %f: i64 = call @fib(%ten)
+    call @line(%f)
+    %zero: i64 = const 0
+    %one: i64 = const 1
+    jump block1(%zero, %one, %zero)
+block1(%i: i64, %a: i64, %b: i64):
+    %done: bool = icmp eq %i, %ten
+    branch %done, block3, block2
+block2:
+    %next: i64 = add %i, %one
+    jump block1(%next, %b, %a)
+block3:
+    call @line(%a)
+    call @line(%b)
+    %which: i64 = const 2
+    switch %which, [1: block4, 2: block5], default block6
+block4:
+    call @line(%one)
+    jump block7
+block5:
+    %two: i64 = const 2
+    call @line(%two)
+    jump block7
+block6:
+    call @line(%zero)
+    jump block7
+block7:
+    %table: ptr = global_address @table
+    %first: ptr = load align 8 %table
+    %eight: i64 = const 8
+    %second_slot: ptr = offset %table, %eight
+    %second: ptr = load align 8 %second_slot
+    %seven: i64 = const 7
+    %r1: i64 = call_indirect (i64) -> i64 %first(%seven)
+    %r2: i64 = call_indirect (i64) -> i64 %second(%seven)
+    call @line(%r1)
+    call @line(%r2)
+    %slot: ptr = stack_slot size 16 align 8
+    %byte: i8 = const -1
+    store align 1 %byte, %slot
+    %word: i16 = load align 2 %slot
+    %w1: i64 = zext %word
+    call @line(%w1)
+    %counter: ptr = global_address @counter
+    %old: i64 = atomic_update add seq_cst %counter, %seven
+    %new: i64 = atomic_update xchg seq_cst %counter, %ten
+    call @line(%old)
+    call @line(%new)
+    %seen: i64 = compare_exchange seq_cst seq_cst %counter, %ten, %one
+    %final: i64 = load align 8 %counter
+    call @line(%seen)
+    call @line(%final)
+    %fill: i8 = const 65
+    %sixteen: i64 = const 16
+    memory_fill %slot, %fill, %sixteen
+    %piece: i64 = load align 8 %slot
+    call @line(%piece)
+    %half: f64 = fconst 0x3ff8000000000000
+    %m: i64 = call @many(%one, %half, %one, %one, %one, %one, %one, %one, %half, %seven)
+    call @line(%m)
+    %code: i32 = const 3
+    return %code
+}
+"#;
+        agree(&program(body), "main", "control");
+    }
+
+    #[test]
+    fn objects_dispatch_and_exceptions_run_natively_as_they_interpret() {
+        let body = r#"class %Object { fields [] methods [@Object.value] }
+class %Valued interface { fields [] methods [@Valued.extra] }
+class %Box : %Object { fields [i32, ref, f64] methods [@Box.value] implements %Valued [-] }
+class %Problem : %Object { fields [i64] methods [@Object.value] }
+class %Numbers array i64 : %Object { fields [] methods [@Object.value] }
+function @Object.value(ref) -> i64 internal {
+block0(%self: ref):
+    %v: i64 = const 1
+    return %v
+}
+function @Box.value(ref) -> i64 internal {
+block0(%self: ref):
+    %field: i32 = load_field %Box 0 %self
+    %wide: i64 = sext %field
+    return %wide
+}
+function @Valued.extra(ref) -> i64 internal {
+block0(%self: ref):
+    %v: i64 = const 99
+    return %v
+}
+function @risky(i64) -> i64 internal {
+block0(%x: i64):
+    %zero: i64 = const 0
+    %bad: bool = icmp slt %x, %zero
+    branch %bad, block1, block2
+block1:
+    %problem: ref = allocate %Problem
+    store_field %Problem 0 %problem, %x
+    throw %problem
+block2:
+    %y: i64 = add %x, %x
+    return %y
+}
+function @relay(i64) -> i64 internal {
+block0(%x: i64):
+    %y: i64 = call @risky(%x)
+    %one: i64 = const 1
+    %z: i64 = add %y, %one
+    return %z
+}
+function @main() -> i32 export {
+block0:
+    %box: ref = allocate %Box
+    %v: i32 = const -42
+    store_field %Box 0 %box, %v
+    %method: ptr = virtual_method %Object 0 %box
+    %r1: i64 = call_indirect (ref) -> i64 %method(%box)
+    call @line(%r1)
+    %other: ref = allocate %Problem
+    %method2: ptr = virtual_method %Object 0 %other
+    %r2: i64 = call_indirect (ref) -> i64 %method2(%other)
+    call @line(%r2)
+    %extra: ptr = interface_method %Valued 0 %box
+    %r3: i64 = call_indirect (ref) -> i64 %extra(%box)
+    call @line(%r3)
+    %is_box: bool = instance_of %Box %box
+    %is_valued: bool = instance_of %Valued %box
+    %not_box: bool = instance_of %Box %other
+    %nothing: ref = null
+    %null_box: bool = instance_of %Box %nothing
+    %i1: i64 = zext %is_box
+    %i2: i64 = zext %is_valued
+    %i3: i64 = zext %not_box
+    %i4: i64 = zext %null_box
+    call @line(%i1)
+    call @line(%i2)
+    call @line(%i3)
+    call @line(%i4)
+    %length: i32 = const 5
+    %array: ref = allocate_array %Numbers %length
+    %count: i32 = array_length %array
+    %c1: i64 = zext %count
+    call @line(%c1)
+    %two: i32 = const 2
+    %value: i64 = const 1234567890123
+    store_element i64 %array, %two, %value
+    %back: i64 = load_element i64 %array, %two
+    call @line(%back)
+    %same: bool = same_object %box, %box
+    %s1: i64 = zext %same
+    call @line(%s1)
+    %ok: i64 = const 5
+    %r4: i64 = invoke call @relay(%ok) to block1(%r4) unwind block2
+block1(%got: i64):
+    call @line(%got)
+    %bad: i64 = const -3
+    %r5: i64 = invoke call @relay(%bad) to block3(%r5) unwind block2
+block2(%caught: ref):
+    %what: i64 = load_field %Problem 0 %caught
+    call @line(%what)
+    %code: i32 = const 9
+    return %code
+block3(%unexpected: i64):
+    call @line(%unexpected)
+    %zero: i32 = const 0
+    return %zero
+}
+"#;
+        agree(&program(body), "main", "objects");
+    }
+}
