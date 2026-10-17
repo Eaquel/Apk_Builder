@@ -45,6 +45,7 @@ SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
 KOTLIN_SUITES = ["kotlin-omni"]
 LINKER_SUITES = ["lld-elf", "lld-coff"]
 ASSEMBLER_SUITES = ["mc-x86"]
+C_FRONT_END_SUITES = ["clang-c-preprocessor"]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -997,6 +998,21 @@ def check_assembler() -> str:
         raise Skip("the reference bundles are not in this checkout")
     return hold_ground(run_suites(ASSEMBLER_SUITES, module="x86_assembly"))
 
+def check_c_front_end() -> str:
+    """Our C preprocessor keeps every Clang lit test it has ever passed, on one worker and many."""
+    if shutil.which("cargo") is None:
+        raise Skip("cargo is not on this machine")
+    if not bundles_present():
+        raise Skip("the reference bundles are not in this checkout")
+    alone = run_suites(C_FRONT_END_SUITES, threads=1, module="c_front_end")
+    together = run_suites(C_FRONT_END_SUITES, threads=max(2, os.cpu_count() or 2),
+                          module="c_front_end")
+    differ = [name for name in C_FRONT_END_SUITES
+              if alone[name]["digest"] != together[name]["digest"]]
+    if differ:
+        raise AssertionError(f"these suites answer differently with more workers: {differ}")
+    return hold_ground(together)
+
 def kotlin_standard_library() -> Path | None:
     """The newest kotlin-stdlib this machine holds, the way the Core suite finds it."""
     named = os.environ.get("APK_BUILDER_KOTLIN_STDLIB")
@@ -1053,6 +1069,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "kotlin-omni": ("Kotlin answers the same on Omni IR as on the JVM", check_kotlin_omni),
     "linker": ("our linkers hold their ground on the LLD tests", check_linker),
     "assembler": ("our x86 assembler holds its ground on the LLVM MC tests", check_assembler),
+    "c-front-end": ("our C front end holds its ground on the Clang tests", check_c_front_end),
 }
 
 DEFAULT = [

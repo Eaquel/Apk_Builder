@@ -71857,3 +71857,1683 @@ mod x86_assembly {
         eprintln!("{}", format_assembly_messages(&render_messages(&result)));
     }
 }
+
+mod c_front_end {
+    use super::reference::{
+        lit_tests, regex_escape, run_parallel, standard_tools, LitSuite, Regex, SuiteReport,
+        ToolOutcome, Tree, World,
+    };
+    use super::table_gen::publish_with_scope;
+    use crate::compilers::cpp::{
+        parse_compiler_arguments, render_diagnostic, BufferKind, CDiagnostic, CSeverity,
+        FrontendAction, InputLanguage, Place, PreprocessOutcome, Preprocessor, SourceFiles,
+        SourceMap,
+    };
+    use std::collections::BTreeMap;
+
+    struct WorldFiles<'w, 't> {
+        world: &'w World<'t>,
+    }
+
+    impl SourceFiles for WorldFiles<'_, '_> {
+        fn read(&self, path: &str) -> Option<Vec<u8>> {
+            self.world.read(path)
+        }
+
+        fn is_directory(&self, path: &str) -> bool {
+            self.world.folders.contains(&self.world.absolute(path))
+        }
+    }
+
+    struct MemoryFiles {
+        files: BTreeMap<String, Vec<u8>>,
+    }
+
+    impl SourceFiles for MemoryFiles {
+        fn read(&self, path: &str) -> Option<Vec<u8>> {
+            self.files.get(path).cloned()
+        }
+    }
+
+    fn out_of_scope(world: &mut World, reason: String) -> ToolOutcome {
+        let message = format!("clang-cc1: {reason}\n");
+        world.missing_tool = Some(format!("clang-cc1 {reason}"));
+        ToolOutcome::failed(127, message)
+    }
+
+    fn summary(warnings: usize, errors: usize) -> String {
+        let plural = |count: usize, word: &str| {
+            if count == 1 {
+                format!("{count} {word}")
+            } else {
+                format!("{count} {word}s")
+            }
+        };
+        match (warnings, errors) {
+            (0, 0) => String::new(),
+            (warnings, 0) => format!("{} generated.\n", plural(warnings, "warning")),
+            (0, errors) => format!("{} generated.\n", plural(errors, "error")),
+            (warnings, errors) => format!(
+                "{} and {} generated.\n",
+                plural(warnings, "warning"),
+                plural(errors, "error")
+            ),
+        }
+    }
+
+    pub(super) fn tool_clang_cc1(
+        arguments: &[String],
+        input: &[u8],
+        world: &mut World,
+    ) -> ToolOutcome {
+        let mut invocation = parse_compiler_arguments(&arguments[1..]);
+        if let Some(flag) = invocation.unsupported.first() {
+            return out_of_scope(world, format!("option {flag}"));
+        }
+        if invocation.action == FrontendAction::Other {
+            return out_of_scope(world, "frontend action".to_string());
+        }
+        if invocation.inputs.is_empty() {
+            invocation.inputs.push("-".to_string());
+        }
+        if invocation.inputs.len() != 1 {
+            return out_of_scope(world, format!("{} inputs", invocation.inputs.len()));
+        }
+        let path = invocation.inputs[0].clone();
+        match invocation.input_language(&path) {
+            InputLanguage::C | InputLanguage::CHeader | InputLanguage::Assembler => {}
+            InputLanguage::PreprocessedC => {
+                return out_of_scope(world, "preprocessed input".to_string())
+            }
+            InputLanguage::CPlusPlus => return out_of_scope(world, "C++ input".to_string()),
+            InputLanguage::ObjectiveC => {
+                return out_of_scope(world, "Objective-C input".to_string())
+            }
+            InputLanguage::Other => return out_of_scope(world, "input language".to_string()),
+        }
+        if let Some(reason) = invocation.target_problem.clone() {
+            return out_of_scope(world, reason);
+        }
+        let (name, bytes) = if path == "-" {
+            ("<stdin>".to_string(), input.to_vec())
+        } else {
+            match world.read(&path) {
+                Some(bytes) => (path.clone(), bytes),
+                None => {
+                    return ToolOutcome::failed(
+                        1,
+                        format!(
+                            "error: no such file or directory: '{path}'\nerror: no input files\n"
+                        ),
+                    )
+                }
+            }
+        };
+        invocation.preprocessor.working_directory = world.directory.clone();
+        invocation.preprocessor.collect_comments = invocation.verify.is_some();
+        let outcome = {
+            let files = WorldFiles { world };
+            Preprocessor::new(&files, invocation.preprocessor.clone()).run(&name, bytes)
+        };
+        if invocation.action == FrontendAction::SyntaxOnly && !outcome.tokens.is_empty() {
+            return out_of_scope(world, "C parser".to_string());
+        }
+        let mut result = ToolOutcome::ok(Vec::new());
+        world.errors_before_output = true;
+        if invocation.action == FrontendAction::Preprocess {
+            match invocation.output.as_deref() {
+                None | Some("-") => result.stdout = outcome.output.clone(),
+                Some(target) => world.write(target, outcome.output.clone(), false),
+            }
+        }
+        match &invocation.verify {
+            Some(prefixes) => {
+                let problems = verify(&outcome, prefixes);
+                if !problems.is_empty() {
+                    result.status = 1;
+                    result.stderr = problems.into_bytes();
+                }
+            }
+            None => {
+                let mut stderr = String::new();
+                for diagnostic in &outcome.diagnostics {
+                    stderr.push_str(&render_diagnostic(
+                        diagnostic,
+                        &outcome.sources,
+                        invocation.show_source,
+                    ));
+                }
+                stderr.push_str(&summary(outcome.warnings, outcome.errors));
+                result.stderr = stderr.into_bytes();
+                if outcome.errors > 0 {
+                    result.status = 1;
+                }
+            }
+        }
+        result
+    }
+
+    fn basic_to_extended(pattern: &str) -> String {
+        let characters: Vec<char> = pattern.chars().collect();
+        let mut out = String::new();
+        let mut at = 0usize;
+        let mut in_bracket = false;
+        while at < characters.len() {
+            let character = characters[at];
+            if in_bracket {
+                out.push(character);
+                if character == ']' && !out.ends_with("[]") && !out.ends_with("[^]") {
+                    in_bracket = false;
+                }
+                at += 1;
+                continue;
+            }
+            match character {
+                '\\' if at + 1 < characters.len() => {
+                    let next = characters[at + 1];
+                    if "(){}|+?".contains(next) {
+                        out.push(next);
+                    } else {
+                        out.push('\\');
+                        out.push(next);
+                    }
+                    at += 2;
+                    continue;
+                }
+                '[' => in_bracket = true,
+                '*' if out.is_empty() || out == "^" || out.ends_with('(') => {
+                    out.push_str("\\*");
+                    at += 1;
+                    continue;
+                }
+                '+' | '?' | '|' | '(' | ')' | '{' | '}' => out.push('\\'),
+                _ => {}
+            }
+            out.push(character);
+            at += 1;
+        }
+        out
+    }
+
+    pub(super) fn tool_grep(arguments: &[String], input: &[u8], world: &mut World) -> ToolOutcome {
+        let mut invert = false;
+        let mut extended = false;
+        let mut fixed = false;
+        let mut count = false;
+        let mut quiet = false;
+        let mut ignore_case = false;
+        let mut whole_line = false;
+        let mut pattern: Option<String> = None;
+        let mut files: Vec<String> = Vec::new();
+        let mut options_done = false;
+        for argument in &arguments[1..] {
+            if !options_done && argument.starts_with('-') && argument.len() > 1 {
+                if argument == "--" {
+                    options_done = true;
+                    continue;
+                }
+                for flag in argument[1..].chars() {
+                    match flag {
+                        'v' => invert = true,
+                        'E' => extended = true,
+                        'F' => fixed = true,
+                        'c' => count = true,
+                        'q' | 's' => quiet = quiet || flag == 'q',
+                        'i' => ignore_case = true,
+                        'x' => whole_line = true,
+                        _ => {
+                            world.missing_tool = Some(format!("grep -{flag}"));
+                            return ToolOutcome::failed(
+                                2,
+                                format!("grep: unsupported option -{flag}\n"),
+                            );
+                        }
+                    }
+                }
+                continue;
+            }
+            if pattern.is_none() {
+                pattern = Some(argument.clone());
+            } else {
+                files.push(argument.clone());
+            }
+        }
+        let Some(pattern) = pattern else {
+            return ToolOutcome::failed(2, "grep: no pattern\n");
+        };
+        let source = if fixed {
+            regex_escape(&pattern)
+        } else if extended {
+            pattern.clone()
+        } else {
+            basic_to_extended(&pattern)
+        };
+        let source = if whole_line {
+            format!("^({source})$")
+        } else {
+            source
+        };
+        let Ok(regex) = Regex::new(&source, true, ignore_case) else {
+            return ToolOutcome::failed(2, format!("grep: invalid pattern '{pattern}'\n"));
+        };
+        let mut inputs: Vec<(String, Vec<u8>)> = Vec::new();
+        if files.is_empty() {
+            inputs.push(("(standard input)".to_string(), input.to_vec()));
+        } else {
+            for file in &files {
+                match world.read(file) {
+                    Some(bytes) => inputs.push((file.clone(), bytes)),
+                    None => {
+                        return ToolOutcome::failed(
+                            2,
+                            format!("grep: {file}: No such file or directory\n"),
+                        )
+                    }
+                }
+            }
+        }
+        let named = inputs.len() > 1;
+        let mut stdout = Vec::new();
+        let mut selected = 0usize;
+        for (name, bytes) in &inputs {
+            let mut lines: Vec<&[u8]> = bytes.split(|byte| *byte == b'\n').collect();
+            if bytes.ends_with(b"\n") {
+                lines.pop();
+            }
+            let mut matched_here = 0usize;
+            for line in lines {
+                if regex.is_match(line) != invert {
+                    matched_here += 1;
+                    if !count && !quiet {
+                        if named {
+                            stdout.extend_from_slice(name.as_bytes());
+                            stdout.push(b':');
+                        }
+                        stdout.extend_from_slice(line);
+                        stdout.push(b'\n');
+                    }
+                }
+            }
+            if count && !quiet {
+                if named {
+                    stdout.extend_from_slice(name.as_bytes());
+                    stdout.push(b':');
+                }
+                stdout.extend_from_slice(format!("{matched_here}\n").as_bytes());
+            }
+            selected += matched_here;
+        }
+        let mut outcome = ToolOutcome::ok(stdout);
+        if selected == 0 {
+            outcome.status = 1;
+        }
+        outcome
+    }
+
+    #[derive(Clone, Copy, PartialEq, Eq)]
+    enum ExpectedKind {
+        Error,
+        Warning,
+        Remark,
+        Note,
+    }
+
+    impl ExpectedKind {
+        fn label(self) -> &'static str {
+            match self {
+                ExpectedKind::Error => "error",
+                ExpectedKind::Warning => "warning",
+                ExpectedKind::Remark => "remark",
+                ExpectedKind::Note => "note",
+            }
+        }
+
+        fn of(severity: CSeverity) -> Option<ExpectedKind> {
+            match severity {
+                CSeverity::Error | CSeverity::Fatal => Some(ExpectedKind::Error),
+                CSeverity::Warning => Some(ExpectedKind::Warning),
+                CSeverity::Remark => Some(ExpectedKind::Remark),
+                CSeverity::Note => Some(ExpectedKind::Note),
+                CSeverity::Ignored => None,
+            }
+        }
+    }
+
+    #[derive(Clone)]
+    struct ExpectedPlace {
+        buffer: Option<u32>,
+        file: Option<String>,
+        line: u32,
+    }
+
+    struct Expected {
+        kind: ExpectedKind,
+        text: String,
+        regex: Option<Regex>,
+        minimum: usize,
+        maximum: usize,
+        place: Option<ExpectedPlace>,
+        any_line: bool,
+        any_file: bool,
+        directive_name: String,
+        directive_line: u32,
+        marker: Option<String>,
+    }
+
+    impl Expected {
+        fn matches(&self, text: &str) -> bool {
+            match &self.regex {
+                Some(regex) => regex.is_match(text.as_bytes()),
+                None => text.contains(&self.text),
+            }
+        }
+    }
+
+    #[derive(PartialEq, Eq)]
+    enum VerifyStatus {
+        Nothing,
+        Other,
+        NoDiagnostics,
+    }
+
+    struct Helper<'a> {
+        text: &'a [u8],
+        cursor: usize,
+        found: usize,
+        found_end: usize,
+    }
+
+    fn is_letter(byte: u8) -> bool {
+        byte.is_ascii_alphabetic()
+    }
+
+    fn is_word(byte: u8) -> bool {
+        byte.is_ascii_alphanumeric() || byte == b'-' || byte == b'_'
+    }
+
+    fn is_space(byte: u8) -> bool {
+        matches!(byte, b' ' | b'\t' | b'\n' | b'\r' | b'\x0b' | b'\x0c')
+    }
+
+    impl<'a> Helper<'a> {
+        fn new(text: &'a [u8]) -> Helper<'a> {
+            Helper {
+                text,
+                cursor: 0,
+                found: 0,
+                found_end: 0,
+            }
+        }
+
+        fn done(&self) -> bool {
+            self.cursor >= self.text.len()
+        }
+
+        fn next(&mut self, wanted: &str) -> bool {
+            self.found = self.cursor;
+            self.found_end = self.cursor + wanted.len();
+            self.found_end <= self.text.len()
+                && &self.text[self.cursor..self.found_end] == wanted.as_bytes()
+        }
+
+        fn next_number(&mut self) -> Option<usize> {
+            self.found = self.cursor;
+            let mut end = self.cursor;
+            let mut value = 0usize;
+            while end < self.text.len() && self.text[end].is_ascii_digit() {
+                value = value
+                    .saturating_mul(10)
+                    .saturating_add(usize::from(self.text[end] - b'0'));
+                end += 1;
+            }
+            self.found_end = end;
+            if end == self.cursor {
+                None
+            } else {
+                Some(value)
+            }
+        }
+
+        fn next_marker(&mut self) -> bool {
+            self.found = self.cursor;
+            if self.cursor >= self.text.len() || self.text[self.cursor] != b'#' {
+                return false;
+            }
+            let mut end = self.cursor + 1;
+            while end < self.text.len() && is_word(self.text[end]) {
+                end += 1;
+            }
+            self.found_end = end;
+            end > self.cursor + 1
+        }
+
+        fn search(&mut self, wanted: &str, start_of_word: bool, finish_token: bool) -> bool {
+            loop {
+                if wanted.is_empty() {
+                    let mut at = self.cursor;
+                    while at < self.text.len() && !is_letter(self.text[at]) {
+                        at += 1;
+                    }
+                    self.found = at;
+                    self.found_end = at + 1;
+                } else {
+                    let needle = wanted.as_bytes();
+                    let position = self.text[self.cursor.min(self.text.len())..]
+                        .windows(needle.len())
+                        .position(|window| window == needle);
+                    match position {
+                        Some(offset) => {
+                            self.found = self.cursor + offset;
+                            self.found_end = self.found + needle.len();
+                        }
+                        None => {
+                            self.found = self.text.len();
+                            self.found_end = self.text.len();
+                        }
+                    }
+                }
+                if self.found >= self.text.len() {
+                    return false;
+                }
+                let at = self.found;
+                let word_start = at == 0
+                    || is_space(self.text[at - 1])
+                    || (at > 1
+                        && (self.text[at - 1] == b'/' || self.text[at - 1] == b'*')
+                        && self.text[at - 2] == b'/');
+                if start_of_word && !word_start {
+                    if !self.advance() {
+                        return false;
+                    }
+                    continue;
+                }
+                if finish_token {
+                    while self.found_end < self.text.len() && is_word(self.text[self.found_end]) {
+                        self.found_end += 1;
+                    }
+                    while self.found_end > self.found + 1
+                        && (self.text[self.found_end - 1].is_ascii_digit()
+                            || self.text[self.found_end - 1] == b'-')
+                    {
+                        self.found_end -= 1;
+                    }
+                }
+                return true;
+            }
+        }
+
+        fn search_closing(&mut self, open: &[u8], close: &[u8]) -> bool {
+            let mut depth = 1usize;
+            let mut at = self.cursor;
+            while at < self.text.len() {
+                let rest = &self.text[at..];
+                if rest.starts_with(open) {
+                    depth += 1;
+                    at += open.len();
+                } else if rest.starts_with(close) {
+                    depth -= 1;
+                    if depth == 0 {
+                        self.found = at;
+                        self.found_end = at + close.len();
+                        return true;
+                    }
+                    at += close.len();
+                } else {
+                    at += 1;
+                }
+            }
+            false
+        }
+
+        fn matched(&self) -> String {
+            String::from_utf8_lossy(&self.text[self.found..self.found_end.min(self.text.len())])
+                .into_owned()
+        }
+
+        fn skip_whitespace(&mut self) {
+            while self.cursor < self.text.len() && is_space(self.text[self.cursor]) {
+                self.cursor += 1;
+            }
+        }
+
+        fn advance(&mut self) -> bool {
+            self.cursor = self.found_end;
+            self.cursor < self.text.len()
+        }
+    }
+
+    fn fold_escaped_newlines(text: &[u8]) -> Vec<u8> {
+        let mut out = Vec::with_capacity(text.len());
+        let mut at = 0usize;
+        while at < text.len() {
+            if text[at] != b'\\' {
+                out.push(text[at]);
+                at += 1;
+                continue;
+            }
+            at += 1;
+            if at < text.len() && (text[at] == b'\n' || text[at] == b'\r') {
+                at += 1;
+                if at < text.len()
+                    && (text[at] == b'\n' || text[at] == b'\r')
+                    && text[at] != text[at - 1]
+                {
+                    at += 1;
+                }
+            } else {
+                out.push(b'\\');
+            }
+        }
+        out
+    }
+
+    struct Verifier<'o> {
+        sources: &'o SourceMap,
+        main_buffer: Option<u32>,
+        prefixes: Vec<String>,
+        status: VerifyStatus,
+        expected: Vec<Expected>,
+        markers: BTreeMap<String, Vec<Place>>,
+        problems: Vec<String>,
+    }
+
+    impl Verifier<'_> {
+        fn location(&self, place: Place) -> (String, u32) {
+            let presumed = self.sources.presumed(place);
+            (presumed.name.to_string(), presumed.line)
+        }
+
+        fn problem(&mut self, place: Place, message: String) {
+            let (name, line) = self.location(place);
+            self.problems
+                .push(format!("{name}:{line}: error: {message}"));
+        }
+
+        fn buffer_name(&self, buffer: u32) -> String {
+            self.sources.buffer(buffer).name.to_string()
+        }
+
+        fn line_place(&self, buffer: u32, physical_line: u32) -> ExpectedPlace {
+            ExpectedPlace {
+                buffer: Some(buffer),
+                file: Some(self.buffer_name(buffer)),
+                line: self.sources.presumed_line_of(buffer, physical_line),
+            }
+        }
+
+        fn find_buffer(&self, name: &str, from: Place) -> Option<u32> {
+            let directory = {
+                let current = self.buffer_name(from.buffer);
+                current
+                    .rsplit_once('/')
+                    .map(|(folder, _)| folder.to_string())
+                    .unwrap_or_default()
+            };
+            let candidates = [
+                name.to_string(),
+                if directory.is_empty() {
+                    name.to_string()
+                } else {
+                    format!("{directory}/{name}")
+                },
+            ];
+            for (index, buffer) in self.sources.buffers.iter().enumerate() {
+                if buffer.kind != BufferKind::File {
+                    continue;
+                }
+                let buffer_name = buffer.name.to_string();
+                if candidates.iter().any(|candidate| {
+                    *candidate == buffer_name
+                        || buffer_name.ends_with(&format!("/{name}"))
+                        || super::reference::normalize_path(candidate)
+                            == super::reference::normalize_path(&buffer_name)
+                }) {
+                    return Some(index as u32);
+                }
+            }
+            None
+        }
+
+        fn parse_markers(&mut self, text: &[u8], place: Place) {
+            let mut helper = Helper::new(text);
+            while !helper.done() {
+                if !helper.search("#", true, false) {
+                    break;
+                }
+                helper.cursor = helper.found;
+                if !helper.next_marker() {
+                    helper.next("#");
+                    helper.advance();
+                    continue;
+                }
+                helper.advance();
+                let name = helper.matched();
+                self.markers.entry(name).or_default().push(place);
+            }
+        }
+
+        fn parse(&mut self, text: &[u8], place: Place) {
+            self.parse_markers(text, place);
+            let mut helper = Helper::new(text);
+            while !helper.done() {
+                let single = if self.prefixes.len() == 1 {
+                    self.prefixes[0].clone()
+                } else {
+                    String::new()
+                };
+                if !helper.search(&single, true, true) {
+                    break;
+                }
+                let mut token = helper.matched();
+                helper.advance();
+                let mut regex_kind = false;
+                if let Some(stripped) = token.strip_suffix("-re") {
+                    token = stripped.to_string();
+                    regex_kind = true;
+                }
+                let kind_text = if regex_kind { "regex" } else { "string" };
+                let mut no_diagnostics = false;
+                let kind = if let Some(rest) = token.strip_suffix("-error") {
+                    token = rest.to_string();
+                    Some(ExpectedKind::Error)
+                } else if let Some(rest) = token.strip_suffix("-warning") {
+                    token = rest.to_string();
+                    Some(ExpectedKind::Warning)
+                } else if let Some(rest) = token.strip_suffix("-remark") {
+                    token = rest.to_string();
+                    Some(ExpectedKind::Remark)
+                } else if let Some(rest) = token.strip_suffix("-note") {
+                    token = rest.to_string();
+                    Some(ExpectedKind::Note)
+                } else if let Some(rest) = token.strip_suffix("-no-diagnostics") {
+                    if regex_kind {
+                        continue;
+                    }
+                    token = rest.to_string();
+                    no_diagnostics = true;
+                    None
+                } else {
+                    continue;
+                };
+                if self.prefixes.binary_search(&token).is_err() {
+                    continue;
+                }
+                if no_diagnostics {
+                    match self.status {
+                        VerifyStatus::Other => self.problem(
+                            place,
+                            format!("'{token}-no-diagnostics' directive cannot follow other expected directives"),
+                        ),
+                        VerifyStatus::NoDiagnostics => {}
+                        VerifyStatus::Nothing => self.status = VerifyStatus::NoDiagnostics,
+                    }
+                    continue;
+                }
+                if self.status == VerifyStatus::NoDiagnostics {
+                    let kind_word = if regex_kind { "regex" } else { "string" };
+                    self.problem(
+                        place,
+                        format!("expected directive ({kind_word}) cannot follow '{token}-no-diagnostics' directive"),
+                    );
+                    continue;
+                }
+                self.status = VerifyStatus::Other;
+                let Some(kind) = kind else {
+                    continue;
+                };
+                let mut expected_place: Option<ExpectedPlace> = None;
+                let mut marker: Option<String> = None;
+                let mut any_line = false;
+                let mut any_file = false;
+                if !helper.next("@") {
+                    expected_place = Some(
+                        self.line_place(
+                            place.buffer,
+                            self.sources
+                                .buffer(place.buffer)
+                                .physical_line(place.offset),
+                        ),
+                    );
+                } else {
+                    helper.advance();
+                    let plus = helper.next("+");
+                    if plus || helper.next("-") {
+                        helper.advance();
+                        let current = self
+                            .sources
+                            .buffer(place.buffer)
+                            .physical_line(place.offset);
+                        if let Some(count) = helper.next_number() {
+                            let count = count as u32;
+                            if plus || count < current {
+                                let line = if plus {
+                                    current + count
+                                } else {
+                                    current - count
+                                };
+                                expected_place = Some(self.line_place(place.buffer, line));
+                            }
+                        }
+                    } else if let Some(line) = helper.next_number() {
+                        if line > 0 {
+                            expected_place = Some(self.line_place(place.buffer, line as u32));
+                        }
+                    } else if helper.next_marker() {
+                        marker = Some(helper.matched());
+                    } else if helper.search(":", false, false) {
+                        let file =
+                            String::from_utf8_lossy(&helper.text[helper.cursor..helper.found])
+                                .into_owned();
+                        helper.advance();
+                        if file == "*" {
+                            any_file = true;
+                            if !helper.next("*") {
+                                self.problem(
+                                    place,
+                                    "missing or invalid line number following '@' in expected '*'"
+                                        .to_string(),
+                                );
+                                continue;
+                            }
+                            any_line = true;
+                        } else {
+                            let Some(buffer) = self.find_buffer(&file, place) else {
+                                self.problem(
+                                    place,
+                                    format!("file '{file}' could not be located in expected {kind_text}"),
+                                );
+                                continue;
+                            };
+                            if let Some(line) = helper.next_number().filter(|line| *line > 0) {
+                                expected_place = Some(self.line_place(buffer, line as u32));
+                            } else if helper.next("*") {
+                                any_line = true;
+                                expected_place = Some(self.line_place(buffer, 1));
+                            }
+                        }
+                    } else if helper.next("*") {
+                        any_line = true;
+                    }
+                    if expected_place.is_none() && !any_line && marker.is_none() {
+                        self.problem(
+                            place,
+                            format!("missing or invalid line number following '@' in expected {kind_text}"),
+                        );
+                        continue;
+                    }
+                    helper.advance();
+                }
+                helper.skip_whitespace();
+                let mut minimum = 1usize;
+                let mut maximum = 1usize;
+                if let Some(count) = helper.next_number() {
+                    minimum = count;
+                    helper.advance();
+                    if helper.next("+") {
+                        maximum = usize::MAX;
+                        helper.advance();
+                    } else if helper.next("-") {
+                        helper.advance();
+                        match helper.next_number() {
+                            Some(upper) if upper >= minimum => {
+                                maximum = upper;
+                                helper.advance();
+                            }
+                            _ => {
+                                self.problem(
+                                    place,
+                                    format!("invalid range following '-' in expected {kind_text}"),
+                                );
+                                continue;
+                            }
+                        }
+                    } else {
+                        maximum = minimum;
+                    }
+                } else if helper.next("+") {
+                    maximum = usize::MAX;
+                    helper.advance();
+                }
+                helper.skip_whitespace();
+                if !helper.next("{{") {
+                    self.problem(
+                        place,
+                        format!("cannot find start ('{{{{') of expected {kind_text}"),
+                    );
+                    continue;
+                }
+                let delimiter_begin = helper.cursor;
+                let mut close = b"}}".to_vec();
+                helper.advance();
+                while !regex_kind && helper.next("{") {
+                    close.push(b'}');
+                    helper.advance();
+                }
+                let content_begin = helper.cursor;
+                let open = helper.text[delimiter_begin..content_begin].to_vec();
+                if !helper.search_closing(&open, &close) {
+                    self.problem(
+                        place,
+                        format!(
+                            "cannot find end ('{}') of expected {kind_text}",
+                            String::from_utf8_lossy(&close)
+                        ),
+                    );
+                    continue;
+                }
+                let content_end = helper.found;
+                helper.advance();
+                let content =
+                    String::from_utf8_lossy(&helper.text[content_begin..content_end]).into_owned();
+                let mut text = String::new();
+                let mut position = 0usize;
+                while let Some(found) = content[position..].find("\\n") {
+                    text.push_str(&content[position..position + found]);
+                    text.push('\n');
+                    position += found + 2;
+                }
+                if text.is_empty() {
+                    text = content.clone();
+                }
+                let regex = if regex_kind {
+                    if !text.contains("{{") {
+                        self.problem(
+                            place,
+                            format!("cannot find start of regex ('{{{{') in {text}"),
+                        );
+                        return;
+                    }
+                    let mut pattern = String::new();
+                    let mut rest = text.as_str();
+                    while !rest.is_empty() {
+                        if let Some(after) = rest.strip_prefix("{{") {
+                            let length = after.find("}}").unwrap_or(after.len());
+                            pattern.push('(');
+                            pattern.push_str(&after[..length]);
+                            pattern.push(')');
+                            rest = &after[(length + 2).min(after.len())..];
+                        } else {
+                            let length = rest.find("{{").unwrap_or(rest.len());
+                            pattern.push_str(&regex_escape(&rest[..length]));
+                            rest = &rest[length..];
+                        }
+                    }
+                    match Regex::new(&pattern, false, false) {
+                        Ok(regex) => Some(regex),
+                        Err(problem) => {
+                            self.problem(
+                                place,
+                                format!("invalid expression in directive: {problem}"),
+                            );
+                            continue;
+                        }
+                    }
+                } else {
+                    None
+                };
+                let (directive_name, directive_line) = self.location(place);
+                self.expected.push(Expected {
+                    kind,
+                    text,
+                    regex,
+                    minimum,
+                    maximum,
+                    place: expected_place,
+                    any_line,
+                    any_file,
+                    directive_name,
+                    directive_line,
+                    marker,
+                });
+            }
+        }
+
+        fn resolve_markers(&mut self) {
+            let mut used = std::collections::BTreeSet::new();
+            for expected in &self.expected {
+                if let Some(marker) = &expected.marker {
+                    used.insert(marker.clone());
+                }
+            }
+            let mut problems = Vec::new();
+            for (name, places) in &self.markers {
+                if places.len() > 1 && used.contains(name) {
+                    problems.push((
+                        places[1],
+                        format!("reference to marker '{name}' is ambiguous"),
+                    ));
+                }
+            }
+            for (place, message) in problems {
+                self.problem(place, message);
+            }
+            let mut index = 0usize;
+            while index < self.expected.len() {
+                let Some(marker) = self.expected[index].marker.clone() else {
+                    index += 1;
+                    continue;
+                };
+                match self.markers.get(&marker).map(|places| places[0]) {
+                    Some(place) => {
+                        let line = self
+                            .sources
+                            .buffer(place.buffer)
+                            .physical_line(place.offset);
+                        let resolved = self.line_place(place.buffer, line);
+                        self.expected[index].place = Some(resolved);
+                        index += 1;
+                    }
+                    None => {
+                        let entry = self.expected.remove(index);
+                        self.problems.push(format!(
+                            "{}:{}: error: use of undefined marker '{marker}'",
+                            entry.directive_name, entry.directive_line
+                        ));
+                    }
+                }
+            }
+        }
+
+        fn diagnostic_line(&self, diagnostic: &CDiagnostic) -> u32 {
+            diagnostic
+                .presumed
+                .as_ref()
+                .map(|place| place.line)
+                .unwrap_or(0)
+        }
+
+        fn same_file(&self, expected: &ExpectedPlace, diagnostic: &CDiagnostic) -> bool {
+            let Some(place) = diagnostic.place else {
+                return expected.buffer == self.main_buffer;
+            };
+            if Some(place.buffer) == expected.buffer {
+                return true;
+            }
+            let buffer = self.sources.buffer(place.buffer);
+            if buffer.kind != BufferKind::File {
+                return expected.buffer == self.main_buffer;
+            }
+            expected.file.as_deref() == Some(&*buffer.name)
+        }
+
+        fn check(&mut self, diagnostics: &[CDiagnostic]) {
+            for kind in [
+                ExpectedKind::Error,
+                ExpectedKind::Warning,
+                ExpectedKind::Remark,
+                ExpectedKind::Note,
+            ] {
+                let mut remaining: Vec<&CDiagnostic> = diagnostics
+                    .iter()
+                    .filter(|diagnostic| ExpectedKind::of(diagnostic.severity) == Some(kind))
+                    .collect();
+                let mut missing: Vec<String> = Vec::new();
+                for expected in self
+                    .expected
+                    .iter()
+                    .filter(|expected| expected.kind == kind)
+                {
+                    let mut seen = 0usize;
+                    while seen < expected.maximum {
+                        let found = remaining.iter().position(|diagnostic| {
+                            if !expected.any_line {
+                                let line =
+                                    expected.place.as_ref().map(|place| place.line).unwrap_or(0);
+                                if line != self.diagnostic_line(diagnostic) {
+                                    return false;
+                                }
+                            }
+                            if let Some(place) = &expected.place {
+                                if !expected.any_file && !self.same_file(place, diagnostic) {
+                                    return false;
+                                }
+                            }
+                            expected.matches(&diagnostic.message)
+                        });
+                        match found {
+                            Some(index) => {
+                                remaining.remove(index);
+                                seen += 1;
+                            }
+                            None => {
+                                if seen < expected.minimum {
+                                    let line = match (&expected.place, expected.any_line) {
+                                        (_, true) | (None, _) => "*".to_string(),
+                                        (Some(place), false) => place.line.to_string(),
+                                    };
+                                    let file = expected
+                                        .place
+                                        .as_ref()
+                                        .and_then(|place| place.file.clone())
+                                        .unwrap_or_else(|| "*".to_string());
+                                    missing.push(format!(
+                                        "  File {file} Line {line}: {}",
+                                        expected.text
+                                    ));
+                                }
+                                break;
+                            }
+                        }
+                    }
+                }
+                if !missing.is_empty() {
+                    self.problems.push(format!(
+                        "error: '{}' diagnostics expected but not seen: \n{}",
+                        kind.label(),
+                        missing.join("\n")
+                    ));
+                }
+                if !remaining.is_empty() {
+                    let listed: Vec<String> = remaining
+                        .iter()
+                        .map(|diagnostic| match &diagnostic.presumed {
+                            Some(place) => format!(
+                                "  File {} Line {}: {}",
+                                place.name, place.line, diagnostic.message
+                            ),
+                            None => format!("  (frontend): {}", diagnostic.message),
+                        })
+                        .collect();
+                    self.problems.push(format!(
+                        "error: '{}' diagnostics seen but not expected: \n{}",
+                        kind.label(),
+                        listed.join("\n")
+                    ));
+                }
+            }
+        }
+    }
+
+    fn verify(outcome: &PreprocessOutcome, prefixes: &[String]) -> String {
+        let mut prefixes = prefixes.to_vec();
+        prefixes.sort();
+        prefixes.dedup();
+        let mut verifier = Verifier {
+            sources: &outcome.sources,
+            main_buffer: outcome.main_buffer,
+            prefixes,
+            status: VerifyStatus::Nothing,
+            expected: Vec::new(),
+            markers: BTreeMap::new(),
+            problems: Vec::new(),
+        };
+        for comment in &outcome.comments {
+            let text = fold_escaped_newlines(&comment.text);
+            verifier.parse(&text, comment.place);
+        }
+        verifier.resolve_markers();
+        if verifier.status == VerifyStatus::Nothing {
+            verifier.problems.push(format!(
+                "error: no expected directives found: consider use of '{}-no-diagnostics'",
+                verifier
+                    .prefixes
+                    .first()
+                    .map(String::as_str)
+                    .unwrap_or("expected")
+            ));
+        }
+        verifier.check(&outcome.diagnostics);
+        let mut text = String::new();
+        for problem in &verifier.problems {
+            text.push_str(problem);
+            text.push('\n');
+        }
+        if !verifier.problems.is_empty() {
+            text.push_str(&summary(0, verifier.problems.len()));
+        }
+        text
+    }
+
+    fn preprocess(arguments: &[&str], files: &[(&str, &str)]) -> (String, String, i32) {
+        let mut store = BTreeMap::new();
+        for (name, text) in files {
+            store.insert(name.to_string(), text.as_bytes().to_vec());
+        }
+        let owned: Vec<String> = arguments
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect();
+        let invocation = parse_compiler_arguments(&owned);
+        let main = invocation.inputs[0].clone();
+        let bytes = store.get(&main).cloned().expect("the main file exists");
+        let memory = MemoryFiles { files: store };
+        let outcome = Preprocessor::new(&memory, invocation.preprocessor.clone()).run(&main, bytes);
+        let mut stderr = String::new();
+        for diagnostic in &outcome.diagnostics {
+            stderr.push_str(&render_diagnostic(diagnostic, &outcome.sources, false));
+        }
+        let status = i32::from(outcome.errors > 0);
+        (
+            String::from_utf8_lossy(&outcome.output).into_owned(),
+            stderr,
+            status,
+        )
+    }
+
+    fn body(output: &str) -> String {
+        output
+            .lines()
+            .filter(|line| !line.starts_with("# ") && !line.trim().is_empty())
+            .collect::<Vec<_>>()
+            .join("\n")
+    }
+
+    #[test]
+    fn object_like_and_function_like_macros_expand_like_the_standard_examples() {
+        let source = "#define x 3\n#define f(a) f(x * (a))\n#undef x\n#define x 2\n#define g f\n#define z z[0]\n#define h g(~\n#define m(a) a(w)\n#define w 0,1\n#define t(a) a\n#define p() int\n#define q(x) x\n#define r(x,y) x ## y\n#define str(x) # x\nf(y+1) + f(f(z)) % t(t(g)(0) + t)(1);\ng(x+(3,4)-w) | h 5) & m\n(f)^m(m);\np() i[q()] = { q(1), r(2,3), r(4,), r(,5), r(,) };\nchar c[2][6] = { str(hello), str() };\n";
+        let (output, stderr, status) = preprocess(&["-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(
+            body(&output),
+            "f(2 * (y+1)) + f(2 * (f(2 * (z[0])))) % f(2 * (0)) + t(1);\nf(2 * (2 +(3,4)-0,1)) | f(2 * (~ 5)) & f(2 * (0,1))^m(0,1);\nint i[] = { 1, 23, 4, 5, };\nchar c[2][6] = { \"hello\", \"\" };"
+        );
+    }
+
+    #[test]
+    fn stringizing_and_pasting_follow_the_standard_example() {
+        let source = "#define str(s) # s\n#define xstr(s) str(s)\n#define debug(s, t) printf(\"x\" # s \"= %d, x\" # t \"= %s\", \\\n x ## s, x ## t)\n#define INCFILE(n) vers ## n\n#define glue(a, b) a ## b\n#define xglue(a, b) glue(a, b)\n#define HIGHLOW \"hello\"\n#define LOW LOW \", world\"\ndebug(1, 2);\nfputs(str(strncmp(\"abc\\0d\", \"abc\", '\\4') // this goes away\n == 0) str(: @\\n), s);\nxstr(INCFILE(2).h)\nglue(HIGH, LOW);\nxglue(HIGH, LOW)\n";
+        let (output, stderr, status) = preprocess(&["-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(
+            body(&output),
+            "printf(\"x\" \"1\" \"= %d, x\" \"2\" \"= %s\", x1, x2);\nfputs(\"strncmp(\\\"abc\\\\0d\\\", \\\"abc\\\", '\\\\4') == 0\" \": @\\n\", s);\n\"vers2.h\"\n\"hello\";\n\"hello\" \", world\""
+        );
+    }
+
+    #[test]
+    fn variadic_macros_and_va_opt_expand() {
+        let source = "#define F(...) f(0 __VA_OPT__(,) __VA_ARGS__)\n#define G(X, ...) f(0, X __VA_OPT__(,) __VA_ARGS__)\n#define EMP\nF(a,b,c)\nF()\nF(EMP)\nG(a,b,c)\nG(a,)\nG(a)\n";
+        let (output, stderr, status) =
+            preprocess(&["-E", "-std=c23", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(
+            body(&output),
+            "f(0 , a,b,c)\nf(0 )\nf(0 )\nf(0, a , b,c)\nf(0, a )\nf(0, a )"
+        );
+    }
+
+    #[test]
+    fn conditional_expressions_follow_integer_promotion_rules() {
+        let source = "#if -1 > 0u\nunsigned_wins\n#endif\n#if (2 || 1/0) && defined(__STDC__)\nshort_circuit\n#endif\n#if 0x7fffffffffffffff + 0 > 0\nwide\n#endif\n#if 'a' == 97 && '\\377' < 0\nsigned_char\n#endif\n";
+        let (output, stderr, status) = preprocess(&["-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(
+            body(&output),
+            "unsigned_wins\nshort_circuit\nwide\nsigned_char"
+        );
+    }
+
+    #[test]
+    fn includes_write_line_markers_with_flags() {
+        let (output, stderr, status) = preprocess(
+            &["-E", "main.c"],
+            &[
+                ("main.c", "#include \"header.h\"\nint main_line;\n"),
+                ("header.h", "#pragma once\nint header_line;\n"),
+            ],
+        );
+        assert_eq!(status, 0, "{stderr}");
+        assert!(output.starts_with("# 1 \"main.c\"\n"), "{output}");
+        assert!(output.contains("# 1 \"header.h\" 1\n"), "{output}");
+        assert!(
+            output.contains("int header_line;\n# 2 \"main.c\" 2\nint main_line;"),
+            "{output}"
+        );
+    }
+
+    #[test]
+    fn diagnostics_carry_clang_text_and_option_names() {
+        let (_, stderr, status) = preprocess(
+            &["-E", "-Wundef", "main.c"],
+            &[(
+                "main.c",
+                "#if MISSING\n#endif\n#define A 1\n#define A 2\n#error stop here\n#warning careful\n",
+            )],
+        );
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains(
+                "main.c:1:5: warning: 'MISSING' is not defined, evaluates to 0 [-Wundef]"
+            ),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("main.c:4:9: warning: 'A' macro redefined [-Wmacro-redefined]"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains("main.c:3:9: note: previous definition is here"),
+            "{stderr}"
+        );
+        assert!(stderr.contains("main.c:5:2: error: stop here"), "{stderr}");
+        assert!(
+            stderr.contains("main.c:6:2: warning: careful [-W#warnings]"),
+            "{stderr}"
+        );
+    }
+
+    #[test]
+    fn embed_writes_the_bytes_and_has_embed_reports_their_presence() {
+        let source = "#if __has_embed(\"data.bin\") == __STDC_EMBED_FOUND__ && __has_embed(\"data.bin\" limit(0)) == 2 && !__has_embed(\"missing.bin\")\nint ok;\n#endif\nchar a[] = {\n#embed \"data.bin\" limit(2) prefix(9,) suffix(,8)\n};\nchar b[] = {\n#embed \"empty.bin\" if_empty(7)\n};\n";
+        let (output, stderr, status) = preprocess(
+            &["-E", "-std=c23", "main.c"],
+            &[("main.c", source), ("data.bin", "ABC"), ("empty.bin", "")],
+        );
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(
+            body(&output),
+            "int ok;\nchar a[] = {9,65, 66 ,8};\nchar b[] = {7};"
+        );
+    }
+
+    #[test]
+    fn attribute_checks_follow_the_attribute_table_and_the_target() {
+        let source = "#if __has_attribute(interrupt)\nint interrupt;\n#endif\n#if __has_c_attribute(nodiscard) == 202003L && __has_c_attribute(clang::likely) && __has_attribute(__always_inline__)\nint standard;\n#endif\n";
+        let (arm, stderr, _) = preprocess(
+            &["-E", "-triple", "arm-unknown-linux", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(body(&arm), "int interrupt;\nint standard;", "{stderr}");
+        let (aarch64, _, _) = preprocess(
+            &["-E", "-triple", "aarch64-unknown-linux", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(body(&aarch64), "int standard;");
+    }
+
+    #[test]
+    fn the_grep_tool_reads_basic_regular_expressions() {
+        let tree = Tree::of(&[]).expect("an empty tree");
+        let tools = standard_tools();
+        let mut world = World {
+            tree: &tree,
+            files: BTreeMap::new(),
+            removed: Default::default(),
+            folders: Default::default(),
+            directory: "/work".to_string(),
+            environment: BTreeMap::new(),
+            tools: &tools,
+            missing_tool: None,
+            errors_before_output: false,
+        };
+        let input = b"foo{a, b}\nb: 2*9*g\nplain\n";
+        let run = |arguments: &[&str], world: &mut World| {
+            let owned: Vec<String> = arguments.iter().map(|item| item.to_string()).collect();
+            tool_grep(&owned, input, world)
+        };
+        let found = run(&["grep", "foo{a, b}"], &mut world);
+        assert_eq!(found.status, 0);
+        assert_eq!(found.stdout, b"foo{a, b}\n");
+        let starred = run(&["grep", "b: 2\\*9\\*g"], &mut world);
+        assert_eq!(starred.stdout, b"b: 2*9*g\n");
+        let inverted = run(&["grep", "-v", "-c", "plain"], &mut world);
+        assert_eq!(inverted.stdout, b"2\n");
+        assert_eq!(run(&["grep", "missing"], &mut world).status, 1);
+    }
+
+    #[test]
+    fn braced_initializers_in_macro_arguments_are_regrouped() {
+        let source = "#define F(x) [x]\nF(0 {, })\n";
+        let (output, stderr, status) = preprocess(&["-E", "main.c"], &[("main.c", source)]);
+        assert_eq!(status, 1);
+        assert!(
+            stderr.contains("too many arguments provided to function-like macro invocation"),
+            "{stderr}"
+        );
+        assert!(
+            stderr.contains(
+                "parentheses are required around macro argument containing braced initializer list"
+            ),
+            "{stderr}"
+        );
+        assert_eq!(body(&output), "[0 {, }]");
+    }
+
+    #[test]
+    fn every_warning_option_named_by_a_message_exists() {
+        for name in [
+            "undef",
+            "macro-redefined",
+            "#warnings",
+            "pedantic",
+            "invalid-source-encoding",
+            "unknown-warning-option",
+            "comment",
+            "trigraphs",
+            "extra-tokens",
+            "unknown-pragmas",
+            "builtin-macro-redefined",
+        ] {
+            assert!(crate::compilers::cpp::warning_group_exists(name), "{name}");
+        }
+    }
+
+    #[test]
+    fn the_verifier_matches_directives_with_relative_lines_and_counts() {
+        let tree = Tree::of(&[]).expect("an empty tree");
+        let tools = standard_tools();
+        let mut world = World {
+            tree: &tree,
+            files: BTreeMap::new(),
+            removed: Default::default(),
+            folders: Default::default(),
+            directory: "/work".to_string(),
+            environment: BTreeMap::new(),
+            tools: &tools,
+            missing_tool: None,
+            errors_before_output: false,
+        };
+        world.write(
+            "/work/main.c",
+            b"// expected-warning@+1 2 {{macro redefined}}\n#define A 1\n#define A 2 // expected-note {{previous definition}}\n#define A 3\n// expected-warning-re@+1 {{o{{n+}}e}}\n#warning one\n"
+                .to_vec(),
+            false,
+        );
+        let arguments: Vec<String> = ["clang-cc1", "-Eonly", "-verify", "main.c"]
+            .iter()
+            .map(|argument| argument.to_string())
+            .collect();
+        let outcome = tool_clang_cc1(&arguments, &[], &mut world);
+        assert_eq!(
+            outcome.status,
+            1,
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+        let stderr = String::from_utf8_lossy(&outcome.stderr).into_owned();
+        assert!(
+            stderr.contains("'warning' diagnostics expected but not seen"),
+            "{stderr}"
+        );
+        world.write(
+            "/work/main.c",
+            b"#define A 1 // expected-note {{previous definition}}\n#define A 2 // expected-warning {{macro redefined}} expected-note {{previous definition}}\n#define A 3\n// expected-warning@-1 {{'A' macro redefined}}\n// expected-warning-re@+1 {{o{{n+}}e}}\n#warning one\n"
+                .to_vec(),
+            false,
+        );
+        let outcome = tool_clang_cc1(&arguments, &[], &mut world);
+        assert_eq!(
+            outcome.status,
+            0,
+            "{}",
+            String::from_utf8_lossy(&outcome.stderr)
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_clang_c_preprocessor() {
+        let tree = Tree::of(&[
+            "Test_08_Clang_OpenMP_Sema_LLD",
+            "Beta_02_LLVM_MLIR_Clang_Frontend",
+        ])
+        .expect("the Clang preprocessor tests are present");
+        let root = "llvm-project/clang/test/Preprocessor/";
+        let tests = lit_tests(
+            &tree,
+            root,
+            &[
+                ".c",
+                ".cpp",
+                ".i",
+                ".cppm",
+                ".m",
+                ".mm",
+                ".cu",
+                ".hip",
+                ".hlsl",
+                ".cl",
+                ".s",
+                ".S",
+                ".modulemap",
+                ".test",
+                ".rc",
+            ],
+        );
+        let mut tools = standard_tools();
+        tools.insert("clang-cc1".to_string(), tool_clang_cc1);
+        tools.insert("grep".to_string(), tool_grep);
+        let suite =
+            LitSuite {
+                tree: &tree,
+                features: [
+                    "shell",
+                    "system-linux",
+                    "x86-registered-target",
+                    "aarch64-registered-target",
+                    "arm-registered-target",
+                ]
+                .iter()
+                .map(|feature| feature.to_string())
+                .collect(),
+                substitutions: vec![
+                (
+                    "%clang_cc1".to_string(),
+                    "clang-cc1 -internal-isystem /llvm-project/clang/lib/Headers -nostdsysteminc"
+                        .to_string(),
+                ),
+                (
+                    "%itanium_abi_triple".to_string(),
+                    "x86_64-unknown-linux-gnu".to_string(),
+                ),
+                ("%ms_abi_triple".to_string(), "x86_64-pc-windows-msvc".to_string()),
+            ],
+                tools,
+            };
+        let outcomes = run_parallel(tests, &|path| suite.run_test(path));
+        let report = SuiteReport {
+            name: "clang-c-preprocessor".to_string(),
+            outcomes,
+        };
+        publish_with_scope(&report);
+    }
+
+    fn predefined(arguments: &[&str]) -> String {
+        let mut owned = vec!["-E", "-dM"];
+        owned.extend_from_slice(arguments);
+        owned.push("empty.c");
+        let (output, stderr, status) = preprocess(&owned, &[("empty.c", "")]);
+        assert_eq!(status, 0, "{stderr}");
+        output
+    }
+
+    fn has_line(output: &str, line: &str) -> bool {
+        output.lines().any(|candidate| candidate == line)
+    }
+
+    #[test]
+    fn android_aarch64_predefines_follow_the_linux_and_aarch64_targets() {
+        let output = predefined(&["-triple", "aarch64-linux-android24"]);
+        for line in [
+            "#define __ANDROID__ 1",
+            "#define __ANDROID_MIN_SDK_VERSION__ 24",
+            "#define __ANDROID_API__ __ANDROID_MIN_SDK_VERSION__",
+            "#define __AARCH64EL__ 1",
+            "#define __ARM_ARCH 8",
+            "#define __ARM_FP 0xE",
+            "#define __GCC_DESTRUCTIVE_SIZE 256",
+            "#define __GCC_CONSTRUCTIVE_SIZE 64",
+            "#define __WINT_TYPE__ unsigned int",
+            "#define __WCHAR_TYPE__ unsigned int",
+            "#define __SIZEOF_LONG_DOUBLE__ 16",
+            "#define __NO_MATH_ERRNO__ 1",
+            "#define linux 1",
+        ] {
+            assert!(has_line(&output, line), "missing {line}\n{output}");
+        }
+        assert!(!has_line(&output, "#define __ARM_NEON 1"));
+        assert!(!has_line(&output, "#define __gnu_linux__ 1"));
+        let neon = predefined(&[
+            "-triple",
+            "aarch64-linux-android24",
+            "-target-feature",
+            "+v8a",
+        ]);
+        assert!(has_line(&neon, "#define __ARM_NEON 1"));
+        assert!(has_line(&neon, "#define __ARM_NEON_FP 0xE"));
+    }
+
+    #[test]
+    fn x86_processor_selection_drives_feature_macros() {
+        let output = predefined(&["-triple", "i386-pc-linux-gnu", "-target-cpu", "pentium4"]);
+        for line in [
+            "#define __pentium4 1",
+            "#define __pentium4__ 1",
+            "#define __tune_pentium4__ 1",
+            "#define __SSE2__ 1",
+            "#define __MMX__ 1",
+            "#define __LAHF_SAHF__ 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1",
+            "#define __SIZEOF_FLOAT128__ 16",
+            "#define __SIZEOF_LONG_DOUBLE__ 12",
+            "#define __i386__ 1",
+            "#define i386 1",
+        ] {
+            assert!(has_line(&output, line), "missing {line}\n{output}");
+        }
+        let bare = predefined(&["-triple", "i386-none-none"]);
+        assert!(has_line(&bare, "#define __WINT_TYPE__ int"));
+        assert!(!has_line(&bare, "#define __SSE__ 1"));
+        let wide = predefined(&["-triple", "x86_64-linux-gnu", "-target-cpu", "x86-64-v3"]);
+        for line in [
+            "#define __AVX2__ 1",
+            "#define __BMI2__ 1",
+            "#define __XSAVE__ 1",
+            "#define __CRC32__ 1",
+            "#define __POPCNT__ 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16 1",
+            "#define __BITINT_MAXWIDTH__ 8388608",
+        ] {
+            assert!(has_line(&wide, line), "missing {line}\n{wide}");
+        }
+        let reduced = predefined(&["-triple", "x86_64-linux-gnu", "-target-feature", "-sse"]);
+        assert!(!has_line(&reduced, "#define __SSE2__ 1"));
+        assert!(!has_line(&reduced, "#define __MMX__ 1"));
+    }
+
+    #[test]
+    fn floating_point_evaluation_method_follows_the_sse_level() {
+        let source = "__FLT_EVAL_METHOD__\n";
+        for (triple, expected) in [("i386-none-none", "2"), ("x86_64-linux-gnu", "0")] {
+            let (output, stderr, status) =
+                preprocess(&["-E", "-triple", triple, "main.c"], &[("main.c", source)]);
+            assert_eq!(status, 0, "{stderr}");
+            assert_eq!(body(&output), expected);
+        }
+    }
+
+    #[test]
+    fn arm_architecture_and_processor_select_floating_point_macros() {
+        let output = predefined(&["-triple", "armv7a-linux-androideabi24"]);
+        for line in [
+            "#define __ARM_ARCH_7A__ 1",
+            "#define __ARM_ARCH 7",
+            "#define __ARM_ARCH_PROFILE 'A'",
+            "#define __ARM_FEATURE_LDREX 0xf",
+            "#define __ARM_EABI__ 1",
+            "#define __ARM_PCS_VFP 1",
+            "#define __ARM_FEATURE_COPROC 0xf",
+            "#define __ARMEL__ 1",
+            "#define __SIZE_TYPE__ unsigned int",
+        ] {
+            assert!(has_line(&output, line), "missing {line}\n{output}");
+        }
+        assert!(!has_line(&output, "#define __ARM_NEON__ 1"));
+        let processor = predefined(&[
+            "-triple",
+            "armv7-linux-gnueabihf",
+            "-target-cpu",
+            "cortex-a8",
+        ]);
+        assert!(has_line(&processor, "#define __ARM_NEON__ 1"));
+        assert!(has_line(&processor, "#define __ARM_FP 0xc"));
+        assert!(has_line(&processor, "#define __ARM_VFPV3__ 1"));
+        let thumb = predefined(&["-triple", "thumbv7m-none-eabi"]);
+        for line in [
+            "#define __thumb__ 1",
+            "#define __thumb2__ 1",
+            "#define __ARM_ARCH_7M__ 1",
+            "#define __ARM_ARCH_PROFILE 'M'",
+        ] {
+            assert!(has_line(&thumb, line), "missing {line}\n{thumb}");
+        }
+        assert!(!has_line(&thumb, "#define __ARM_ARCH_ISA_ARM 1"));
+        assert!(!has_line(&thumb, "#define __ARM_FEATURE_IDIV 1"));
+    }
+
+    #[test]
+    fn time64_environments_request_wide_time_types() {
+        let wide = predefined(&["-triple", "i686-pc-linux-gnut64"]);
+        assert!(has_line(&wide, "#define _FILE_OFFSET_BITS 64"));
+        assert!(has_line(&wide, "#define _TIME_BITS 64"));
+        let narrow = predefined(&["-triple", "i686-pc-linux-gnu"]);
+        assert!(!has_line(&narrow, "#define _TIME_BITS 64"));
+    }
+
+    #[test]
+    fn unsupported_targets_are_reported_instead_of_guessed() {
+        for arguments in [
+            vec!["-triple", "x86_64-apple-darwin"],
+            vec!["-triple", "powerpc64-linux-gnu"],
+            vec!["-triple", "x86_64-pc-windows-msvc"],
+            vec!["-triple", "x86_64-linux-gnu", "-target-cpu", "imaginary"],
+            vec![
+                "-triple",
+                "armv7-linux-gnueabihf",
+                "-target-cpu",
+                "imaginary",
+            ],
+        ] {
+            let owned: Vec<String> = arguments.iter().map(|item| item.to_string()).collect();
+            let invocation = parse_compiler_arguments(&owned);
+            assert!(invocation.target_problem.is_some(), "{arguments:?}");
+        }
+        let owned: Vec<String> = ["-triple", "aarch64-linux-android21"]
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+        assert!(parse_compiler_arguments(&owned).target_problem.is_none());
+    }
+
+    #[test]
+    fn target_queries_compare_triple_components() {
+        let source = "#if __is_target_arch(arm) && __is_target_arch(thumb) && !__is_target_arch(aarch64)\nthumb\n#endif\n#if __is_target_os(linux) && __is_target_environment(gnueabihf) && __is_target_vendor(unknown)\nsystem\n#endif\n#if __has_builtin(__builtin_cpu_supports) || __has_builtin(__builtin_cpu_is)\ncpu\n#endif\n";
+        let (output, stderr, status) = preprocess(
+            &["-E", "-triple", "thumbv7-linux-gnueabihf", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(body(&output), "thumb\nsystem");
+    }
+
+    #[test]
+    fn language_options_shape_the_predefined_macros() {
+        let assembler = parse_compiler_arguments(&[
+            "-E".to_string(),
+            "-x".to_string(),
+            "assembler-with-cpp".to_string(),
+        ]);
+        assert!(assembler.preprocessor.language.assembly);
+        let fast = predefined(&[
+            "-ffast-math",
+            "-fmath-errno",
+            "-fexceptions",
+            "-fwchar-type=short",
+            "-fno-signed-wchar",
+        ]);
+        for line in [
+            "#define __FAST_MATH__ 1",
+            "#define __FINITE_MATH_ONLY__ 1",
+            "#define __EXCEPTIONS 1",
+            "#define __WCHAR_TYPE__ unsigned short",
+            "#define __SIZEOF_WCHAR_T__ 2",
+        ] {
+            assert!(has_line(&fast, line), "missing {line}\n{fast}");
+        }
+        assert!(!has_line(&fast, "#define __NO_MATH_ERRNO__ 1"));
+        let old = predefined(&["-std=gnu89", "-fgnuc-version=4.2.1"]);
+        assert!(has_line(&old, "#define __GNUC_GNU_INLINE__ 1"));
+        let modern = predefined(&["-std=gnu17", "-fgnuc-version=4.2.1"]);
+        assert!(has_line(&modern, "#define __GNUC_STDC_INLINE__ 1"));
+    }
+}
