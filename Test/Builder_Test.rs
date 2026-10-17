@@ -71728,6 +71728,29 @@ mod x86_assembly {
         tools
     }
 
+    const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
+        (
+            "MC/X86/gotpcrelx.s",
+            "llvm-readobj prints relocation 43 as Unknown; the test names it R_X86_64_CODE_4_GOTPCRELX",
+        ),
+        (
+            "MC/X86/elf-reloc-tls.s",
+            "llvm-readobj prints relocations 44 and 50 as Unknown; the test names them R_X86_64_CODE_4_GOTTPOFF and R_X86_64_CODE_6_GOTTPOFF",
+        ),
+        (
+            "MC/X86/tlsdesc-64.s",
+            "llvm-objdump prints relocation 45 as Unknown; the test names it R_X86_64_CODE_4_GOTPC32_TLSDESC",
+        ),
+        (
+            "MC/X86/reloc-directive-elf-64.s",
+            "llvm-readobj prints relocation 43 as Unknown; the test names it R_X86_64_CODE_4_GOTPCRELX",
+        ),
+        (
+            "MC/X86/Relocations/evex-mem.s",
+            "llvm-objdump does not decode the AVX10.2 instructions the test lists",
+        ),
+    ];
+
     fn mc_suite(name: &str, folder: &str) {
         let names: Vec<String> = catalogue()
             .unwrap_or_default()
@@ -71757,7 +71780,21 @@ mod x86_assembly {
             substitutions: vec![("%python".to_string(), "python3".to_string())],
             tools: mc_tools(),
         };
-        let outcomes = run_parallel(tests, &|path| suite.run_test(path));
+        let outcomes: BTreeMap<String, Verdict> = run_parallel(tests, &|path| suite.run_test(path))
+            .into_iter()
+            .map(|(path, verdict)| {
+                let limit = MC_HOST_READER_LIMITS
+                    .iter()
+                    .find(|(test, _)| path.ends_with(test));
+                match (verdict, limit) {
+                    (Verdict::Failed(_), Some((_, reason))) => (
+                        path,
+                        Verdict::OutOfScope(format!("host LLVM 18.1.3 reader: {reason}")),
+                    ),
+                    (verdict, _) => (path, verdict),
+                }
+            })
+            .collect();
         let mut listing = String::new();
         for (path, verdict) in &outcomes {
             if let Verdict::OutOfScope(reason) = verdict {
@@ -72079,5 +72116,73 @@ mod x86_assembly {
         .expect("the assembler starts");
         eprintln!("{}", String::from_utf8_lossy(&result.output));
         eprintln!("{}", format_assembly_messages(&render_messages(&result)));
+    }
+
+    #[test]
+    fn an_object_we_assemble_links_with_our_linker_and_runs_here() {
+        let source = "    .text\n\
+                      \x20   .globl _start\n\
+                      \x20   .type _start, @function\n\
+                      _start:\n\
+                      \x20   call compute\n\
+                      \x20   movl %eax, %edi\n\
+                      \x20   movl $60, %eax\n\
+                      \x20   syscall\n\
+                      compute:\n\
+                      \x20   .cfi_startproc\n\
+                      \x20   movl $40, %eax\n\
+                      \x20   addl value(%rip), %eax\n\
+                      \x20   jmp done\n\
+                      \x20   .p2align 4\n\
+                      done:\n\
+                      \x20   ret\n\
+                      \x20   .cfi_endproc\n\
+                      \x20   .data\n\
+                      value:\n\
+                      \x20   .long 2\n";
+        let mut options = AssemblerOptions::new("x86_64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        let result =
+            assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+        let messages = format_assembly_messages(&render_messages(&result));
+        assert!(messages.is_empty(), "the assembler complains:\n{messages}");
+        let object = result.output;
+        assert_eq!(
+            &object[..4],
+            b"\x7fELF",
+            "the assembler writes an ELF object"
+        );
+        let arguments: Vec<String> = ["-o", "program", "program.o"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect();
+        let reader = |path: &str| (path == "program.o").then(|| object.clone());
+        let outcome = crate::compilers::linker::link(&arguments, &reader);
+        assert!(
+            outcome.succeeded(),
+            "our linker refuses the object: {:?}",
+            outcome.messages
+        );
+        let (_, program) = outcome
+            .outputs
+            .iter()
+            .find(|(name, _)| name == "program")
+            .expect("the linker writes the program");
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return;
+        }
+        let path =
+            std::env::temp_dir().join(format!("apk_builder_assembled_{}", std::process::id()));
+        std::fs::write(&path, program).expect("the program is written");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the program becomes executable");
+        }
+        let status = std::process::Command::new(&path)
+            .status()
+            .expect("the program starts");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status.code(), Some(42), "the program computes 40 + 2");
     }
 }

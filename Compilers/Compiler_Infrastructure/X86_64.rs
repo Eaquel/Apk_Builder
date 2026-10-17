@@ -9307,7 +9307,7 @@ impl TargetTriple {
         } else {
             Mode::Bits32
         };
-        if environment == "code16" || system == "code16" {
+        if pieces.contains(&"code16") {
             mode = Mode::Bits16;
         }
         let format = if vendor == "apple"
@@ -10521,6 +10521,7 @@ pub trait Streamer {
         None
     }
     fn note_expression_locations(&mut self, _locations: &[(Expression, Option<SourceLocation>)]) {}
+    fn note_statement_start(&mut self, _location: SourceLocation) {}
 }
 
 pub struct AssemblyResult {
@@ -11395,6 +11396,7 @@ impl<'s> Assembler<'s> {
         let identifier_location = identifier_token.location();
         self.statement_start = identifier_location;
         self.expression_locations.clear();
+        self.streamer.note_statement_start(identifier_location);
         let mut local_label: i64 = -1;
         let identifier: String;
         if self.is(TokenKind::HashDirective) {
@@ -24470,7 +24472,12 @@ pub mod decoder {
 pub mod object {
     use super::*;
 
-    const LONG_IMMEDIATE_GROUPS: &[(&[&str], &[(&str, &str)])] = &[
+    type ImmediateGroup = (
+        &'static [&'static str],
+        &'static [(&'static str, &'static str)],
+    );
+
+    const LONG_IMMEDIATE_GROUPS: &[ImmediateGroup] = &[
         (
             &[""],
             &[
@@ -25102,6 +25109,7 @@ pub mod object {
         pub pad_max_prefix_size: u32,
         pub nops: NopCapability,
         pub expression_locations: Vec<(Expression, Option<SourceLocation>)>,
+        pub statement_location: Option<SourceLocation>,
         fragments: Vec<Fragment>,
         sections: BTreeMap<usize, SectionState>,
         section_order: Vec<usize>,
@@ -25285,6 +25293,7 @@ pub mod object {
                 pad_max_prefix_size: options.pad_max_prefix_size.unwrap_or(0),
                 nops: nop_capability(target, &options.cpu, &options.features),
                 expression_locations: Vec::new(),
+                statement_location: None,
                 fragments: Vec::new(),
                 sections: BTreeMap::new(),
                 section_order: Vec::new(),
@@ -25622,7 +25631,7 @@ pub mod object {
             if self.bundle_locked {
                 context.report(
                     MessageKind::Error,
-                    None,
+                    self.statement_location,
                     "unterminated .bundle_lock when changing a section",
                 );
                 self.bundle_locked = false;
@@ -26070,7 +26079,7 @@ pub mod object {
                 {
                     context.report(
                         MessageKind::Error,
-                        None,
+                        self.statement_location,
                         "instruction prefix cannot be the last instruction of a .bundle_lock group",
                     );
                 }
@@ -26275,7 +26284,7 @@ pub mod object {
             let _ = context;
             if nops {
                 let minimum = 1;
-                while size % minimum != 0 {
+                while !size.is_multiple_of(minimum) {
                     size += alignment;
                 }
             }
@@ -27825,7 +27834,7 @@ pub mod object {
             let Some(value) = held.value.clone() else {
                 return Some(symbol);
             };
-            let evaluated = context.evaluate_relocatable(&value, Some(&*self), true)?;
+            let evaluated = context.evaluate_relocatable(&value, Some(self), true)?;
             if let Some(subtract) = evaluated.subtract {
                 let name = context.symbols[subtract].name.clone();
                 context.report(
@@ -27931,10 +27940,10 @@ pub mod object {
                     .relocations
                     .get(section)
                     .is_some_and(|list| !list.is_empty());
-                let signature = context.sections[*section].group.clone().map(|group| {
-                    let symbol = context.symbol(&group);
-                    symbol
-                });
+                let signature = context.sections[*section]
+                    .group
+                    .clone()
+                    .map(|group| context.symbol(&group));
                 let mut group_slot = None;
                 if let Some(symbol) = signature {
                     let slot = match group_index.get(&symbol) {
@@ -28049,12 +28058,7 @@ pub mod object {
                 let alignment = table[*index - 1].alignment;
                 let start = out.align(alignment);
                 let uses_addend = table[*index - 1].section_type == ELF_SECTION_RELOCATION_ADDENDS;
-                let mut entries = self.relocations.get(section).cloned().unwrap_or_default();
-                if !sixty_four {
-                    entries.reverse();
-                    entries.sort_by_key(|entry| std::cmp::Reverse(entry.offset));
-                    entries.reverse();
-                }
+                let entries = self.relocations.get(section).cloned().unwrap_or_default();
                 for entry in entries {
                     let symbol_index = entry
                         .symbol
@@ -29107,6 +29111,7 @@ pub mod object {
             self.emit_value(context, &expression, size, location);
         }
 
+        #[allow(clippy::too_many_arguments)]
         fn emit_frame_description_entry(
             &mut self,
             context: &mut AssemblyContext,
@@ -29216,7 +29221,7 @@ pub mod object {
                     )
                 }
             };
-            frames.sort_by(|left, right| key(left, context).cmp(&key(right, context)));
+            frames.sort_by_key(|frame| key(frame, context));
             let mut last_key = None;
             let mut last_common = None;
             let mut initial_offset = 0i64;
@@ -29247,7 +29252,11 @@ pub mod object {
 
         pub fn finish_object(&mut self, context: &mut AssemblyContext) {
             if self.bundle_locked {
-                context.report(MessageKind::Error, None, "unterminated .bundle_lock");
+                context.report(
+                    MessageKind::Error,
+                    self.statement_location,
+                    "unterminated .bundle_lock",
+                );
             }
             if self.emit_exception_frame {
                 self.emit_frames(context, true);
@@ -29273,6 +29282,10 @@ pub mod object {
             locations: &[(Expression, Option<SourceLocation>)],
         ) {
             self.expression_locations = locations.to_vec();
+        }
+
+        fn note_statement_start(&mut self, location: SourceLocation) {
+            self.statement_location = Some(location);
         }
 
         fn initialize_sections(&mut self, context: &mut AssemblyContext) {
@@ -29760,7 +29773,7 @@ pub mod object {
                 return;
             }
             self.mode = mode;
-            let padding = self.auto_padding() || self.bundle_alignment != 0;
+            let padding = self.auto_padding() || self.pad_for_align || self.bundle_alignment != 0;
             if !padding {
                 self.object_emit_instruction(context, instruction, mode, Some(location));
                 return;
@@ -29971,7 +29984,7 @@ pub mod object {
                 if self.bundle_alignment != alignment {
                     context.report(
                         MessageKind::Error,
-                        None,
+                        self.statement_location,
                         ".bundle_align_mode cannot be changed once set",
                     );
                 }
@@ -29980,7 +29993,7 @@ pub mod object {
             if self.auto_padding() {
                 context.report(
                     MessageKind::Error,
-                    None,
+                    self.statement_location,
                     ".bundle_align_mode is incompatible with branch alignment",
                 );
             }

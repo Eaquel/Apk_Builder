@@ -56,8 +56,9 @@ Bu bileşenlerin doğruluğu, LLVM/LLD/GCC'nin kendi test paketleriyle ölçül�
 - TableGen: `tablegen-lit` 190/456, `tablegen-oracle` 152/459 (kapsam dışılar listeli, 0 hata); dört komut tablosu.
 - Bağlayıcı: `lld-elf` 1375/2056, `lld-coff` 341/565 (0 hata).
 - x86 (Claude-A, sürüyor): kodlayıcı ve AT&T/Intel yazıcı tamam; AT&T ve Intel assembler
-  tamam; karıştırma/FMA/PTERNLOG/FPCLASS yorumları tamam; `mc-x86` 513/642, kapsam içi %100 (129 kapsam dışı:
-  nesne dosyası çıktısı, COFF/Mach-O/LFI). Disassembler (`X86_64.rs` içinde `decoder` modülü: LLVM
+  tamam; karıştırma/FMA/PTERNLOG/FPCLASS yorumları tamam; ELF nesne dosyası çıktısı (`X86_64.rs` içinde
+  `object` modülü) tamam; `mc-x86` 598/642, kapsam içi %100 (44 kapsam dışı: COFF/Mach-O/LFI, birkaç
+  seçenek ve host LLVM 18 okuyucusunun tanımadığı 5 test, gerekçeleri listeli). Disassembler (`X86_64.rs` içinde `decoder` modülü: LLVM
   X86DisassemblerTables/RecognizableInstr tabloları tablolardan üretilir, X86DisassemblerDecoder portu,
   `llvm-mc --disassemble/--hex/--mdis`) tamam; `mc-x86-disassembler` 188/188, kapsam dışı yok;
   kodla→çöz→aynı komut gidiş-dönüş testi var.
@@ -151,9 +152,9 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 ## 9. Güncel durum
 
 - Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
-- Claude-A: x86 assembler ve disassembler tamam, Beta'da (`cd229b1`): `mc-x86` 513/642 (kapsam içi %100,
-  129 kapsam dışı), `mc-x86-disassembler` 188/188. Sıradaki adımlar: assembler'dan ELF nesne dosyası çıktısı ve
-  bizim bağlayıcıyla çalıştırma testi, sonra Omni IR → x86_64 arka ucu, sonra ARMv8.
+- Claude-A: x86 assembler, disassembler ve ELF nesne dosyası çıktısı tamam: `mc-x86` 598/642 (kapsam içi
+  %100, 44 kapsam dışı), `mc-x86-disassembler` 188/188; assembler çıktısı bizim bağlayıcıyla bağlanıp bu
+  makinede çalışıyor. Sıradaki adımlar: Omni IR → x86_64 arka ucu, sonra ARMv8.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
