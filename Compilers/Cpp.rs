@@ -4802,107 +4802,5816 @@ pub enum OutputMode {
     MacrosOnly,
 }
 
-#[derive(Clone, Debug)]
-pub struct TargetInfo {
-    pub triple: String,
-    pub architecture: String,
-    pub vendor: String,
-    pub system: String,
-    pub environment: String,
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum IntegerType {
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
 }
 
-impl TargetInfo {
-    pub fn from_triple(triple: &str) -> TargetInfo {
-        let mut parts = triple.split('-');
-        let architecture = parts.next().unwrap_or("x86_64").to_string();
-        let rest: Vec<&str> = parts.collect();
-        let (vendor, system, environment) = match rest.len() {
-            0 => ("unknown".to_string(), "unknown".to_string(), String::new()),
-            1 => ("unknown".to_string(), rest[0].to_string(), String::new()),
-            2 => (rest[0].to_string(), rest[1].to_string(), String::new()),
-            _ => (
-                rest[0].to_string(),
-                rest[1].to_string(),
-                rest[2..].join("-"),
-            ),
-        };
-        TargetInfo {
-            triple: triple.to_string(),
-            architecture,
-            vendor,
-            system,
-            environment,
+impl IntegerType {
+    pub fn name(self) -> &'static str {
+        match self {
+            IntegerType::SignedChar => "signed char",
+            IntegerType::UnsignedChar => "unsigned char",
+            IntegerType::Short => "short",
+            IntegerType::UnsignedShort => "unsigned short",
+            IntegerType::Int => "int",
+            IntegerType::UnsignedInt => "unsigned int",
+            IntegerType::Long => "long int",
+            IntegerType::UnsignedLong => "long unsigned int",
+            IntegerType::LongLong => "long long int",
+            IntegerType::UnsignedLongLong => "long long unsigned int",
         }
     }
 
-    pub fn pointer_width(&self) -> u32 {
-        match self.architecture.as_str() {
-            "x86_64" | "aarch64" | "arm64" | "riscv64" | "powerpc64" | "powerpc64le" | "mips64"
-            | "mips64el" | "sparcv9" | "s390x" | "loongarch64" | "wasm64" | "amdgcn"
-            | "nvptx64" | "bpfel" | "bpfeb" | "ve" => {
-                if self.environment == "gnux32" {
-                    32
+    pub fn signed(self) -> bool {
+        matches!(
+            self,
+            IntegerType::SignedChar
+                | IntegerType::Short
+                | IntegerType::Int
+                | IntegerType::Long
+                | IntegerType::LongLong
+        )
+    }
+
+    pub fn format_modifier(self) -> &'static str {
+        match self {
+            IntegerType::SignedChar | IntegerType::UnsignedChar => "hh",
+            IntegerType::Short | IntegerType::UnsignedShort => "h",
+            IntegerType::Int | IntegerType::UnsignedInt => "",
+            IntegerType::Long | IntegerType::UnsignedLong => "l",
+            IntegerType::LongLong | IntegerType::UnsignedLongLong => "ll",
+        }
+    }
+
+    pub fn unsigned_counterpart(self) -> IntegerType {
+        match self {
+            IntegerType::SignedChar => IntegerType::UnsignedChar,
+            IntegerType::Short => IntegerType::UnsignedShort,
+            IntegerType::Int => IntegerType::UnsignedInt,
+            IntegerType::Long => IntegerType::UnsignedLong,
+            IntegerType::LongLong => IntegerType::UnsignedLongLong,
+            other => other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum FloatFormat {
+    Half,
+    Single,
+    Double,
+    ExtendedPrecision,
+    DoubleDouble,
+    Quadruple,
+}
+
+impl FloatFormat {
+    fn pick<T>(self, values: [T; 6]) -> T {
+        let [half, single, double, extended, double_double, quadruple] = values;
+        match self {
+            FloatFormat::Half => half,
+            FloatFormat::Single => single,
+            FloatFormat::Double => double,
+            FloatFormat::ExtendedPrecision => extended,
+            FloatFormat::DoubleDouble => double_double,
+            FloatFormat::Quadruple => quadruple,
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetOptions {
+    pub triple: String,
+    pub cpu: String,
+    pub abi: String,
+    pub features: Vec<String>,
+    pub code_model: String,
+    pub wchar_size: u32,
+    pub wchar_signed: bool,
+}
+
+impl Default for TargetOptions {
+    fn default() -> TargetOptions {
+        TargetOptions {
+            triple: "x86_64-unknown-linux-gnu".to_string(),
+            cpu: String::new(),
+            abi: String::new(),
+            features: Vec::new(),
+            code_model: "default".to_string(),
+            wchar_size: 0,
+            wchar_signed: true,
+        }
+    }
+}
+
+struct X86Processor {
+    name: &'static str,
+    kind: usize,
+    dispatch_only: bool,
+    features: &'static [u16],
+}
+
+struct ArmFloatingPointUnit {
+    version: u8,
+    neon: u8,
+    restriction: u8,
+}
+
+struct ArmArchitecture {
+    name: &'static str,
+    kind: &'static str,
+    cpu_attribute: &'static str,
+    sub_architecture: &'static str,
+    default_fpu: usize,
+    base_extensions: u64,
+}
+
+struct ArmExtension {
+    identifier: u64,
+    feature: &'static str,
+    negative_feature: &'static str,
+}
+
+struct ArmProcessor {
+    name: &'static str,
+    architecture: usize,
+    default_fpu: usize,
+    extensions: u64,
+}
+const TRIPLE_OSES: &[(&str, &str)] = &[
+    ("darwin", "darwin"),
+    ("dragonfly", "dragonfly"),
+    ("freebsd", "freebsd"),
+    ("fuchsia", "fuchsia"),
+    ("ios", "ios"),
+    ("kfreebsd", "kfreebsd"),
+    ("linux", "linux"),
+    ("lv2", "lv2"),
+    ("macosx", "macosx"),
+    ("macos", "macosx"),
+    ("managarm", "managarm"),
+    ("netbsd", "netbsd"),
+    ("openbsd", "openbsd"),
+    ("solaris", "solaris"),
+    ("uefi", "uefi"),
+    ("windows", "windows"),
+    ("win32", "windows"),
+    ("zos", "zos"),
+    ("haiku", "haiku"),
+    ("rtems", "rtems"),
+    ("aix", "aix"),
+    ("cuda", "cuda"),
+    ("nvcl", "nvcl"),
+    ("amdhsa", "amdhsa"),
+    ("ps4", "ps4"),
+    ("ps5", "ps5"),
+    ("elfiamcu", "elfiamcu"),
+    ("tvos", "tvos"),
+    ("watchos", "watchos"),
+    ("bridgeos", "bridgeos"),
+    ("driverkit", "driverkit"),
+    ("xros", "xros"),
+    ("visionos", "xros"),
+    ("mesa3d", "mesa3d"),
+    ("amdpal", "amdpal"),
+    ("hermit", "hermit"),
+    ("hurd", "hurd"),
+    ("wasip1", "wasip1"),
+    ("wasip2", "wasip2"),
+    ("wasip3", "wasip3"),
+    ("wasi", "wasi"),
+    ("emscripten", "emscripten"),
+    ("shadermodel", "shadermodel"),
+    ("liteos", "liteos"),
+    ("serenity", "serenity"),
+    ("vulkan", "vulkan"),
+    ("cheriotrtos", "cheriotrtos"),
+    ("opencl", "opencl"),
+    ("chipstar", "chipstar"),
+    ("firmware", "firmware"),
+    ("qurt", "qurt"),
+    ("h2", "h2"),
+];
+
+const TRIPLE_ENVIRONMENTS: &[&str] = &[
+    "eabihf",
+    "eabi",
+    "gnuabin32",
+    "gnuabi64",
+    "gnueabihft64",
+    "gnueabihf",
+    "gnueabit64",
+    "gnueabi",
+    "gnuf32",
+    "gnuf64",
+    "gnusf",
+    "gnux32",
+    "gnu_ilp32",
+    "code16",
+    "gnut64",
+    "gnu",
+    "android",
+    "muslabin32",
+    "muslabi64",
+    "musleabihf",
+    "musleabi",
+    "muslf32",
+    "muslsf",
+    "muslx32",
+    "muslwali",
+    "musl",
+    "msvc",
+    "itanium",
+    "cygnus",
+    "coreclr",
+    "simulator",
+    "macabi",
+    "pixel",
+    "vertex",
+    "geometry",
+    "hull",
+    "domain",
+    "compute",
+    "library",
+    "raygeneration",
+    "intersection",
+    "anyhit",
+    "closesthit",
+    "miss",
+    "callable",
+    "mesh",
+    "amplification",
+    "rootsignature",
+    "ohos",
+    "pauthtest",
+    "llvm",
+    "mlibc",
+    "mtia",
+];
+
+const TRIPLE_VENDORS: &[(&str, &str)] = &[
+    ("amd", "amd"),
+    ("apple", "apple"),
+    ("csr", "csr"),
+    ("fsl", "fsl"),
+    ("ibm", "ibm"),
+    ("img", "img"),
+    ("intel", "intel"),
+    ("mesa", "mesa"),
+    ("mti", "mti"),
+    ("nvidia", "nvidia"),
+    ("oe", "oe"),
+    ("pc", "pc"),
+    ("scei", "scei"),
+    ("sie", "scei"),
+    ("suse", "suse"),
+    ("meta", "meta"),
+];
+
+fn arm_canonical_arch_name(arch: &str) -> Option<&str> {
+    let mut offset: Option<usize> = None;
+    let mut name = arch;
+    if arch.starts_with("arm64_32") {
+        offset = Some(8);
+    } else if arch.starts_with("arm64e") {
+        offset = Some(6);
+    } else if arch.starts_with("arm64") {
+        offset = Some(5);
+    } else if arch.starts_with("aarch64_32") {
+        offset = Some(10);
+    } else if arch.starts_with("arm") {
+        offset = Some(3);
+    } else if arch.starts_with("thumb") {
+        offset = Some(5);
+    } else if arch.starts_with("aarch64") {
+        if arch.contains("eb") {
+            return None;
+        }
+        offset = Some(if arch.get(7..10) == Some("_be") {
+            10
+        } else {
+            7
+        });
+    }
+    match offset {
+        Some(at) if name.get(at..at + 2) == Some("eb") => offset = Some(at + 2),
+        _ => {
+            if let Some(stripped) = name.strip_suffix("eb") {
+                name = stripped;
+            }
+        }
+    }
+    if let Some(at) = offset {
+        name = name.get(at..).unwrap_or("");
+    }
+    if name.is_empty() {
+        return Some(arch);
+    }
+    if offset.is_some() {
+        let bytes = name.as_bytes();
+        if bytes.len() >= 2 && (bytes[0] != b'v' || !bytes[1].is_ascii_digit()) {
+            return None;
+        }
+        if name.contains("eb") {
+            return None;
+        }
+    }
+    Some(name)
+}
+
+fn arm_arch_synonym(arch: &str) -> &str {
+    match arch {
+        "v5" => "v5t",
+        "v5e" => "v5te",
+        "v6j" => "v6",
+        "v6hl" => "v6k",
+        "v6m" | "v6sm" | "v6s-m" => "v6-m",
+        "v6z" | "v6zk" => "v6kz",
+        "v7" | "v7a" | "v7hl" | "v7l" => "v7-a",
+        "v7r" => "v7-r",
+        "v7m" => "v7-m",
+        "v7em" => "v7e-m",
+        "v8" | "v8a" | "v8l" | "aarch64" | "arm64" => "v8-a",
+        "v8.1a" => "v8.1-a",
+        "v8.2a" => "v8.2-a",
+        "v8.3a" => "v8.3-a",
+        "v8.4a" => "v8.4-a",
+        "v8.5a" => "v8.5-a",
+        "v8.6a" => "v8.6-a",
+        "v8.7a" => "v8.7-a",
+        "v8.8a" => "v8.8-a",
+        "v8.9a" => "v8.9-a",
+        "v8r" => "v8-r",
+        "v9" | "v9a" => "v9-a",
+        "v9.1a" => "v9.1-a",
+        "v9.2a" => "v9.2-a",
+        "v9.3a" => "v9.3-a",
+        "v9.4a" => "v9.4-a",
+        "v9.5a" => "v9.5-a",
+        "v9.6a" => "v9.6-a",
+        "v9.7a" => "v9.7-a",
+        "v8m.base" => "v8-m.base",
+        "v8m.main" => "v8-m.main",
+        "v8.1m.main" => "v8.1-m.main",
+        other => other,
+    }
+}
+
+fn arm_parse_architecture(name: &str) -> usize {
+    let canonical = arm_canonical_arch_name(name).unwrap_or("");
+    let synonym = arm_arch_synonym(canonical);
+    ARM_ARCHITECTURES
+        .iter()
+        .position(|entry| entry.name.ends_with(synonym))
+        .unwrap_or(0)
+}
+
+fn arm_kind_version(kind: &str) -> u32 {
+    match kind {
+        "ARMV4" | "ARMV4T" => 4,
+        "ARMV5T" | "ARMV5TE" | "IWMMXT" | "IWMMXT2" | "XSCALE" | "ARMV5TEJ" => 5,
+        "ARMV6" | "ARMV6K" | "ARMV6T2" | "ARMV6KZ" | "ARMV6M" => 6,
+        "ARMV7A" | "ARMV7VE" | "ARMV7R" | "ARMV7M" | "ARMV7S" | "ARMV7EM" | "ARMV7K" => 7,
+        other if other.starts_with("ARMV8") => 8,
+        other if other.starts_with("ARMV9") => 9,
+        _ => 0,
+    }
+}
+
+fn arm_kind_profile(kind: &str) -> char {
+    match kind {
+        "ARMV6M" | "ARMV7M" | "ARMV7EM" | "ARMV8MMainline" | "ARMV8MBaseline"
+        | "ARMV8_1MMainline" => 'M',
+        "ARMV7R" | "ARMV8R" => 'R',
+        "ARMV7A" | "ARMV7VE" | "ARMV7K" | "ARMV8A" => 'A',
+        other if other.starts_with("ARMV8_") && other.ends_with('A') => 'A',
+        other if other.starts_with("ARMV9") => 'A',
+        _ => ' ',
+    }
+}
+
+fn arm_arch_profile(arch: &str) -> char {
+    arm_kind_profile(ARM_ARCHITECTURES[arm_parse_architecture(arch)].kind)
+}
+
+fn arm_arch_version(arch: &str) -> u32 {
+    arm_kind_version(ARM_ARCHITECTURES[arm_parse_architecture(arch)].kind)
+}
+
+fn parse_arm_arch(arch_name: &str) -> &'static str {
+    let isa = if arch_name.starts_with("aarch64") || arch_name.starts_with("arm64") {
+        "aarch64"
+    } else if arch_name.starts_with("thumb") {
+        "thumb"
+    } else if arch_name.starts_with("arm") {
+        "arm"
+    } else {
+        ""
+    };
+    let big = if arch_name.starts_with("armeb")
+        || arch_name.starts_with("thumbeb")
+        || arch_name.starts_with("aarch64_be")
+    {
+        Some(true)
+    } else if arch_name.starts_with("arm") || arch_name.starts_with("thumb") {
+        Some(arch_name.ends_with("eb"))
+    } else if arch_name.starts_with("aarch64") {
+        Some(false)
+    } else {
+        None
+    };
+    let arch = match (big, isa) {
+        (Some(false), "arm") => "arm",
+        (Some(false), "thumb") => "thumb",
+        (Some(false), "aarch64") => "aarch64",
+        (Some(true), "arm") => "armeb",
+        (Some(true), "thumb") => "thumbeb",
+        (Some(true), "aarch64") => "aarch64_be",
+        _ => "unknown",
+    };
+    let Some(canonical) = arm_canonical_arch_name(arch_name) else {
+        return "unknown";
+    };
+    if canonical.is_empty() {
+        return "unknown";
+    }
+    if isa == "thumb" && (canonical.starts_with("v2") || canonical.starts_with("v3")) {
+        return "unknown";
+    }
+    if arm_arch_profile(canonical) == 'M' && arm_arch_version(canonical) == 6 {
+        return if big == Some(true) {
+            "thumbeb"
+        } else {
+            "thumb"
+        };
+    }
+    arch
+}
+
+fn parse_triple_arch(name: &str) -> &'static str {
+    let arch = match name {
+        "i386" | "i486" | "i586" | "i686" | "i786" | "i886" | "i986" => "x86",
+        "amd64" | "x86_64" | "x86_64h" | "x86_64_lfi" => "x86_64",
+        "powerpc" | "powerpcspe" | "ppc" | "ppc32" => "powerpc",
+        "powerpcle" | "ppcle" | "ppc32le" => "powerpcle",
+        "powerpc64" | "ppu" | "ppc64" => "powerpc64",
+        "powerpc64le" | "ppc64le" => "powerpc64le",
+        "xscale" => "arm",
+        "xscaleeb" => "armeb",
+        "aarch64" | "aarch64_lfi" | "arm64" | "arm64e" | "arm64e.x1" | "arm64ec" => "aarch64",
+        "aarch64_be" => "aarch64_be",
+        "aarch64_32" | "arm64_32" => "aarch64_32",
+        "arc" => "arc",
+        "arm" => "arm",
+        "armeb" => "armeb",
+        "thumb" => "thumb",
+        "thumbeb" => "thumbeb",
+        "avr" => "avr",
+        "m68k" => "m68k",
+        "msp430" => "msp430",
+        "mips" | "mipseb" | "mipsallegrex" | "mipsisa32r6" | "mipsr6" => "mips",
+        "mipsel" | "mipsallegrexel" | "mipsisa32r6el" | "mipsr6el" => "mipsel",
+        "mips64" | "mips64eb" | "mipsn32" | "mipsisa64r6" | "mips64r6" | "mipsn32r6" => "mips64",
+        "mips64el" | "mipsn32el" | "mipsisa64r6el" | "mips64r6el" | "mipsn32r6el" => "mips64el",
+        _ if name.starts_with("amdgpu") => "amdgcn",
+        "amdgcn" => "amdgcn",
+        "r600" => "r600",
+        "riscv32" => "riscv32",
+        "riscv64" => "riscv64",
+        "riscv32be" => "riscv32be",
+        "riscv64be" => "riscv64be",
+        "hexagon" => "hexagon",
+        "s390x" | "systemz" => "s390x",
+        "sparc" => "sparc",
+        "sparcel" => "sparcel",
+        "sparcv9" | "sparc64" => "sparcv9",
+        "tce" => "tce",
+        "tcele" => "tcele",
+        "tcele64" => "tcele64",
+        "xcore" => "xcore",
+        "nvptx" => "nvptx",
+        "nvptx64" => "nvptx64",
+        "amdil" => "amdil",
+        "amdil64" => "amdil64",
+        "hsail" => "hsail",
+        "hsail64" => "hsail64",
+        "spir" => "spir",
+        "spir64" => "spir64",
+        _ if name == "spirv" || name.starts_with("spirv1.") => "spirv",
+        _ if name.starts_with("spirv32") => "spirv32",
+        _ if name.starts_with("spirv64") => "spirv64",
+        _ if name.starts_with("kalimba") => "kalimba",
+        "lanai" => "lanai",
+        "renderscript32" => "renderscript32",
+        "renderscript64" => "renderscript64",
+        "shave" => "shave",
+        "ve" => "ve",
+        "wasm32" => "wasm32",
+        "wasm64" => "wasm64",
+        "csky" => "csky",
+        "loongarch32" => "loongarch32",
+        "loongarch64" => "loongarch64",
+        _ if name.starts_with("dxil") => "dxil",
+        "xtensa" => "xtensa",
+        _ => "unknown",
+    };
+    if arch == "unknown" {
+        if name.starts_with("arm") || name.starts_with("thumb") || name.starts_with("aarch64") {
+            return parse_arm_arch(name);
+        }
+        if name.starts_with("bpf") {
+            return match name {
+                "bpf" | "bpf_le" | "bpfel" => "bpfel",
+                "bpf_be" | "bpfeb" => "bpfeb",
+                _ => "unknown",
+            };
+        }
+    }
+    arch
+}
+
+fn parse_triple_vendor(name: &str) -> &'static str {
+    TRIPLE_VENDORS
+        .iter()
+        .find(|(spelled, _)| *spelled == name)
+        .map(|(_, vendor)| *vendor)
+        .unwrap_or("unknown")
+}
+
+fn parse_triple_os(name: &str) -> &'static str {
+    TRIPLE_OSES
+        .iter()
+        .find(|(spelled, _)| name.starts_with(spelled))
+        .map(|(_, os)| *os)
+        .unwrap_or("unknown")
+}
+
+fn parse_triple_environment(name: &str) -> &'static str {
+    TRIPLE_ENVIRONMENTS
+        .iter()
+        .find(|spelled| name.starts_with(**spelled))
+        .copied()
+        .unwrap_or("unknown")
+}
+
+fn parse_triple_format(name: &str) -> &'static str {
+    if name.ends_with("xcoff") {
+        "xcoff"
+    } else if name.ends_with("coff") {
+        "coff"
+    } else if name.ends_with("elf") {
+        "elf"
+    } else if name.ends_with("goff") {
+        "goff"
+    } else if name.ends_with("macho") {
+        "macho"
+    } else if name.ends_with("wasm") {
+        "wasm"
+    } else if name.ends_with("spirv") {
+        "spirv"
+    } else {
+        "unknown"
+    }
+}
+
+fn arm_sub_arch(name: &str) -> &'static str {
+    let Some(canonical) = arm_canonical_arch_name(name) else {
+        return "";
+    };
+    if canonical.is_empty() {
+        return "";
+    }
+    match ARM_ARCHITECTURES[arm_parse_architecture(canonical)].name {
+        "armv4t" => "v4t",
+        "armv5t" => "v5",
+        "armv5te" | "iwmmxt" | "iwmmxt2" | "xscale" | "armv5tej" => "v5te",
+        "armv6" => "v6",
+        "armv6k" | "armv6kz" => "v6k",
+        "armv6t2" => "v6t2",
+        "armv6-m" => "v6m",
+        "armv7-a" | "armv7-r" => "v7",
+        "armv7ve" => "v7ve",
+        "armv7k" => "v7k",
+        "armv7-m" => "v7m",
+        "armv7s" => "v7s",
+        "armv7e-m" => "v7em",
+        "armv8-a" => "v8",
+        "armv8.1-a" => "v8_1a",
+        "armv8.2-a" => "v8_2a",
+        "armv8.3-a" => "v8_3a",
+        "armv8.4-a" => "v8_4a",
+        "armv8.5-a" => "v8_5a",
+        "armv8.6-a" => "v8_6a",
+        "armv8.7-a" => "v8_7a",
+        "armv8.8-a" => "v8_8a",
+        "armv8.9-a" => "v8_9a",
+        "armv9-a" => "v9",
+        "armv9.1-a" => "v9_1a",
+        "armv9.2-a" => "v9_2a",
+        "armv9.3-a" => "v9_3a",
+        "armv9.4-a" => "v9_4a",
+        "armv9.5-a" => "v9_5a",
+        "armv9.6-a" => "v9_6a",
+        "armv9.7-a" => "v9_7a",
+        "armv8-r" => "v8r",
+        "armv8-m.base" => "v8m_baseline",
+        "armv8-m.main" => "v8m_mainline",
+        "armv8.1-m.main" => "v8_1m_mainline",
+        _ => "",
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct Triple {
+    pub text: String,
+    pub arch: &'static str,
+    pub sub_arch: &'static str,
+    pub vendor: &'static str,
+    pub os: &'static str,
+    pub environment: &'static str,
+    pub object_format: &'static str,
+    components: Vec<String>,
+}
+
+impl Triple {
+    pub fn parse(text: &str) -> Triple {
+        let components: Vec<String> = text.splitn(4, '-').map(str::to_string).collect();
+        let mut arch = "unknown";
+        let mut sub_arch = "";
+        let mut vendor = "unknown";
+        let mut os = "unknown";
+        let mut environment = "unknown";
+        let mut object_format = "unknown";
+        if let Some(first) = components.first() {
+            arch = parse_triple_arch(first);
+            sub_arch = match first.as_str() {
+                "arm64e" => "arm64e",
+                "arm64e.x1" => "arm64e_x1",
+                "arm64ec" => "arm64ec",
+                "aarch64_lfi" | "x86_64_lfi" => "lfi",
+                name if name.starts_with("arm")
+                    || name.starts_with("thumb")
+                    || name.starts_with("aarch64") =>
+                {
+                    arm_sub_arch(name)
+                }
+                _ => "",
+            };
+            if components.len() > 1 {
+                vendor = parse_triple_vendor(&components[1]);
+                if components.len() > 2 {
+                    os = parse_triple_os(&components[2]);
+                    if components.len() > 3 {
+                        environment = parse_triple_environment(&components[3]);
+                        object_format = parse_triple_format(&components[3]);
+                    }
+                }
+            } else {
+                environment = if first.starts_with("mipsn32") {
+                    "gnuabin32"
+                } else if first.starts_with("mips64") || first.starts_with("mipsisa64") {
+                    "gnuabi64"
+                } else if first.starts_with("mipsisa32")
+                    || matches!(first.as_str(), "mips" | "mipsel" | "mipsr6" | "mipsr6el")
+                {
+                    "gnu"
                 } else {
-                    64
+                    "unknown"
+                };
+            }
+        }
+        let mut triple = Triple {
+            text: text.to_string(),
+            arch,
+            sub_arch,
+            vendor,
+            os,
+            environment,
+            object_format,
+            components,
+        };
+        if triple.object_format == "unknown" {
+            triple.object_format = triple.default_object_format();
+        }
+        triple
+    }
+
+    pub fn normalize(text: &str) -> String {
+        let mut components: Vec<String> = text.split('-').map(str::to_string).collect();
+        let component = |components: &Vec<String>, index: usize| -> String {
+            components.get(index).cloned().unwrap_or_default()
+        };
+        let mut arch = if !components.is_empty() {
+            parse_triple_arch(&components[0])
+        } else {
+            "unknown"
+        };
+        let mut vendor = if components.len() > 1 {
+            parse_triple_vendor(&components[1])
+        } else {
+            "unknown"
+        };
+        let mut os = "unknown";
+        let mut is_cygwin = false;
+        let mut is_mingw = false;
+        if components.len() > 2 {
+            os = parse_triple_os(&components[2]);
+            is_cygwin = components[2].starts_with("cygwin") || components[2].starts_with("msys");
+            is_mingw = components[2].starts_with("mingw");
+        }
+        let mut environment = if components.len() > 3 {
+            parse_triple_environment(&components[3])
+        } else {
+            "unknown"
+        };
+        let mut object_format = if components.len() > 4 {
+            parse_triple_format(&components[4])
+        } else {
+            "unknown"
+        };
+        let mut found = [
+            arch != "unknown",
+            vendor != "unknown",
+            os != "unknown",
+            environment != "unknown",
+        ];
+        for position in 0..4 {
+            if found[position] {
+                continue;
+            }
+            let mut index = 0usize;
+            while index < components.len() {
+                if index < 4 && found[index] {
+                    index += 1;
+                    continue;
+                }
+                let piece = components[index].clone();
+                let valid = match position {
+                    0 => {
+                        arch = parse_triple_arch(&piece);
+                        arch != "unknown"
+                    }
+                    1 => {
+                        vendor = parse_triple_vendor(&piece);
+                        vendor != "unknown"
+                    }
+                    2 => {
+                        os = parse_triple_os(&piece);
+                        is_cygwin = piece.starts_with("cygwin") || piece.starts_with("msys");
+                        is_mingw = piece.starts_with("mingw");
+                        os != "unknown" || is_cygwin || is_mingw
+                    }
+                    _ => {
+                        environment = parse_triple_environment(&piece);
+                        if environment != "unknown" {
+                            true
+                        } else {
+                            object_format = parse_triple_format(&piece);
+                            object_format != "unknown"
+                        }
+                    }
+                };
+                if !valid {
+                    index += 1;
+                    continue;
+                }
+                if position < index {
+                    let mut current = std::mem::take(&mut components[index]);
+                    let mut slot = position;
+                    while !current.is_empty() {
+                        while slot < 4 && found[slot] {
+                            slot += 1;
+                        }
+                        if slot >= components.len() {
+                            components.resize(slot + 1, String::new());
+                        }
+                        std::mem::swap(&mut current, &mut components[slot]);
+                        slot += 1;
+                    }
+                } else if position > index {
+                    let mut moving = index;
+                    loop {
+                        let mut current = String::new();
+                        let mut slot = moving;
+                        while slot < components.len() {
+                            std::mem::swap(&mut current, &mut components[slot]);
+                            if current.is_empty() {
+                                break;
+                            }
+                            slot += 1;
+                            while slot < 4 && found[slot] {
+                                slot += 1;
+                            }
+                        }
+                        if !current.is_empty() {
+                            components.push(current);
+                        }
+                        moving += 1;
+                        while moving < 4 && found[moving] {
+                            moving += 1;
+                        }
+                        if moving >= position {
+                            break;
+                        }
+                    }
+                }
+                found[position] = true;
+                break;
+            }
+        }
+        if found[0]
+            && !found[1]
+            && !found[2]
+            && found[3]
+            && component(&components, 1) == "none"
+            && component(&components, 2).is_empty()
+        {
+            components.swap(1, 2);
+        }
+        for piece in components.iter_mut() {
+            if piece.is_empty() {
+                *piece = "unknown".to_string();
+            }
+        }
+        if environment == "android" && component(&components, 3).starts_with("androideabi") {
+            let version = component(&components, 3)["androideabi".len()..].to_string();
+            components[3] = format!("android{version}");
+        }
+        if vendor == "suse" && environment == "gnueabi" {
+            components[3] = "gnueabihf".to_string();
+        }
+        if os == "windows" {
+            components.resize(4, "unknown".to_string());
+            components[2] = "windows".to_string();
+            if environment == "unknown" {
+                components[3] = if object_format == "unknown" || object_format == "coff" {
+                    "msvc".to_string()
+                } else {
+                    object_format.to_string()
+                };
+            }
+        } else if is_mingw {
+            components.resize(4, "unknown".to_string());
+            components[2] = "windows".to_string();
+            components[3] = "gnu".to_string();
+        } else if is_cygwin {
+            components.resize(4, "unknown".to_string());
+            components[2] = "windows".to_string();
+            components[3] = "cygnus".to_string();
+        }
+        if (is_mingw || is_cygwin || (os == "windows" && environment != "unknown"))
+            && object_format != "unknown"
+            && object_format != "coff"
+        {
+            components.resize(5, "unknown".to_string());
+            components[4] = object_format.to_string();
+        }
+        components.join("-")
+    }
+
+    fn default_object_format(&self) -> &'static str {
+        match self.arch {
+            "unknown" | "aarch64" | "aarch64_32" | "arm" | "thumb" | "x86" | "x86_64" => {
+                if self.os == "windows" || self.os == "uefi" {
+                    "coff"
+                } else if self.is_darwin() {
+                    "macho"
+                } else {
+                    "elf"
                 }
             }
-            _ => 32,
+            "mipsel" => {
+                if self.os == "windows" {
+                    "coff"
+                } else {
+                    "elf"
+                }
+            }
+            "powerpc64" | "powerpc" => {
+                if self.os == "aix" {
+                    "xcoff"
+                } else if self.is_darwin() {
+                    "macho"
+                } else {
+                    "elf"
+                }
+            }
+            "s390x" => {
+                if self.os == "zos" {
+                    "goff"
+                } else {
+                    "elf"
+                }
+            }
+            "wasm32" | "wasm64" => "wasm",
+            "spirv" | "spirv32" | "spirv64" => "spirv",
+            "dxil" => "dxcontainer",
+            _ => "elf",
         }
+    }
+
+    pub fn arch_name(&self) -> &str {
+        self.components.first().map(String::as_str).unwrap_or("")
+    }
+
+    pub fn vendor_name(&self) -> &str {
+        self.components.get(1).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn os_name(&self) -> &str {
+        self.components.get(2).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn environment_name(&self) -> &str {
+        self.components.get(3).map(String::as_str).unwrap_or("")
+    }
+
+    pub fn environment_version(&self) -> u32 {
+        let name = self.environment_name();
+        if name == "none" {
+            return 0;
+        }
+        let rest = name.strip_prefix(self.environment).unwrap_or(name);
+        rest.split('.')
+            .next()
+            .and_then(|major| major.parse().ok())
+            .unwrap_or(0)
+    }
+
+    pub fn is_darwin(&self) -> bool {
+        matches!(
+            self.os,
+            "darwin"
+                | "macosx"
+                | "ios"
+                | "tvos"
+                | "watchos"
+                | "bridgeos"
+                | "driverkit"
+                | "xros"
+                | "firmware"
+        )
     }
 
     pub fn is_windows(&self) -> bool {
-        self.system.starts_with("windows") || self.system.starts_with("win32")
+        self.os == "windows"
     }
 
-    pub fn long_width(&self) -> u32 {
-        if self.is_windows() {
-            32
-        } else {
-            self.pointer_width()
+    pub fn is_android(&self) -> bool {
+        self.environment == "android"
+    }
+
+    pub fn is_gnu_environment(&self) -> bool {
+        matches!(
+            self.environment,
+            "gnu"
+                | "gnut64"
+                | "gnuabin32"
+                | "gnuabi64"
+                | "gnueabi"
+                | "gnueabit64"
+                | "gnueabihf"
+                | "gnueabihft64"
+                | "gnuf32"
+                | "gnuf64"
+                | "gnusf"
+                | "gnux32"
+        )
+    }
+
+    pub fn is_musl(&self) -> bool {
+        self.environment.starts_with("musl")
+    }
+
+    pub fn is_ohos(&self) -> bool {
+        self.environment == "ohos" || self.os == "liteos"
+    }
+
+    pub fn is_x32(&self) -> bool {
+        matches!(self.environment, "gnux32" | "muslx32")
+    }
+
+    pub fn is_time64_abi(&self) -> bool {
+        matches!(self.environment, "gnut64" | "gnueabit64" | "gnueabihft64")
+    }
+
+    pub fn is_elf(&self) -> bool {
+        self.object_format == "elf"
+    }
+
+    pub fn is_thumb(&self) -> bool {
+        matches!(self.arch, "thumb" | "thumbeb")
+    }
+
+    pub fn is_arm(&self) -> bool {
+        matches!(self.arch, "arm" | "armeb")
+    }
+
+    pub fn is_aarch64(&self) -> bool {
+        matches!(self.arch, "aarch64" | "aarch64_be" | "aarch64_32")
+    }
+
+    pub fn is_arch64_bit(&self) -> bool {
+        self.pointer_bit_width() == 64
+    }
+
+    pub fn is_arch32_bit(&self) -> bool {
+        self.pointer_bit_width() == 32
+    }
+
+    pub fn pointer_bit_width(&self) -> u32 {
+        match self.arch {
+            "unknown" => 0,
+            "avr" | "msp430" => 16,
+            "aarch64_32" | "amdil" | "arc" | "arm" | "armeb" | "csky" | "dxil" | "hexagon"
+            | "hsail" | "kalimba" | "lanai" | "loongarch32" | "m68k" | "mips" | "mipsel"
+            | "nvptx" | "powerpc" | "powerpcle" | "r600" | "renderscript32" | "riscv32"
+            | "riscv32be" | "shave" | "sparc" | "sparcel" | "spir" | "spirv32" | "tce"
+            | "tcele" | "thumb" | "thumbeb" | "wasm32" | "x86" | "xcore" | "xtensa" => 32,
+            _ => 64,
         }
     }
 
-    pub fn wchar_signed(&self) -> bool {
-        !(self.is_windows()
-            || self.architecture.starts_with("arm")
-            || self.architecture.starts_with("thumb")
-            || self.architecture == "aarch64"
-            || self.architecture == "arm64")
-            || self.system.starts_with("darwin")
-            || self.system.starts_with("macos")
-            || self.system.starts_with("ios")
-    }
-
-    pub fn char_signed(&self) -> bool {
-        let unsigned_char = matches!(
-            self.architecture.as_str(),
-            "aarch64"
-                | "arm"
-                | "armv7"
-                | "armv7a"
+    pub fn is_little_endian(&self) -> bool {
+        !matches!(
+            self.arch,
+            "aarch64_be"
                 | "armeb"
-                | "thumb"
+                | "thumbeb"
+                | "bpfeb"
+                | "lanai"
+                | "m68k"
+                | "mips"
+                | "mips64"
                 | "powerpc"
                 | "powerpc64"
-                | "powerpc64le"
                 | "s390x"
-                | "riscv32"
-                | "riscv64"
-                | "hexagon"
-                | "msp430"
-                | "xcore"
-        );
-        !unsigned_char
-            || self.system.starts_with("darwin")
-            || self.system.starts_with("ios")
-            || self.system.starts_with("macos")
-            || self.is_windows()
+                | "sparc"
+                | "sparcv9"
+                | "tce"
+                | "riscv32be"
+                | "riscv64be"
+        )
     }
+}
+const X86_FEATURES: [&str; 125] = [
+    "cmov",
+    "mmx",
+    "popcnt",
+    "sse",
+    "sse2",
+    "sse3",
+    "ssse3",
+    "sse4.1",
+    "sse4.2",
+    "avx",
+    "avx2",
+    "sse4a",
+    "fma4",
+    "xop",
+    "fma",
+    "avx512f",
+    "bmi",
+    "bmi2",
+    "aes",
+    "pclmul",
+    "avx512vl",
+    "avx512bw",
+    "avx512dq",
+    "avx512cd",
+    "avx512vbmi",
+    "avx512ifma",
+    "avx512vpopcntdq",
+    "avx512vbmi2",
+    "gfni",
+    "vpclmulqdq",
+    "avx512vnni",
+    "avx512bitalg",
+    "avx512bf16",
+    "avx512vp2intersect",
+    "adx",
+    "cldemote",
+    "clflushopt",
+    "clwb",
+    "clzero",
+    "cx16",
+    "enqcmd",
+    "f16c",
+    "fsgsbase",
+    "sahf",
+    "64bit",
+    "lwp",
+    "lzcnt",
+    "movbe",
+    "movdir64b",
+    "movdiri",
+    "mwaitx",
+    "pconfig",
+    "pku",
+    "prfchw",
+    "ptwrite",
+    "rdpid",
+    "rdrnd",
+    "rdseed",
+    "rtm",
+    "serialize",
+    "sgx",
+    "sha",
+    "shstk",
+    "tbm",
+    "tsxldtrk",
+    "vaes",
+    "waitpkg",
+    "wbnoinvd",
+    "xsave",
+    "xsavec",
+    "xsaveopt",
+    "xsaves",
+    "amx-tile",
+    "amx-int8",
+    "amx-bf16",
+    "uintr",
+    "hreset",
+    "kl",
+    "widekl",
+    "avxvnni",
+    "avx512fp16",
+    "avxifma",
+    "avxvnniint8",
+    "avxneconvert",
+    "cmpccxadd",
+    "amx-fp16",
+    "prefetchi",
+    "raoint",
+    "amx-complex",
+    "avxvnniint16",
+    "sm3",
+    "sha512",
+    "sm4",
+    "apxf",
+    "usermsr",
+    "avx10.1",
+    "avx10.2",
+    "amx-avx512",
+    "amx-fp8",
+    "movrs",
+    "amx-movrs",
+    "avx512bmm",
+    "avx10v2aux",
+    "nf",
+    "cf",
+    "cx8",
+    "crc32",
+    "invpcid",
+    "rdpru",
+    "vzeroupper",
+    "x87",
+    "evex512",
+    "fxsr",
+    "ccmp",
+    "push2pop2",
+    "ppx",
+    "ndd",
+    "egpr",
+    "zu",
+    "jmpabs",
+    "retpoline-external-thunk",
+    "retpoline-indirect-branches",
+    "retpoline-indirect-calls",
+    "lvi-cfi",
+    "lvi-load-hardening",
+];
+
+const X86_IMPLIED_FEATURES: [&[u16]; 125] = [
+    &[],
+    &[],
+    &[],
+    &[],
+    &[3],
+    &[4],
+    &[5],
+    &[6],
+    &[7],
+    &[8],
+    &[9],
+    &[5],
+    &[9, 11],
+    &[12],
+    &[9],
+    &[10, 14, 41],
+    &[],
+    &[],
+    &[4],
+    &[4],
+    &[15],
+    &[15],
+    &[15],
+    &[15],
+    &[21],
+    &[15],
+    &[15],
+    &[21],
+    &[4],
+    &[9, 19],
+    &[15],
+    &[21],
+    &[21],
+    &[15],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[9],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[4],
+    &[],
+    &[],
+    &[],
+    &[10, 18],
+    &[],
+    &[],
+    &[],
+    &[68],
+    &[68],
+    &[68],
+    &[],
+    &[72],
+    &[72],
+    &[],
+    &[],
+    &[4],
+    &[77],
+    &[10],
+    &[21],
+    &[10],
+    &[10],
+    &[10],
+    &[],
+    &[72],
+    &[],
+    &[],
+    &[72],
+    &[10],
+    &[9],
+    &[10],
+    &[10],
+    &[],
+    &[],
+    &[20, 22, 23, 24, 25, 26, 27, 30, 31, 32, 80],
+    &[95],
+    &[72, 96],
+    &[72],
+    &[],
+    &[72],
+    &[21],
+    &[95],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+    &[],
+];
+
+const X86_CPU_KINDS: [&str; 91] = [
+    "None",
+    "i386",
+    "i486",
+    "WinChipC6",
+    "WinChip2",
+    "C3",
+    "i586",
+    "Pentium",
+    "PentiumMMX",
+    "PentiumPro",
+    "i686",
+    "Pentium2",
+    "Pentium3",
+    "PentiumM",
+    "C3_2",
+    "Yonah",
+    "Pentium4",
+    "Prescott",
+    "Nocona",
+    "Core2",
+    "Penryn",
+    "Bonnell",
+    "Silvermont",
+    "Goldmont",
+    "GoldmontPlus",
+    "Tremont",
+    "Gracemont",
+    "Nehalem",
+    "Westmere",
+    "SandyBridge",
+    "IvyBridge",
+    "Haswell",
+    "Broadwell",
+    "SkylakeClient",
+    "SkylakeServer",
+    "Cascadelake",
+    "Cooperlake",
+    "Cannonlake",
+    "IcelakeClient",
+    "Rocketlake",
+    "IcelakeServer",
+    "Tigerlake",
+    "SapphireRapids",
+    "Alderlake",
+    "Raptorlake",
+    "Meteorlake",
+    "Arrowlake",
+    "ArrowlakeS",
+    "Lunarlake",
+    "Pantherlake",
+    "Wildcatlake",
+    "Novalake",
+    "Sierraforest",
+    "Grandridge",
+    "Graniterapids",
+    "GraniterapidsD",
+    "Emeraldrapids",
+    "Clearwaterforest",
+    "Diamondrapids",
+    "KNL",
+    "KNM",
+    "Lakemont",
+    "K6",
+    "K6_2",
+    "K6_3",
+    "Athlon",
+    "AthlonXP",
+    "K8",
+    "K8SSE3",
+    "AMDFAM10",
+    "BTVER1",
+    "BTVER2",
+    "BDVER1",
+    "BDVER2",
+    "BDVER3",
+    "BDVER4",
+    "ZNVER1",
+    "ZNVER2",
+    "ZNVER3",
+    "ZNVER4",
+    "ZNVER5",
+    "ZNVER6",
+    "C86_4G_M4",
+    "C86_4G_M6",
+    "C86_4G_M7",
+    "C86_4G_M8",
+    "x86_64",
+    "x86_64_v2",
+    "x86_64_v3",
+    "x86_64_v4",
+    "Geode",
+];
+
+const X86_PROCESSORS: [X86Processor; 137] = [
+    X86Processor {
+        name: "",
+        kind: 0,
+        dispatch_only: false,
+        features: &[105, 110],
+    },
+    X86Processor {
+        name: "generic",
+        kind: 0,
+        dispatch_only: true,
+        features: &[44, 105, 110],
+    },
+    X86Processor {
+        name: "i386",
+        kind: 1,
+        dispatch_only: false,
+        features: &[110],
+    },
+    X86Processor {
+        name: "i486",
+        kind: 2,
+        dispatch_only: false,
+        features: &[110],
+    },
+    X86Processor {
+        name: "winchip-c6",
+        kind: 3,
+        dispatch_only: false,
+        features: &[1, 105, 110],
+    },
+    X86Processor {
+        name: "winchip2",
+        kind: 4,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+    X86Processor {
+        name: "c3",
+        kind: 5,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+    X86Processor {
+        name: "i586",
+        kind: 6,
+        dispatch_only: false,
+        features: &[105, 110],
+    },
+    X86Processor {
+        name: "pentium",
+        kind: 7,
+        dispatch_only: false,
+        features: &[105, 110],
+    },
+    X86Processor {
+        name: "pentium-mmx",
+        kind: 8,
+        dispatch_only: false,
+        features: &[1, 105, 110],
+    },
+    X86Processor {
+        name: "pentium_mmx",
+        kind: 8,
+        dispatch_only: true,
+        features: &[1, 105, 110],
+    },
+    X86Processor {
+        name: "pentiumpro",
+        kind: 9,
+        dispatch_only: false,
+        features: &[0, 105, 110],
+    },
+    X86Processor {
+        name: "pentium_pro",
+        kind: 9,
+        dispatch_only: true,
+        features: &[0, 105, 110],
+    },
+    X86Processor {
+        name: "i686",
+        kind: 10,
+        dispatch_only: false,
+        features: &[0, 105, 110],
+    },
+    X86Processor {
+        name: "pentium2",
+        kind: 11,
+        dispatch_only: false,
+        features: &[0, 1, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium_ii",
+        kind: 11,
+        dispatch_only: true,
+        features: &[0, 1, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium3",
+        kind: 12,
+        dispatch_only: false,
+        features: &[0, 1, 3, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium3m",
+        kind: 12,
+        dispatch_only: false,
+        features: &[0, 1, 3, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium_iii",
+        kind: 12,
+        dispatch_only: true,
+        features: &[0, 1, 3, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium_iii_no_xmm_regs",
+        kind: 12,
+        dispatch_only: true,
+        features: &[0, 1, 3, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium-m",
+        kind: 13,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium_m",
+        kind: 13,
+        dispatch_only: true,
+        features: &[0, 1, 3, 4, 105, 110, 112],
+    },
+    X86Processor {
+        name: "c3-2",
+        kind: 14,
+        dispatch_only: false,
+        features: &[0, 1, 3, 105, 110, 112],
+    },
+    X86Processor {
+        name: "yonah",
+        kind: 15,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium4",
+        kind: 16,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium4m",
+        kind: 16,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium_4",
+        kind: 16,
+        dispatch_only: true,
+        features: &[0, 1, 3, 4, 105, 110, 112],
+    },
+    X86Processor {
+        name: "pentium_4_sse3",
+        kind: 17,
+        dispatch_only: true,
+        features: &[0, 1, 3, 4, 5, 105, 110, 112],
+    },
+    X86Processor {
+        name: "prescott",
+        kind: 17,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 105, 110, 112],
+    },
+    X86Processor {
+        name: "nocona",
+        kind: 18,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 39, 44, 105, 110, 112],
+    },
+    X86Processor {
+        name: "core2",
+        kind: 19,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 6, 39, 43, 44, 105, 110, 112],
+    },
+    X86Processor {
+        name: "core_2_duo_ssse3",
+        kind: 19,
+        dispatch_only: true,
+        features: &[0, 1, 3, 4, 5, 6, 39, 43, 44, 105, 110, 112],
+    },
+    X86Processor {
+        name: "penryn",
+        kind: 20,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 6, 7, 39, 43, 44, 105, 110, 112],
+    },
+    X86Processor {
+        name: "core_2_duo_sse4_1",
+        kind: 20,
+        dispatch_only: true,
+        features: &[0, 1, 3, 4, 5, 6, 7, 39, 43, 44, 105, 110, 112],
+    },
+    X86Processor {
+        name: "bonnell",
+        kind: 21,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 6, 39, 43, 44, 47, 105, 110, 112],
+    },
+    X86Processor {
+        name: "atom",
+        kind: 21,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 5, 6, 39, 43, 44, 47, 105, 110, 112],
+    },
+    X86Processor {
+        name: "silvermont",
+        kind: 22,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 19, 39, 43, 44, 47, 53, 56, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "slm",
+        kind: 22,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 19, 39, 43, 44, 47, 53, 56, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "atom_sse4_2",
+        kind: 27,
+        dispatch_only: true,
+        features: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 39, 43, 44, 105, 106, 110, 112],
+    },
+    X86Processor {
+        name: "atom_sse4_2_movbe",
+        kind: 23,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 36, 39, 42, 43, 44, 47, 53, 56, 57, 61, 68, 69, 70,
+            71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "goldmont",
+        kind: 23,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 36, 39, 42, 43, 44, 47, 53, 56, 57, 61, 68, 69, 70,
+            71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "goldmont-plus",
+        kind: 24,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 36, 39, 42, 43, 44, 47, 53, 54, 55, 56, 57, 60, 61,
+            68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "goldmont_plus",
+        kind: 24,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 36, 39, 42, 43, 44, 47, 53, 54, 55, 56, 57, 60, 61,
+            68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "tremont",
+        kind: 25,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 18, 19, 28, 36, 37, 39, 42, 43, 44, 47, 53, 54, 55, 56, 57,
+            60, 61, 68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "nehalem",
+        kind: 27,
+        dispatch_only: false,
+        features: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 39, 43, 44, 105, 106, 110, 112],
+    },
+    X86Processor {
+        name: "core_i7_sse4_2",
+        kind: 27,
+        dispatch_only: true,
+        features: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 39, 43, 44, 105, 106, 110, 112],
+    },
+    X86Processor {
+        name: "corei7",
+        kind: 27,
+        dispatch_only: false,
+        features: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 39, 43, 44, 105, 106, 110, 112],
+    },
+    X86Processor {
+        name: "westmere",
+        kind: 28,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 19, 39, 43, 44, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_aes_pclmulqdq",
+        kind: 27,
+        dispatch_only: true,
+        features: &[0, 1, 2, 3, 4, 5, 6, 7, 8, 39, 43, 44, 105, 106, 110, 112],
+    },
+    X86Processor {
+        name: "sandybridge",
+        kind: 29,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 39, 43, 44, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_2nd_gen_avx",
+        kind: 29,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 39, 43, 44, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "corei7-avx",
+        kind: 29,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 39, 43, 44, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "ivybridge",
+        kind: 30,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 39, 41, 42, 43, 44, 56, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_3rd_gen_avx",
+        kind: 30,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 39, 41, 42, 43, 44, 56, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core-avx-i",
+        kind: 30,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 19, 39, 41, 42, 43, 44, 56, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "haswell",
+        kind: 31,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 39, 41, 42, 43, 44, 46, 47, 56, 68,
+            70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core-avx2",
+        kind: 31,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 39, 41, 42, 43, 44, 46, 47, 56, 68,
+            70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_4th_gen_avx",
+        kind: 31,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 39, 41, 42, 43, 44, 46, 47, 56, 68,
+            70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_4th_gen_avx_tsx",
+        kind: 31,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 39, 41, 42, 43, 44, 46, 47, 56, 68,
+            70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "broadwell",
+        kind: 32,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 34, 39, 41, 42, 43, 44, 46, 47, 53,
+            56, 57, 68, 70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_5th_gen_avx",
+        kind: 32,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 34, 39, 41, 42, 43, 44, 46, 47, 53,
+            56, 57, 68, 70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "core_5th_gen_avx_tsx",
+        kind: 32,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 19, 34, 39, 41, 42, 43, 44, 46, 47, 53,
+            56, 57, 68, 70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "skylake",
+        kind: 33,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 16, 17, 18, 19, 34, 36, 39, 41, 42, 43, 44, 46,
+            47, 53, 56, 57, 60, 68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "skylake-avx512",
+        kind: 34,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 34, 36, 37,
+            39, 41, 42, 43, 44, 46, 47, 52, 53, 56, 57, 68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "skx",
+        kind: 34,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 34, 36, 37,
+            39, 41, 42, 43, 44, 46, 47, 52, 53, 56, 57, 68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "skylake_avx512",
+        kind: 34,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 34, 36, 37,
+            39, 41, 42, 43, 44, 46, 47, 52, 53, 56, 57, 68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "cascadelake",
+        kind: 35,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 34, 36,
+            37, 39, 41, 42, 43, 44, 46, 47, 52, 53, 56, 57, 68, 69, 70, 71, 105, 106, 107, 110,
+            112,
+        ],
+    },
+    X86Processor {
+        name: "cooperlake",
+        kind: 36,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 30, 32, 34,
+            36, 37, 39, 41, 42, 43, 44, 46, 47, 52, 53, 56, 57, 68, 69, 70, 71, 105, 106, 107, 110,
+            112,
+        ],
+    },
+    X86Processor {
+        name: "cannonlake",
+        kind: 37,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 34,
+            36, 39, 41, 42, 43, 44, 46, 47, 52, 53, 56, 57, 60, 61, 68, 69, 70, 71, 105, 106, 107,
+            110, 112,
+        ],
+    },
+    X86Processor {
+        name: "icelake-client",
+        kind: 38,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 34, 36, 39, 41, 42, 43, 44, 46, 47, 52, 53, 55, 56, 57, 60, 61, 65,
+            68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "icelake_client",
+        kind: 38,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 34, 36, 39, 41, 42, 43, 44, 46, 47, 52, 53, 55, 56, 57, 60, 61, 65,
+            68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "rocketlake",
+        kind: 39,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 34, 36, 39, 41, 42, 43, 44, 46, 47, 52, 53, 55, 56, 57, 61, 65, 68,
+            69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "icelake-server",
+        kind: 40,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 34, 36, 37, 39, 41, 42, 43, 44, 46, 47, 51, 52, 53, 55, 56, 57, 60,
+            61, 65, 67, 68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "icelake_server",
+        kind: 40,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 34, 36, 37, 39, 41, 42, 43, 44, 46, 47, 51, 52, 53, 55, 56, 57, 60,
+            61, 65, 67, 68, 69, 70, 71, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "tigerlake",
+        kind: 41,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 33, 34, 36, 37, 39, 41, 42, 43, 44, 46, 47, 48, 49, 52, 53, 55, 56,
+            57, 60, 61, 62, 65, 68, 69, 70, 71, 77, 78, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "sapphirerapids",
+        kind: 42,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 51, 52,
+            53, 54, 55, 56, 57, 59, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 79,
+            80, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "alderlake",
+        kind: 43,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 41, 42, 43, 44,
+            46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71, 76,
+            78, 79, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "raptorlake",
+        kind: 44,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 41, 42, 43, 44,
+            46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71, 76,
+            78, 79, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "meteorlake",
+        kind: 45,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 41, 42, 43, 44,
+            46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71, 76,
+            78, 79, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "arrowlake",
+        kind: 46,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 78, 79, 81, 82, 83, 84, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "arrowlake-s",
+        kind: 47,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 78, 79, 81, 82, 83, 84, 89, 90, 91, 92, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "arrowlake_s",
+        kind: 47,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 78, 79, 81, 82, 83, 84, 89, 90, 91, 92, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "lunarlake",
+        kind: 48,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 78, 79, 81, 82, 83, 84, 89, 90, 91, 92, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "gracemont",
+        kind: 26,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 41, 42, 43, 44,
+            46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71, 76,
+            78, 79, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "pantherlake",
+        kind: 48,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 79, 81, 82, 83, 84, 89, 90, 91, 92, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "wildcatlake",
+        kind: 48,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 79, 81, 82, 83, 84, 89, 90, 91, 92, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "novalake",
+        kind: 51,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 36, 37, 39, 40, 41, 42, 43,
+            44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70, 71,
+            75, 76, 79, 81, 82, 83, 84, 86, 89, 90, 91, 92, 96, 99, 103, 105, 106, 107, 110, 112,
+            113, 114, 115, 116, 117, 118, 119,
+        ],
+    },
+    X86Processor {
+        name: "sierraforest",
+        kind: 52,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 35, 36, 37, 39, 40, 41, 42,
+            43, 44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70,
+            71, 75, 76, 78, 79, 81, 82, 83, 84, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "grandridge",
+        kind: 53,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 35, 36, 37, 39, 40, 41, 42,
+            43, 44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70,
+            71, 75, 76, 78, 79, 81, 82, 83, 84, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "graniterapids",
+        kind: 54,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 51, 52,
+            53, 54, 55, 56, 57, 59, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 79,
+            80, 85, 86, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "graniterapids-d",
+        kind: 55,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 51, 52,
+            53, 54, 55, 56, 57, 59, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 79,
+            80, 85, 86, 88, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "graniterapids_d",
+        kind: 55,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 51, 52,
+            53, 54, 55, 56, 57, 59, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 79,
+            80, 85, 86, 88, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "emeraldrapids",
+        kind: 56,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 51, 52,
+            53, 54, 55, 56, 57, 59, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 79,
+            80, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "clearwaterforest",
+        kind: 48,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 14, 16, 17, 18, 19, 28, 29, 34, 35, 36, 37, 39, 40, 41, 42,
+            43, 44, 46, 47, 48, 49, 51, 52, 53, 54, 55, 56, 57, 59, 60, 61, 62, 65, 66, 68, 69, 70,
+            71, 75, 76, 79, 81, 82, 83, 84, 86, 89, 90, 91, 92, 94, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "diamondrapids",
+        kind: 58,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 35, 36, 37, 39, 40, 41, 42, 43, 44, 46, 47, 48, 49, 51, 52,
+            53, 54, 55, 56, 57, 59, 60, 61, 62, 64, 65, 66, 67, 68, 69, 70, 71, 72, 73, 74, 75, 79,
+            80, 81, 82, 83, 84, 85, 86, 88, 89, 90, 91, 92, 96, 97, 98, 99, 100, 103, 105, 106,
+            107, 110, 112, 113, 114, 115, 116, 117, 118, 119,
+        ],
+    },
+    X86Processor {
+        name: "knl",
+        kind: 59,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 23, 34, 39, 41, 42, 43, 44,
+            46, 47, 53, 56, 57, 68, 70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "mic_avx512",
+        kind: 59,
+        dispatch_only: true,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 23, 34, 39, 41, 42, 43, 44,
+            46, 47, 53, 56, 57, 68, 70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "knm",
+        kind: 60,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 14, 15, 16, 17, 18, 19, 23, 26, 34, 39, 41, 42, 43,
+            44, 46, 47, 53, 56, 57, 68, 70, 105, 106, 107, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "lakemont",
+        kind: 61,
+        dispatch_only: false,
+        features: &[105],
+    },
+    X86Processor {
+        name: "k6",
+        kind: 62,
+        dispatch_only: false,
+        features: &[1, 105, 110],
+    },
+    X86Processor {
+        name: "k6-2",
+        kind: 63,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+    X86Processor {
+        name: "k6-3",
+        kind: 64,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+    X86Processor {
+        name: "athlon",
+        kind: 65,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+    X86Processor {
+        name: "athlon-tbird",
+        kind: 65,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+    X86Processor {
+        name: "athlon-xp",
+        kind: 66,
+        dispatch_only: false,
+        features: &[1, 3, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "athlon-mp",
+        kind: 66,
+        dispatch_only: false,
+        features: &[1, 3, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "athlon-4",
+        kind: 66,
+        dispatch_only: false,
+        features: &[1, 3, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "k8",
+        kind: 67,
+        dispatch_only: false,
+        features: &[1, 3, 4, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "athlon64",
+        kind: 67,
+        dispatch_only: false,
+        features: &[1, 3, 4, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "athlon-fx",
+        kind: 67,
+        dispatch_only: false,
+        features: &[1, 3, 4, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "opteron",
+        kind: 67,
+        dispatch_only: false,
+        features: &[1, 3, 4, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "k8-sse3",
+        kind: 68,
+        dispatch_only: false,
+        features: &[1, 3, 4, 5, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "athlon64-sse3",
+        kind: 68,
+        dispatch_only: false,
+        features: &[1, 3, 4, 5, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "opteron-sse3",
+        kind: 68,
+        dispatch_only: false,
+        features: &[1, 3, 4, 5, 44, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "amdfam10",
+        kind: 69,
+        dispatch_only: false,
+        features: &[1, 2, 3, 4, 5, 11, 39, 43, 44, 46, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "barcelona",
+        kind: 69,
+        dispatch_only: false,
+        features: &[1, 2, 3, 4, 5, 11, 39, 43, 44, 46, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "btver1",
+        kind: 70,
+        dispatch_only: false,
+        features: &[1, 2, 3, 4, 5, 6, 11, 39, 43, 44, 46, 53, 105, 110, 112],
+    },
+    X86Processor {
+        name: "btver2",
+        kind: 71,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 9, 11, 16, 18, 19, 39, 41, 43, 44, 46, 47, 53, 68, 70, 105, 106, 110,
+            112,
+        ],
+    },
+    X86Processor {
+        name: "bdver1",
+        kind: 72,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 18, 19, 39, 43, 44, 45, 46, 53, 68, 105, 106,
+            110, 112,
+        ],
+    },
+    X86Processor {
+        name: "bdver2",
+        kind: 73,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 16, 18, 19, 39, 41, 43, 44, 45, 46, 53, 63,
+            68, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "bdver3",
+        kind: 74,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 11, 12, 13, 14, 16, 18, 19, 39, 41, 42, 43, 44, 45, 46, 53,
+            63, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "bdver4",
+        kind: 75,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 16, 17, 18, 19, 39, 41, 42, 43, 44, 45,
+            46, 47, 50, 53, 56, 63, 68, 70, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "znver1",
+        kind: 76,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 34, 36, 38, 39, 41, 42, 43, 44,
+            46, 47, 50, 53, 56, 57, 61, 68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "znver2",
+        kind: 77,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 34, 36, 37, 38, 39, 41, 42, 43,
+            44, 46, 47, 50, 53, 55, 56, 57, 61, 67, 68, 69, 70, 71, 105, 106, 108, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "znver3",
+        kind: 78,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 29, 34, 36, 37, 38, 39, 41, 42,
+            43, 44, 46, 47, 50, 52, 53, 55, 56, 57, 61, 65, 67, 68, 69, 70, 71, 105, 106, 107, 108,
+            110, 112,
+        ],
+    },
+    X86Processor {
+        name: "znver4",
+        kind: 79,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 34, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 50, 52, 53, 55, 56,
+            57, 61, 62, 65, 67, 68, 69, 70, 71, 105, 106, 107, 108, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "znver5",
+        kind: 80,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 33, 34, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 52,
+            53, 55, 56, 57, 61, 62, 65, 67, 68, 69, 70, 71, 79, 86, 105, 106, 107, 108, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "znver6",
+        kind: 81,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25, 26,
+            27, 28, 29, 30, 31, 32, 33, 34, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 48, 49, 50, 52,
+            53, 55, 56, 57, 61, 62, 65, 67, 68, 69, 70, 71, 79, 80, 81, 82, 83, 86, 101, 105, 106,
+            107, 108, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "c86-4g-m4",
+        kind: 82,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 34, 36, 38, 39, 41, 42, 43, 44,
+            46, 47, 50, 53, 56, 57, 61, 68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "c86-4g-m6",
+        kind: 83,
+        dispatch_only: false,
+        features: &[
+            1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 16, 17, 18, 19, 34, 36, 38, 39, 41, 42, 43, 44,
+            46, 47, 50, 53, 56, 57, 61, 68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "c86-4g-m7",
+        kind: 84,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            26, 27, 28, 29, 30, 31, 32, 34, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 50, 53, 56, 57,
+            61, 65, 67, 68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "c86-4g-m8",
+        kind: 85,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 14, 15, 16, 17, 18, 19, 20, 21, 22, 23, 24, 25,
+            26, 27, 28, 29, 30, 31, 32, 34, 36, 37, 38, 39, 41, 42, 43, 44, 46, 47, 50, 53, 56, 57,
+            61, 62, 65, 67, 68, 69, 70, 71, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "x86-64",
+        kind: 86,
+        dispatch_only: false,
+        features: &[0, 1, 3, 4, 44, 105, 110, 112],
+    },
+    X86Processor {
+        name: "x86-64-v2",
+        kind: 87,
+        dispatch_only: false,
+        features: &[0, 1, 2, 3, 4, 8, 39, 43, 44, 105, 106, 110, 112],
+    },
+    X86Processor {
+        name: "x86-64-v3",
+        kind: 88,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 8, 10, 14, 16, 17, 39, 41, 43, 44, 46, 47, 68, 105, 106, 110, 112,
+        ],
+    },
+    X86Processor {
+        name: "x86-64-v4",
+        kind: 89,
+        dispatch_only: false,
+        features: &[
+            0, 1, 2, 3, 4, 8, 10, 14, 16, 17, 20, 21, 22, 23, 39, 41, 43, 44, 46, 47, 68, 105, 106,
+            110, 112,
+        ],
+    },
+    X86Processor {
+        name: "geode",
+        kind: 90,
+        dispatch_only: false,
+        features: &[1, 53, 105, 110],
+    },
+];
+const ARM_FLOATING_POINT_UNITS: [ArmFloatingPointUnit; 24] = [
+    ArmFloatingPointUnit {
+        version: 0,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 0,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 1,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 1,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 2,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 3,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 2,
+        neon: 0,
+        restriction: 1,
+    },
+    ArmFloatingPointUnit {
+        version: 3,
+        neon: 0,
+        restriction: 1,
+    },
+    ArmFloatingPointUnit {
+        version: 2,
+        neon: 0,
+        restriction: 2,
+    },
+    ArmFloatingPointUnit {
+        version: 3,
+        neon: 0,
+        restriction: 2,
+    },
+    ArmFloatingPointUnit {
+        version: 4,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 4,
+        neon: 0,
+        restriction: 1,
+    },
+    ArmFloatingPointUnit {
+        version: 4,
+        neon: 0,
+        restriction: 2,
+    },
+    ArmFloatingPointUnit {
+        version: 5,
+        neon: 0,
+        restriction: 1,
+    },
+    ArmFloatingPointUnit {
+        version: 5,
+        neon: 0,
+        restriction: 2,
+    },
+    ArmFloatingPointUnit {
+        version: 5,
+        neon: 0,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 6,
+        neon: 0,
+        restriction: 1,
+    },
+    ArmFloatingPointUnit {
+        version: 6,
+        neon: 0,
+        restriction: 2,
+    },
+    ArmFloatingPointUnit {
+        version: 2,
+        neon: 1,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 3,
+        neon: 1,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 4,
+        neon: 1,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 5,
+        neon: 1,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 5,
+        neon: 2,
+        restriction: 0,
+    },
+    ArmFloatingPointUnit {
+        version: 0,
+        neon: 0,
+        restriction: 0,
+    },
+];
+
+const ARM_ARCHITECTURES: [ArmArchitecture; 43] = [
+    ArmArchitecture {
+        name: "invalid",
+        kind: "INVALID",
+        cpu_attribute: "",
+        sub_architecture: "",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "armv4",
+        kind: "ARMV4",
+        cpu_attribute: "4",
+        sub_architecture: "v4",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "armv4t",
+        kind: "ARMV4T",
+        cpu_attribute: "4T",
+        sub_architecture: "v4t",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "armv5t",
+        kind: "ARMV5T",
+        cpu_attribute: "5T",
+        sub_architecture: "v5",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "armv5te",
+        kind: "ARMV5TE",
+        cpu_attribute: "5TE",
+        sub_architecture: "v5e",
+        default_fpu: 1,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv5tej",
+        kind: "ARMV5TEJ",
+        cpu_attribute: "5TEJ",
+        sub_architecture: "v5e",
+        default_fpu: 1,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv6",
+        kind: "ARMV6",
+        cpu_attribute: "6",
+        sub_architecture: "v6",
+        default_fpu: 3,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv6k",
+        kind: "ARMV6K",
+        cpu_attribute: "6K",
+        sub_architecture: "v6k",
+        default_fpu: 3,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv6t2",
+        kind: "ARMV6T2",
+        cpu_attribute: "6T2",
+        sub_architecture: "v6t2",
+        default_fpu: 1,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv6kz",
+        kind: "ARMV6KZ",
+        cpu_attribute: "6KZ",
+        sub_architecture: "v6kz",
+        default_fpu: 3,
+        base_extensions: 1280,
+    },
+    ArmArchitecture {
+        name: "armv6-m",
+        kind: "ARMV6M",
+        cpu_attribute: "6-M",
+        sub_architecture: "v6m",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "armv7-a",
+        kind: "ARMV7A",
+        cpu_attribute: "7-A",
+        sub_architecture: "v7",
+        default_fpu: 18,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv7ve",
+        kind: "ARMV7VE",
+        cpu_attribute: "7VE",
+        sub_architecture: "v7ve",
+        default_fpu: 18,
+        base_extensions: 1904,
+    },
+    ArmArchitecture {
+        name: "armv7-r",
+        kind: "ARMV7R",
+        cpu_attribute: "7-R",
+        sub_architecture: "v7r",
+        default_fpu: 1,
+        base_extensions: 1040,
+    },
+    ArmArchitecture {
+        name: "armv7-m",
+        kind: "ARMV7M",
+        cpu_attribute: "7-M",
+        sub_architecture: "v7m",
+        default_fpu: 1,
+        base_extensions: 16,
+    },
+    ArmArchitecture {
+        name: "armv7e-m",
+        kind: "ARMV7EM",
+        cpu_attribute: "7E-M",
+        sub_architecture: "v7em",
+        default_fpu: 1,
+        base_extensions: 1040,
+    },
+    ArmArchitecture {
+        name: "armv8-a",
+        kind: "ARMV8A",
+        cpu_attribute: "8-A",
+        sub_architecture: "v8a",
+        default_fpu: 22,
+        base_extensions: 1906,
+    },
+    ArmArchitecture {
+        name: "armv8.1-a",
+        kind: "ARMV8_1A",
+        cpu_attribute: "8.1-A",
+        sub_architecture: "v8.1a",
+        default_fpu: 22,
+        base_extensions: 1906,
+    },
+    ArmArchitecture {
+        name: "armv8.2-a",
+        kind: "ARMV8_2A",
+        cpu_attribute: "8.2-A",
+        sub_architecture: "v8.2a",
+        default_fpu: 22,
+        base_extensions: 6002,
+    },
+    ArmArchitecture {
+        name: "armv8.3-a",
+        kind: "ARMV8_3A",
+        cpu_attribute: "8.3-A",
+        sub_architecture: "v8.3a",
+        default_fpu: 22,
+        base_extensions: 6002,
+    },
+    ArmArchitecture {
+        name: "armv8.4-a",
+        kind: "ARMV8_4A",
+        cpu_attribute: "8.4-A",
+        sub_architecture: "v8.4a",
+        default_fpu: 22,
+        base_extensions: 14194,
+    },
+    ArmArchitecture {
+        name: "armv8.5-a",
+        kind: "ARMV8_5A",
+        cpu_attribute: "8.5-A",
+        sub_architecture: "v8.5a",
+        default_fpu: 22,
+        base_extensions: 14194,
+    },
+    ArmArchitecture {
+        name: "armv8.6-a",
+        kind: "ARMV8_6A",
+        cpu_attribute: "8.6-A",
+        sub_architecture: "v8.6a",
+        default_fpu: 22,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv8.7-a",
+        kind: "ARMV8_7A",
+        cpu_attribute: "8.7-A",
+        sub_architecture: "v8.7a",
+        default_fpu: 22,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv8.8-a",
+        kind: "ARMV8_8A",
+        cpu_attribute: "8.8-A",
+        sub_architecture: "v8.8a",
+        default_fpu: 22,
+        base_extensions: 3209074,
+    },
+    ArmArchitecture {
+        name: "armv8.9-a",
+        kind: "ARMV8_9A",
+        cpu_attribute: "8.9-A",
+        sub_architecture: "v8.9a",
+        default_fpu: 22,
+        base_extensions: 3209074,
+    },
+    ArmArchitecture {
+        name: "armv9-a",
+        kind: "ARMV9A",
+        cpu_attribute: "9-A",
+        sub_architecture: "v9a",
+        default_fpu: 21,
+        base_extensions: 14194,
+    },
+    ArmArchitecture {
+        name: "armv9.1-a",
+        kind: "ARMV9_1A",
+        cpu_attribute: "9.1-A",
+        sub_architecture: "v9.1a",
+        default_fpu: 21,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv9.2-a",
+        kind: "ARMV9_2A",
+        cpu_attribute: "9.2-A",
+        sub_architecture: "v9.2a",
+        default_fpu: 21,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv9.3-a",
+        kind: "ARMV9_3A",
+        cpu_attribute: "9.3-A",
+        sub_architecture: "v9.3a",
+        default_fpu: 22,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv9.4-a",
+        kind: "ARMV9_4A",
+        cpu_attribute: "9.4-A",
+        sub_architecture: "v9.4a",
+        default_fpu: 21,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv9.5-a",
+        kind: "ARMV9_5A",
+        cpu_attribute: "9.5-A",
+        sub_architecture: "v9.5a",
+        default_fpu: 21,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv9.6-a",
+        kind: "ARMV9_6A",
+        cpu_attribute: "9.6-A",
+        sub_architecture: "v9.6a",
+        default_fpu: 21,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv9.7-a",
+        kind: "ARMV9_7A",
+        cpu_attribute: "9.7-A",
+        sub_architecture: "v9.7a",
+        default_fpu: 21,
+        base_extensions: 3159922,
+    },
+    ArmArchitecture {
+        name: "armv8-r",
+        kind: "ARMV8R",
+        cpu_attribute: "8-R",
+        sub_architecture: "v8r",
+        default_fpu: 14,
+        base_extensions: 1650,
+    },
+    ArmArchitecture {
+        name: "armv8-m.base",
+        kind: "ARMV8MBaseline",
+        cpu_attribute: "8-M.Baseline",
+        sub_architecture: "v8m.base",
+        default_fpu: 1,
+        base_extensions: 16,
+    },
+    ArmArchitecture {
+        name: "armv8-m.main",
+        kind: "ARMV8MMainline",
+        cpu_attribute: "8-M.Mainline",
+        sub_architecture: "v8m.main",
+        default_fpu: 13,
+        base_extensions: 16,
+    },
+    ArmArchitecture {
+        name: "armv8.1-m.main",
+        kind: "ARMV8_1MMainline",
+        cpu_attribute: "8.1-M.Mainline",
+        sub_architecture: "v8.1m.main",
+        default_fpu: 17,
+        base_extensions: 528400,
+    },
+    ArmArchitecture {
+        name: "iwmmxt",
+        kind: "IWMMXT",
+        cpu_attribute: "iwmmxt",
+        sub_architecture: "",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "iwmmxt2",
+        kind: "IWMMXT2",
+        cpu_attribute: "iwmmxt2",
+        sub_architecture: "",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "xscale",
+        kind: "XSCALE",
+        cpu_attribute: "xscale",
+        sub_architecture: "v5e",
+        default_fpu: 1,
+        base_extensions: 1,
+    },
+    ArmArchitecture {
+        name: "armv7s",
+        kind: "ARMV7S",
+        cpu_attribute: "7-S",
+        sub_architecture: "v7s",
+        default_fpu: 20,
+        base_extensions: 1024,
+    },
+    ArmArchitecture {
+        name: "armv7k",
+        kind: "ARMV7K",
+        cpu_attribute: "7-K",
+        sub_architecture: "v7k",
+        default_fpu: 1,
+        base_extensions: 1024,
+    },
+];
+
+const ARM_EXTENSIONS: [ArmExtension; 38] = [
+    ArmExtension {
+        identifier: 0,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 1,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 2,
+        feature: "+crc",
+        negative_feature: "-crc",
+    },
+    ArmExtension {
+        identifier: 4,
+        feature: "+crypto",
+        negative_feature: "-crypto",
+    },
+    ArmExtension {
+        identifier: 16384,
+        feature: "+sha2",
+        negative_feature: "-sha2",
+    },
+    ArmExtension {
+        identifier: 32768,
+        feature: "+aes",
+        negative_feature: "-aes",
+    },
+    ArmExtension {
+        identifier: 8192,
+        feature: "+dotprod",
+        negative_feature: "-dotprod",
+    },
+    ArmExtension {
+        identifier: 1024,
+        feature: "+dsp",
+        negative_feature: "-dsp",
+    },
+    ArmExtension {
+        identifier: 8,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 262144,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 2147484672,
+        feature: "+mve",
+        negative_feature: "-mve",
+    },
+    ArmExtension {
+        identifier: 2147484680,
+        feature: "+mve.fp",
+        negative_feature: "-mve.fp",
+    },
+    ArmExtension {
+        identifier: 48,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 64,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 128,
+        feature: "+neon",
+        negative_feature: "-neon",
+    },
+    ArmExtension {
+        identifier: 256,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 512,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 2048,
+        feature: "+fullfp16",
+        negative_feature: "-fullfp16",
+    },
+    ArmExtension {
+        identifier: 4096,
+        feature: "+ras",
+        negative_feature: "-ras",
+    },
+    ArmExtension {
+        identifier: 576460752303423488,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 1152921504606846976,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 2305843009213693952,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 4611686018427387904,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 9223372036854775808,
+        feature: "",
+        negative_feature: "",
+    },
+    ArmExtension {
+        identifier: 65536,
+        feature: "+fp16fml",
+        negative_feature: "-fp16fml",
+    },
+    ArmExtension {
+        identifier: 1048576,
+        feature: "+bf16",
+        negative_feature: "-bf16",
+    },
+    ArmExtension {
+        identifier: 131072,
+        feature: "+sb",
+        negative_feature: "-sb",
+    },
+    ArmExtension {
+        identifier: 2097152,
+        feature: "+i8mm",
+        negative_feature: "-i8mm",
+    },
+    ArmExtension {
+        identifier: 524288,
+        feature: "+lob",
+        negative_feature: "-lob",
+    },
+    ArmExtension {
+        identifier: 4194304,
+        feature: "+cdecp0",
+        negative_feature: "-cdecp0",
+    },
+    ArmExtension {
+        identifier: 8388608,
+        feature: "+cdecp1",
+        negative_feature: "-cdecp1",
+    },
+    ArmExtension {
+        identifier: 16777216,
+        feature: "+cdecp2",
+        negative_feature: "-cdecp2",
+    },
+    ArmExtension {
+        identifier: 33554432,
+        feature: "+cdecp3",
+        negative_feature: "-cdecp3",
+    },
+    ArmExtension {
+        identifier: 67108864,
+        feature: "+cdecp4",
+        negative_feature: "-cdecp4",
+    },
+    ArmExtension {
+        identifier: 134217728,
+        feature: "+cdecp5",
+        negative_feature: "-cdecp5",
+    },
+    ArmExtension {
+        identifier: 268435456,
+        feature: "+cdecp6",
+        negative_feature: "-cdecp6",
+    },
+    ArmExtension {
+        identifier: 536870912,
+        feature: "+cdecp7",
+        negative_feature: "-cdecp7",
+    },
+    ArmExtension {
+        identifier: 1073741824,
+        feature: "+pacbti",
+        negative_feature: "-pacbti",
+    },
+];
+
+const ARM_PROCESSORS: [ArmProcessor; 96] = [
+    ArmProcessor {
+        name: "arm8",
+        architecture: 1,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm810",
+        architecture: 1,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "strongarm",
+        architecture: 1,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "strongarm110",
+        architecture: 1,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "strongarm1100",
+        architecture: 1,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "strongarm1110",
+        architecture: 1,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm7tdmi",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm7tdmi-s",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm710t",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm720t",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm9",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm9tdmi",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm920",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm920t",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm922t",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm940t",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "ep9312",
+        architecture: 2,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm10tdmi",
+        architecture: 3,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1020t",
+        architecture: 3,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm9e",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm946e-s",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm966e-s",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm968e-s",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm10e",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1020e",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1022e",
+        architecture: 4,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm926ej-s",
+        architecture: 5,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1136j-s",
+        architecture: 6,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1136jf-s",
+        architecture: 6,
+        default_fpu: 3,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "mpcore",
+        architecture: 7,
+        default_fpu: 3,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "mpcorenovfp",
+        architecture: 7,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1176jz-s",
+        architecture: 9,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1176jzf-s",
+        architecture: 9,
+        default_fpu: 3,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1156t2-s",
+        architecture: 8,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "arm1156t2f-s",
+        architecture: 8,
+        default_fpu: 3,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m0",
+        architecture: 10,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m0plus",
+        architecture: 10,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m1",
+        architecture: 10,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "sc000",
+        architecture: 10,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-a5",
+        architecture: 11,
+        default_fpu: 20,
+        extensions: 320,
+    },
+    ArmProcessor {
+        name: "cortex-a7",
+        architecture: 11,
+        default_fpu: 20,
+        extensions: 880,
+    },
+    ArmProcessor {
+        name: "cortex-a8",
+        architecture: 11,
+        default_fpu: 18,
+        extensions: 256,
+    },
+    ArmProcessor {
+        name: "cortex-a9",
+        architecture: 11,
+        default_fpu: 19,
+        extensions: 320,
+    },
+    ArmProcessor {
+        name: "cortex-a12",
+        architecture: 11,
+        default_fpu: 20,
+        extensions: 880,
+    },
+    ArmProcessor {
+        name: "cortex-a15",
+        architecture: 11,
+        default_fpu: 20,
+        extensions: 880,
+    },
+    ArmProcessor {
+        name: "cortex-a17",
+        architecture: 11,
+        default_fpu: 20,
+        extensions: 880,
+    },
+    ArmProcessor {
+        name: "krait",
+        architecture: 11,
+        default_fpu: 20,
+        extensions: 48,
+    },
+    ArmProcessor {
+        name: "cortex-r4",
+        architecture: 13,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-r4f",
+        architecture: 13,
+        default_fpu: 6,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-r5",
+        architecture: 13,
+        default_fpu: 6,
+        extensions: 96,
+    },
+    ArmProcessor {
+        name: "cortex-r7",
+        architecture: 13,
+        default_fpu: 7,
+        extensions: 96,
+    },
+    ArmProcessor {
+        name: "cortex-r8",
+        architecture: 13,
+        default_fpu: 7,
+        extensions: 96,
+    },
+    ArmProcessor {
+        name: "cortex-r52",
+        architecture: 34,
+        default_fpu: 21,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-r52plus",
+        architecture: 34,
+        default_fpu: 21,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "sc300",
+        architecture: 14,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m3",
+        architecture: 14,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m4",
+        architecture: 15,
+        default_fpu: 12,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m7",
+        architecture: 15,
+        default_fpu: 13,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m23",
+        architecture: 35,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "cortex-m33",
+        architecture: 36,
+        default_fpu: 14,
+        extensions: 1024,
+    },
+    ArmProcessor {
+        name: "star-mc1",
+        architecture: 36,
+        default_fpu: 14,
+        extensions: 1024,
+    },
+    ArmProcessor {
+        name: "cortex-m35p",
+        architecture: 36,
+        default_fpu: 14,
+        extensions: 1024,
+    },
+    ArmProcessor {
+        name: "cortex-m55",
+        architecture: 37,
+        default_fpu: 16,
+        extensions: 2147486728,
+    },
+    ArmProcessor {
+        name: "cortex-m85",
+        architecture: 37,
+        default_fpu: 16,
+        extensions: 3221232648,
+    },
+    ArmProcessor {
+        name: "cortex-m52",
+        architecture: 37,
+        default_fpu: 16,
+        extensions: 3221232648,
+    },
+    ArmProcessor {
+        name: "star-mc3",
+        architecture: 37,
+        default_fpu: 16,
+        extensions: 3221232648,
+    },
+    ArmProcessor {
+        name: "cortex-a32",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "cortex-a35",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "cortex-a53",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "cortex-a55",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a57",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "cortex-a72",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "cortex-a73",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "cortex-a75",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a76",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a76ae",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a77",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a78",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a78ae",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 12288,
+    },
+    ArmProcessor {
+        name: "cortex-a78c",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-a510",
+        architecture: 26,
+        default_fpu: 21,
+        extensions: 3350528,
+    },
+    ArmProcessor {
+        name: "cortex-a710",
+        architecture: 26,
+        default_fpu: 21,
+        extensions: 3350528,
+    },
+    ArmProcessor {
+        name: "cortex-x1",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "cortex-x1c",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "neoverse-n1",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "neoverse-n2",
+        architecture: 26,
+        default_fpu: 21,
+        extensions: 3354624,
+    },
+    ArmProcessor {
+        name: "neoverse-v1",
+        architecture: 20,
+        default_fpu: 22,
+        extensions: 1062912,
+    },
+    ArmProcessor {
+        name: "cyclone",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "exynos-m3",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "exynos-m4",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "exynos-m5",
+        architecture: 18,
+        default_fpu: 22,
+        extensions: 10240,
+    },
+    ArmProcessor {
+        name: "kryo",
+        architecture: 16,
+        default_fpu: 22,
+        extensions: 2,
+    },
+    ArmProcessor {
+        name: "iwmmxt",
+        architecture: 38,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "xscale",
+        architecture: 40,
+        default_fpu: 1,
+        extensions: 1,
+    },
+    ArmProcessor {
+        name: "swift",
+        architecture: 41,
+        default_fpu: 20,
+        extensions: 48,
+    },
+    ArmProcessor {
+        name: "invalid",
+        architecture: 0,
+        default_fpu: 0,
+        extensions: 0,
+    },
+];
+const ARM_FLOATING_POINT_VFP2: u32 = 1;
+const ARM_FLOATING_POINT_VFP3: u32 = 1 << 1;
+const ARM_FLOATING_POINT_VFP4: u32 = 1 << 2;
+const ARM_FLOATING_POINT_NEON: u32 = 1 << 3;
+const ARM_FLOATING_POINT_ARMV8: u32 = 1 << 4;
+const ARM_HARDWARE_HALF: u32 = 1 << 1;
+const ARM_HARDWARE_SINGLE: u32 = 1 << 2;
+const ARM_HARDWARE_DOUBLE: u32 = 1 << 3;
+const ARM_DIVIDE_THUMB: u32 = 1;
+const ARM_DIVIDE_ARM: u32 = 1 << 1;
+const ARM_VECTOR_INTEGER: u32 = 1;
+const ARM_VECTOR_FLOAT: u32 = 1 << 1;
+const ARM_EXCLUSIVE_BYTE: u32 = 1;
+const ARM_EXCLUSIVE_HALF: u32 = 1 << 1;
+const ARM_EXCLUSIVE_WORD: u32 = 1 << 2;
+const ARM_EXCLUSIVE_DOUBLE: u32 = 1 << 3;
+const ARM_EXTENSION_HARDWARE_DIVIDE_THUMB: u64 = 1 << 4;
+const ARM_EXTENSION_HARDWARE_DIVIDE_ARM: u64 = 1 << 5;
+const AARCH64_FLOATING_POINT: u32 = 1;
+const AARCH64_NEON: u32 = 1 << 1;
+const AARCH64_SCALABLE_VECTOR: u32 = 1 << 2;
+const MAXIMUM_INTEGER_BITS: u32 = 1 << 23;
+
+const AARCH64_FEATURE_EFFECTS: &[(&str, u32, &[&str])] = &[
+    ("+neon", AARCH64_NEON, &[]),
+    ("+fp-armv8", AARCH64_NEON, &[]),
+    ("+jscvt", AARCH64_NEON, &["jscvt"]),
+    ("+fcma", AARCH64_NEON, &["fcma"]),
+    (
+        "+sve",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16"],
+    ),
+    (
+        "+sve2",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16", "sve2"],
+    ),
+    (
+        "+sve2p1",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16", "sve2", "sve2p1"],
+    ),
+    ("+sve-aes", AARCH64_NEON, &["fullfp16", "sve-aes"]),
+    (
+        "+sve2-sha3",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16", "sve2", "sve2-sha3"],
+    ),
+    (
+        "+sve2-sm4",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16", "sve2", "sve2-sm4"],
+    ),
+    ("+sve-b16b16", 0, &["sve-b16b16"]),
+    ("+sve-bitperm", AARCH64_NEON, &["fullfp16", "sve-bitperm"]),
+    (
+        "+f32mm",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16", "f32mm"],
+    ),
+    (
+        "+f64mm",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["fullfp16", "f64mm"],
+    ),
+    ("+sme", 0, &["sme", "bf16", "fullfp16"]),
+    ("+sme2", 0, &["sme", "sme2", "bf16", "fullfp16"]),
+    ("+sme2p1", 0, &["sme", "sme2", "sme2p1", "bf16", "fullfp16"]),
+    ("+sme-f64f64", 0, &["sme", "sme-f64f64", "bf16", "fullfp16"]),
+    ("+sme-i16i64", 0, &["sme", "sme-i16i64", "bf16", "fullfp16"]),
+    (
+        "+sme-fa64",
+        AARCH64_NEON | AARCH64_SCALABLE_VECTOR,
+        &["sme", "sve2", "sme-fa64"],
+    ),
+    (
+        "+sme-f16f16",
+        0,
+        &["sme", "sme2", "bf16", "fullfp16", "sme-f16f16"],
+    ),
+    (
+        "+sme-b16b16",
+        0,
+        &[
+            "sme",
+            "sme2",
+            "bf16",
+            "fullfp16",
+            "sve-b16b16",
+            "sme-b16b16",
+        ],
+    ),
+    ("+fp8", 0, &["fp8"]),
+    ("+fp8fma", 0, &["fp8fma"]),
+    ("+fp8dot2", 0, &["fp8dot2"]),
+    ("+fp8dot4", 0, &["fp8dot4"]),
+    ("+ssve-fp8dot2", 0, &["ssve-fp8dot2"]),
+    ("+ssve-fp8dot4", 0, &["ssve-fp8dot4"]),
+    ("+ssve-fp8fma", 0, &["ssve-fp8fma"]),
+    ("+sme-f8f32", 0, &["sme-f8f32"]),
+    ("+sme-f8f16", 0, &["sme-f8f16"]),
+    ("+sb", 0, &["sb"]),
+    ("+predres", 0, &["predres"]),
+    ("+ssbs", 0, &["ssbs"]),
+    ("+bti", 0, &["bti"]),
+    ("+wfxt", 0, &["wfxt"]),
+    ("+crc", 0, &["crc"]),
+    ("+rcpc", 0, &["rcpc"]),
+    ("+aes", AARCH64_NEON, &["aes"]),
+    ("+sha2", AARCH64_NEON, &["sha2"]),
+    ("+sha3", AARCH64_NEON, &["sha2", "sha3"]),
+    ("+rdm", AARCH64_NEON, &["rdm"]),
+    ("+dit", 0, &["dit"]),
+    ("+cccp", 0, &["ccpp"]),
+    ("+ccdp", 0, &["ccpp", "ccdp"]),
+    ("+fptoint", 0, &["fptoint"]),
+    ("+sm4", AARCH64_NEON, &["sm4"]),
+    ("+fprcvt", 0, &["fprcvt"]),
+    ("+f8f16mm", 0, &["f8f16mm"]),
+    ("+f8f32mm", 0, &["f8f32mm"]),
+    ("+sve-f16f32mm", 0, &["sve-f16f32mm"]),
+    ("+sve-b16mm", 0, &["sve-b16mm"]),
+    ("+f16mm", 0, &["f16mm"]),
+    ("+f16f32dot", 0, &["f16f32dot"]),
+    ("+f16f32mm", 0, &["f16f32mm"]),
+    ("+sve-bfscale", 0, &["sve-bfscale"]),
+    ("+sve-aes2", 0, &["sve-aes2"]),
+    ("+ssve-aes", 0, &["ssve-aes"]),
+    ("+sve2p2", 0, &["sve2p2"]),
+    ("+sve2p3", 0, &["sve2p3"]),
+    ("+sme2p2", 0, &["sme2p2"]),
+    ("+sme2p3", 0, &["sme2p3"]),
+    ("+fullfp16", AARCH64_NEON, &["fullfp16"]),
+    ("+dotprod", AARCH64_NEON, &["dotprod"]),
+    ("+fp16fml", AARCH64_NEON, &["fullfp16", "fp16fml"]),
+    ("+mte", 0, &["mte"]),
+    ("+pauth", 0, &["pauth"]),
+    ("+i8mm", 0, &["i8mm"]),
+    ("+bf16", 0, &["bf16"]),
+    ("+lse", 0, &["lse"]),
+    ("+ls64", 0, &["ls64"]),
+    ("+rand", 0, &["rand"]),
+    ("+flagm", 0, &["flagm"]),
+    ("+altnzcv", 0, &["flagm", "altnzcv"]),
+    ("+mops", 0, &["mops"]),
+    ("+d128", 0, &["d128"]),
+    ("+gcs", 0, &["gcs"]),
+    ("+rcpc3", 0, &["rcpc3"]),
+    ("+pauth-lr", 0, &["pauth-lr", "pauth"]),
+    ("+cssc", 0, &["cssc"]),
+];
+
+const X86_FEATURE_MACROS_FIRST: &[(&str, &str)] = &[
+    ("aes", "__AES__"),
+    ("vaes", "__VAES__"),
+    ("pclmul", "__PCLMUL__"),
+    ("vpclmulqdq", "__VPCLMULQDQ__"),
+];
+
+const X86_FEATURE_MACROS_SECOND: &[(&str, &str)] = &[
+    ("lzcnt", "__LZCNT__"),
+    ("rdrnd", "__RDRND__"),
+    ("fsgsbase", "__FSGSBASE__"),
+    ("bmi", "__BMI__"),
+    ("bmi2", "__BMI2__"),
+    ("popcnt", "__POPCNT__"),
+    ("rtm", "__RTM__"),
+    ("prfchw", "__PRFCHW__"),
+    ("rdseed", "__RDSEED__"),
+    ("adx", "__ADX__"),
+    ("tbm", "__TBM__"),
+    ("lwp", "__LWP__"),
+    ("mwaitx", "__MWAITX__"),
+    ("movbe", "__MOVBE__"),
+];
+
+const X86_FEATURE_MACROS_THIRD: &[(&str, &str)] = &[
+    ("fma", "__FMA__"),
+    ("f16c", "__F16C__"),
+    ("gfni", "__GFNI__"),
+];
+
+const X86_FEATURE_MACROS_FOURTH: &[(&str, &str)] = &[
+    ("avx10v2aux", "__AVX10_V2_AUX__"),
+    ("avx512cd", "__AVX512CD__"),
+    ("avx512vpopcntdq", "__AVX512VPOPCNTDQ__"),
+    ("avx512vnni", "__AVX512VNNI__"),
+    ("avx512bf16", "__AVX512BF16__"),
+    ("avx512fp16", "__AVX512FP16__"),
+    ("avx512dq", "__AVX512DQ__"),
+    ("avx512bitalg", "__AVX512BITALG__"),
+    ("avx512bmm", "__AVX512BMM__"),
+    ("avx512bw", "__AVX512BW__"),
+    ("avx512vl", "__AVX512VL__"),
+    ("avx512vbmi", "__AVX512VBMI__"),
+    ("avx512vbmi2", "__AVX512VBMI2__"),
+    ("avx512ifma", "__AVX512IFMA__"),
+    ("avx512vp2intersect", "__AVX512VP2INTERSECT__"),
+    ("sha", "__SHA__"),
+    ("sha512", "__SHA512__"),
+    ("fxsr", "__FXSR__"),
+    ("xsave", "__XSAVE__"),
+    ("xsaveopt", "__XSAVEOPT__"),
+    ("xsavec", "__XSAVEC__"),
+    ("xsaves", "__XSAVES__"),
+    ("pku", "__PKU__"),
+    ("clflushopt", "__CLFLUSHOPT__"),
+    ("clwb", "__CLWB__"),
+    ("wbnoinvd", "__WBNOINVD__"),
+    ("shstk", "__SHSTK__"),
+    ("sgx", "__SGX__"),
+    ("sm3", "__SM3__"),
+    ("sm4", "__SM4__"),
+    ("prefetchi", "__PREFETCHI__"),
+    ("clzero", "__CLZERO__"),
+    ("kl", "__KL__"),
+    ("widekl", "__WIDEKL__"),
+    ("rdpid", "__RDPID__"),
+    ("rdpru", "__RDPRU__"),
+    ("cldemote", "__CLDEMOTE__"),
+    ("waitpkg", "__WAITPKG__"),
+    ("movdiri", "__MOVDIRI__"),
+    ("movdir64b", "__MOVDIR64B__"),
+    ("movrs", "__MOVRS__"),
+    ("pconfig", "__PCONFIG__"),
+    ("ptwrite", "__PTWRITE__"),
+    ("invpcid", "__INVPCID__"),
+    ("enqcmd", "__ENQCMD__"),
+    ("hreset", "__HRESET__"),
+    ("amx-tile", "__AMX_TILE__"),
+    ("amx-int8", "__AMX_INT8__"),
+    ("amx-bf16", "__AMX_BF16__"),
+    ("amx-fp16", "__AMX_FP16__"),
+    ("amx-complex", "__AMX_COMPLEX__"),
+    ("amx-fp8", "__AMX_FP8__"),
+    ("amx-movrs", "__AMX_MOVRS__"),
+    ("amx-avx512", "__AMX_AVX512__"),
+    ("cmpccxadd", "__CMPCCXADD__"),
+    ("raoint", "__RAOINT__"),
+    ("avxifma", "__AVXIFMA__"),
+    ("avxneconvert", "__AVXNECONVERT__"),
+    ("avxvnni", "__AVXVNNI__"),
+    ("avxvnniint16", "__AVXVNNIINT16__"),
+    ("avxvnniint8", "__AVXVNNIINT8__"),
+    ("serialize", "__SERIALIZE__"),
+    ("tsxldtrk", "__TSXLDTRK__"),
+    ("uintr", "__UINTR__"),
+    ("usermsr", "__USERMSR__"),
+    ("crc32", "__CRC32__"),
+    ("egpr", "__EGPR__"),
+    ("push2pop2", "__PUSH2POP2__"),
+    ("ppx", "__PPX__"),
+    ("ndd", "__NDD__"),
+    ("ccmp", "__CCMP__"),
+    ("nf", "__NF__"),
+    ("cf", "__CF__"),
+    ("zu", "__ZU__"),
+    ("jmpabs", "__JMPABS__"),
+];
+
+const X86_SSE_LEVELS: &[(&str, u32)] = &[
+    ("+avx512f", 9),
+    ("+avx2", 8),
+    ("+avx", 7),
+    ("+sse4.2", 6),
+    ("+sse4.1", 5),
+    ("+ssse3", 4),
+    ("+sse3", 3),
+    ("+sse2", 2),
+    ("+sse", 1),
+];
+
+const X86_SSE_MACROS: &[(u32, &[&str])] = &[
+    (9, &["__AVX512F__"]),
+    (8, &["__AVX2__"]),
+    (7, &["__AVX__"]),
+    (6, &["__SSE4_2__"]),
+    (5, &["__SSE4_1__"]),
+    (4, &["__SSSE3__"]),
+    (3, &["__SSE3__"]),
+    (2, &["__SSE2__", "__SSE2_MATH__"]),
+    (1, &["__SSE__", "__SSE_MATH__"]),
+];
+
+pub struct MacroBuilder {
+    pub text: String,
+}
+
+impl MacroBuilder {
+    fn define(&mut self, name: &str, value: &str) {
+        self.text.push_str("#define ");
+        self.text.push_str(name);
+        self.text.push(' ');
+        self.text.push_str(value);
+        self.text.push('\n');
+    }
+
+    fn define_one(&mut self, name: &str) {
+        self.define(name, "1");
+    }
+
+    fn append(&mut self, line: &str) {
+        self.text.push_str(line);
+        self.text.push('\n');
+    }
+
+    fn define_standard(&mut self, name: &str, gnu: bool) {
+        if gnu {
+            self.define_one(name);
+        }
+        self.define_one(&format!("__{name}"));
+        self.define_one(&format!("__{name}__"));
+    }
+
+    fn define_processor(&mut self, name: &str, tuning: bool) {
+        self.define_one(&format!("__{name}"));
+        self.define_one(&format!("__{name}__"));
+        if tuning {
+            self.define_one(&format!("__tune_{name}__"));
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct X86Target {
+    pub cpu: usize,
+    pub features: BTreeSet<String>,
+    pub sse_level: u32,
+    pub xop_level: u32,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AArch64Target {
+    pub floating_point: u32,
+    pub flags: BTreeSet<&'static str>,
+    pub unaligned_access: bool,
+    pub multi_versioning: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct ArmTarget {
+    pub architecture: usize,
+    pub thumb: bool,
+    pub abi: String,
+    pub floating_point: u32,
+    pub hardware_floating_point: u32,
+    pub load_exclusive: u32,
+    pub hardware_divide: u32,
+    pub vector_extension: u32,
+    pub coprocessor_mask: u32,
+    pub soft_float: bool,
+    pub soft_float_abi: bool,
+    pub crc: bool,
+    pub sha2: bool,
+    pub aes: bool,
+    pub dsp: bool,
+    pub dot_product: bool,
+    pub matrix_multiply: bool,
+    pub pointer_authentication: bool,
+    pub branch_target: bool,
+    pub bfloat16: bool,
+    pub fast_half: bool,
+    pub unaligned_access: bool,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub enum TargetFamily {
+    X86(X86Target),
+    AArch64(AArch64Target),
+    Arm(ArmTarget),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct TargetInfo {
+    pub triple: Triple,
+    pub options: TargetOptions,
+    pub pointer_width: u32,
+    pub bool_width: u32,
+    pub short_width: u32,
+    pub int_width: u32,
+    pub long_width: u32,
+    pub long_long_width: u32,
+    pub float_width: u32,
+    pub double_width: u32,
+    pub long_double_width: u32,
+    pub suitable_align: u32,
+    pub size_type: IntegerType,
+    pub ptrdiff_type: IntegerType,
+    pub intmax_type: IntegerType,
+    pub intptr_type: IntegerType,
+    pub wchar_type: IntegerType,
+    pub wint_type: IntegerType,
+    pub char16_type: IntegerType,
+    pub char32_type: IntegerType,
+    pub int64_type: IntegerType,
+    pub int16_type: IntegerType,
+    pub sig_atomic_type: IntegerType,
+    pub half_format: FloatFormat,
+    pub float_format: FloatFormat,
+    pub double_format: FloatFormat,
+    pub long_double_format: FloatFormat,
+    pub max_atomic_inline_width: u32,
+    pub max_atomic_promote_width: u32,
+    pub has_float16: bool,
+    pub has_float128: bool,
+    pub user_label_prefix: &'static str,
+    pub family: TargetFamily,
 }
 
 impl Default for TargetInfo {
     fn default() -> TargetInfo {
-        TargetInfo::from_triple("x86_64-unknown-linux-gnu")
+        match TargetInfo::create(&TargetOptions::default()) {
+            Ok(target) => target,
+            Err(reason) => panic!("{reason}"),
+        }
+    }
+}
+
+fn x86_feature_index(name: &str) -> Option<usize> {
+    X86_FEATURES.iter().position(|item| *item == name)
+}
+
+fn x86_bits(indices: &[u16]) -> u128 {
+    indices
+        .iter()
+        .fold(0u128, |bits, index| bits | (1u128 << *index))
+}
+
+fn x86_set_feature(features: &mut BTreeMap<String, bool>, name: &str, enabled: bool) {
+    let name = match (name, enabled) {
+        ("sse4", true) => "sse4.2",
+        ("sse4", false) => "sse4.1",
+        _ => name,
+    };
+    features.insert(name.to_string(), enabled);
+    let Some(index) = x86_feature_index(name) else {
+        return;
+    };
+    let count = X86_FEATURES.len();
+    let mut bits = 0u128;
+    if enabled {
+        let implied = x86_bits(X86_IMPLIED_FEATURES[index]);
+        if implied != 0 {
+            bits |= implied;
+            loop {
+                let previous = bits;
+                for position in (0..count).rev() {
+                    if bits >> position & 1 == 1 {
+                        bits |= x86_bits(X86_IMPLIED_FEATURES[position]);
+                    }
+                }
+                if previous == bits {
+                    break;
+                }
+            }
+        }
+    } else {
+        bits |= 1u128 << index;
+        loop {
+            let previous = bits;
+            for (position, implied) in X86_IMPLIED_FEATURES.iter().enumerate() {
+                if x86_bits(implied) & bits != 0 {
+                    bits |= 1u128 << position;
+                }
+            }
+            if previous == bits {
+                break;
+            }
+        }
+    }
+    for (position, feature) in X86_FEATURES.iter().enumerate() {
+        if bits >> position & 1 == 1 && !feature.is_empty() {
+            features.insert(feature.to_string(), enabled);
+        }
+    }
+}
+
+fn x86_parse_processor(name: &str, only_64_bit: bool) -> usize {
+    let wide = x86_feature_index("64bit").unwrap_or(0) as u16;
+    X86_PROCESSORS
+        .iter()
+        .find(|processor| {
+            !processor.dispatch_only
+                && processor.name == name
+                && (processor.features.contains(&wide) || !only_64_bit)
+        })
+        .map(|processor| processor.kind)
+        .unwrap_or(0)
+}
+
+fn x86_kind_index(name: &str) -> usize {
+    X86_CPU_KINDS
+        .iter()
+        .position(|kind| *kind == name)
+        .unwrap_or(0)
+}
+
+fn arm_processor(name: &str) -> Option<&'static ArmProcessor> {
+    ARM_PROCESSORS
+        .iter()
+        .find(|processor| processor.name == name)
+}
+
+fn arm_default_fpu(cpu: &str, architecture: usize) -> usize {
+    if cpu == "generic" {
+        return ARM_ARCHITECTURES[architecture].default_fpu;
+    }
+    arm_processor(cpu)
+        .map(|processor| processor.default_fpu)
+        .unwrap_or(0)
+}
+
+fn arm_default_extensions(cpu: &str, architecture: usize) -> u64 {
+    if cpu == "generic" {
+        return ARM_ARCHITECTURES[architecture].base_extensions;
+    }
+    arm_processor(cpu)
+        .map(|processor| {
+            ARM_ARCHITECTURES[processor.architecture].base_extensions | processor.extensions
+        })
+        .unwrap_or(0)
+}
+
+fn arm_fpu_features(kind: usize, features: &mut Vec<&'static str>) {
+    if kind == 0 || kind >= ARM_FLOATING_POINT_UNITS.len() {
+        return;
+    }
+    let unit = &ARM_FLOATING_POINT_UNITS[kind];
+    let table: [(&str, &str, u8, u8); 18] = [
+        ("+vfp2", "-vfp2", 1, 1),
+        ("+vfp2sp", "-vfp2sp", 1, 2),
+        ("+vfp3", "-vfp3", 2, 0),
+        ("+vfp3d16", "-vfp3d16", 2, 1),
+        ("+vfp3d16sp", "-vfp3d16sp", 2, 2),
+        ("+vfp3sp", "-vfp3sp", 2, 0),
+        ("+fp16", "-fp16", 3, 2),
+        ("+vfp4", "-vfp4", 4, 0),
+        ("+vfp4d16", "-vfp4d16", 4, 1),
+        ("+vfp4d16sp", "-vfp4d16sp", 4, 2),
+        ("+vfp4sp", "-vfp4sp", 4, 0),
+        ("+fp-armv8", "-fp-armv8", 5, 0),
+        ("+fp-armv8d16", "-fp-armv8d16", 5, 1),
+        ("+fp-armv8d16sp", "-fp-armv8d16sp", 5, 2),
+        ("+fp-armv8sp", "-fp-armv8sp", 5, 0),
+        ("+fullfp16", "-fullfp16", 6, 2),
+        ("+fp64", "-fp64", 1, 1),
+        ("+d32", "-d32", 2, 0),
+    ];
+    for (plus, minus, version, restriction) in table {
+        if unit.version >= version && unit.restriction <= restriction {
+            features.push(plus);
+        } else {
+            features.push(minus);
+        }
+    }
+    for (plus, minus, level) in [
+        ("+neon", "-neon", 1),
+        ("+sha2", "-sha2", 2),
+        ("+aes", "-aes", 2),
+    ] {
+        if unit.neon >= level {
+            features.push(plus);
+        } else {
+            features.push(minus);
+        }
+    }
+}
+
+fn arm_extension_features(extensions: u64, features: &mut Vec<&'static str>) {
+    if extensions == 0 {
+        return;
+    }
+    for extension in ARM_EXTENSIONS.iter() {
+        if extensions & extension.identifier == extension.identifier
+            && !extension.feature.is_empty()
+        {
+            features.push(extension.feature);
+        } else if !extension.negative_feature.is_empty() {
+            features.push(extension.negative_feature);
+        }
+    }
+    features.push(if extensions & ARM_EXTENSION_HARDWARE_DIVIDE_ARM != 0 {
+        "+hwdiv-arm"
+    } else {
+        "-hwdiv-arm"
+    });
+    features.push(if extensions & ARM_EXTENSION_HARDWARE_DIVIDE_THUMB != 0 {
+        "+hwdiv"
+    } else {
+        "-hwdiv"
+    });
+}
+
+fn arm_cpu_attribute(architecture: usize) -> &'static str {
+    let entry = &ARM_ARCHITECTURES[architecture];
+    match entry.kind {
+        "ARMV6M" => "6M",
+        "ARMV7S" => "7S",
+        "ARMV7A" => "7A",
+        "ARMV7R" => "7R",
+        "ARMV7M" => "7M",
+        "ARMV7EM" => "7EM",
+        "ARMV7VE" => "7VE",
+        "ARMV8A" => "8A",
+        "ARMV8_1A" => "8_1A",
+        "ARMV8_2A" => "8_2A",
+        "ARMV8_3A" => "8_3A",
+        "ARMV8_4A" => "8_4A",
+        "ARMV8_5A" => "8_5A",
+        "ARMV8_6A" => "8_6A",
+        "ARMV8_7A" => "8_7A",
+        "ARMV8_8A" => "8_8A",
+        "ARMV8_9A" => "8_9A",
+        "ARMV9A" => "9A",
+        "ARMV9_1A" => "9_1A",
+        "ARMV9_2A" => "9_2A",
+        "ARMV9_3A" => "9_3A",
+        "ARMV9_4A" => "9_4A",
+        "ARMV9_5A" => "9_5A",
+        "ARMV9_6A" => "9_6A",
+        "ARMV9_7A" => "9_7A",
+        "ARMV8MBaseline" => "8M_BASE",
+        "ARMV8MMainline" => "8M_MAIN",
+        "ARMV8R" => "8R",
+        "ARMV8_1MMainline" => "8_1M_MAIN",
+        _ => entry.cpu_attribute,
+    }
+}
+
+impl ArmTarget {
+    fn kind(&self) -> &'static str {
+        ARM_ARCHITECTURES[self.architecture].kind
+    }
+
+    fn sub_architecture(&self) -> &'static str {
+        ARM_ARCHITECTURES[self.architecture].sub_architecture
+    }
+
+    fn profile(&self) -> char {
+        arm_arch_profile(self.sub_architecture())
+    }
+
+    fn version(&self) -> u32 {
+        arm_arch_version(self.sub_architecture())
+    }
+
+    fn cpu_profile(&self) -> &'static str {
+        match self.profile() {
+            'A' => "A",
+            'R' => "R",
+            'M' => "M",
+            _ => "",
+        }
+    }
+
+    fn supports_thumb(&self) -> bool {
+        arm_cpu_attribute(self.architecture).contains('T') || self.version() >= 6
+    }
+
+    fn supports_thumb2(&self) -> bool {
+        let attribute = arm_cpu_attribute(self.architecture);
+        attribute == "6T2" || (self.version() >= 7 && attribute != "8M_BASE")
+    }
+
+    fn has_vector_extension(&self) -> bool {
+        self.kind() == "ARMV8_1MMainline" && self.vector_extension != 0
+    }
+}
+
+impl TargetInfo {
+    fn base(triple: Triple, options: TargetOptions, family: TargetFamily) -> TargetInfo {
+        TargetInfo {
+            triple,
+            options,
+            pointer_width: 32,
+            bool_width: 8,
+            short_width: 16,
+            int_width: 32,
+            long_width: 32,
+            long_long_width: 64,
+            float_width: 32,
+            double_width: 64,
+            long_double_width: 64,
+            suitable_align: 64,
+            size_type: IntegerType::UnsignedLong,
+            ptrdiff_type: IntegerType::Long,
+            intmax_type: IntegerType::LongLong,
+            intptr_type: IntegerType::Long,
+            wchar_type: IntegerType::Int,
+            wint_type: IntegerType::Int,
+            char16_type: IntegerType::UnsignedShort,
+            char32_type: IntegerType::UnsignedInt,
+            int64_type: IntegerType::LongLong,
+            int16_type: IntegerType::Short,
+            sig_atomic_type: IntegerType::Int,
+            half_format: FloatFormat::Half,
+            float_format: FloatFormat::Single,
+            double_format: FloatFormat::Double,
+            long_double_format: FloatFormat::Double,
+            max_atomic_inline_width: 0,
+            max_atomic_promote_width: 0,
+            has_float16: false,
+            has_float128: false,
+            user_label_prefix: "",
+            family,
+        }
+    }
+
+    pub fn create(options: &TargetOptions) -> Result<TargetInfo, String> {
+        let triple = Triple::parse(&Triple::normalize(&options.triple));
+        let architecture = triple.arch;
+        if !matches!(
+            architecture,
+            "x86" | "x86_64" | "aarch64" | "aarch64_be" | "arm" | "armeb" | "thumb" | "thumbeb"
+        ) {
+            return Err(format!("target architecture {}", triple.arch_name()));
+        }
+        if triple.object_format != "elf" || triple.is_darwin() {
+            return Err(format!("target object format {}", triple.object_format));
+        }
+        let linux = triple.os == "linux";
+        if !(linux || triple.os == "unknown") || triple.environment == "ohos" {
+            return Err(format!("target system {}", triple.os_name()));
+        }
+        let mut target = match architecture {
+            "x86" | "x86_64" => TargetInfo::create_x86(triple, options.clone())?,
+            "aarch64" | "aarch64_be" => TargetInfo::create_aarch64(triple, options.clone())?,
+            _ => TargetInfo::create_arm(triple, options.clone())?,
+        };
+        if linux {
+            target.wint_type = IntegerType::UnsignedInt;
+            if matches!(architecture, "x86" | "x86_64") {
+                target.has_float128 = true;
+            }
+            if target.triple.is_android() && architecture == "x86" {
+                target.suitable_align = 32;
+                target.long_double_width = 64;
+                target.long_double_format = FloatFormat::Double;
+            }
+            if target.triple.is_android() && architecture == "x86_64" {
+                target.long_double_format = FloatFormat::Quadruple;
+            }
+        }
+        target.select_features()?;
+        match options.wchar_size {
+            1 => {
+                target.wchar_type = if options.wchar_signed {
+                    IntegerType::SignedChar
+                } else {
+                    IntegerType::UnsignedChar
+                }
+            }
+            2 => {
+                target.wchar_type = if options.wchar_signed {
+                    IntegerType::Short
+                } else {
+                    IntegerType::UnsignedShort
+                }
+            }
+            4 => {
+                target.wchar_type = if options.wchar_signed {
+                    IntegerType::Int
+                } else {
+                    IntegerType::UnsignedInt
+                }
+            }
+            _ => {}
+        }
+        Ok(target)
+    }
+
+    fn create_x86(triple: Triple, options: TargetOptions) -> Result<TargetInfo, String> {
+        let wide = triple.arch == "x86_64";
+        if triple.os == "elfiamcu" {
+            return Err("target system elfiamcu".to_string());
+        }
+        let family = TargetFamily::X86(X86Target {
+            cpu: 0,
+            features: BTreeSet::new(),
+            sse_level: 0,
+            xop_level: 0,
+        });
+        let mut target = TargetInfo::base(triple, options, family);
+        target.long_double_format = FloatFormat::ExtendedPrecision;
+        if wide {
+            let x32 = target.triple.is_x32();
+            let width = if x32 { 32 } else { 64 };
+            target.long_width = width;
+            target.pointer_width = width;
+            target.long_double_width = 128;
+            target.suitable_align = 128;
+            target.size_type = if x32 {
+                IntegerType::UnsignedInt
+            } else {
+                IntegerType::UnsignedLong
+            };
+            target.ptrdiff_type = if x32 {
+                IntegerType::Int
+            } else {
+                IntegerType::Long
+            };
+            target.intptr_type = target.ptrdiff_type;
+            target.intmax_type = if x32 {
+                IntegerType::LongLong
+            } else {
+                IntegerType::Long
+            };
+            target.int64_type = target.intmax_type;
+            target.max_atomic_promote_width = 128;
+            target.max_atomic_inline_width = 64;
+        } else {
+            target.long_double_width = 96;
+            target.suitable_align = 128;
+            target.size_type = IntegerType::UnsignedInt;
+            target.ptrdiff_type = IntegerType::Int;
+            target.intptr_type = IntegerType::Int;
+            target.max_atomic_promote_width = 64;
+            target.max_atomic_inline_width = 32;
+        }
+        if !target.options.cpu.is_empty() {
+            let kind = x86_parse_processor(&target.options.cpu, wide);
+            if kind == 0 {
+                return Err(format!("target cpu {}", target.options.cpu));
+            }
+            if let TargetFamily::X86(state) = &mut target.family {
+                state.cpu = kind;
+            }
+        }
+        if !target.options.abi.is_empty() {
+            return Err(format!("target abi {}", target.options.abi));
+        }
+        Ok(target)
+    }
+
+    fn create_aarch64(triple: Triple, options: TargetOptions) -> Result<TargetInfo, String> {
+        let family = TargetFamily::AArch64(AArch64Target {
+            floating_point: AARCH64_FLOATING_POINT,
+            flags: BTreeSet::new(),
+            unaligned_access: true,
+            multi_versioning: true,
+        });
+        let mut target = TargetInfo::base(triple, options, family);
+        target.wchar_type = IntegerType::UnsignedInt;
+        target.int64_type = IntegerType::Long;
+        target.intmax_type = IntegerType::Long;
+        target.has_float16 = true;
+        target.long_width = 64;
+        target.pointer_width = 64;
+        target.max_atomic_inline_width = 128;
+        target.max_atomic_promote_width = 128;
+        target.long_double_width = 128;
+        target.suitable_align = 128;
+        target.long_double_format = FloatFormat::Quadruple;
+        if !target.options.cpu.is_empty() && target.options.cpu != "generic" {
+            return Err(format!("target cpu {}", target.options.cpu));
+        }
+        if !target.options.abi.is_empty() && target.options.abi != "aapcs" {
+            return Err(format!("target abi {}", target.options.abi));
+        }
+        Ok(target)
+    }
+
+    fn create_arm(triple: Triple, options: TargetOptions) -> Result<TargetInfo, String> {
+        let soft_float_abi = options
+            .features
+            .iter()
+            .any(|item| item == "+soft-float-abi");
+        let name = triple.arch_name().to_string();
+        let family = TargetFamily::Arm(ArmTarget {
+            architecture: ARM_ARCHITECTURES
+                .iter()
+                .position(|entry| entry.kind == "ARMV4T")
+                .unwrap_or(0),
+            thumb: name.starts_with("thumb"),
+            abi: String::new(),
+            floating_point: 0,
+            hardware_floating_point: 0,
+            load_exclusive: 0,
+            hardware_divide: 0,
+            vector_extension: 0,
+            coprocessor_mask: 0,
+            soft_float: false,
+            soft_float_abi,
+            crc: false,
+            sha2: false,
+            aes: false,
+            dsp: false,
+            dot_product: false,
+            matrix_multiply: false,
+            pointer_authentication: false,
+            branch_target: false,
+            bfloat16: false,
+            fast_half: false,
+            unaligned_access: true,
+        });
+        let mut target = TargetInfo::base(triple, options, family);
+        target.ptrdiff_type = IntegerType::Int;
+        target.intptr_type = IntegerType::Int;
+        target.size_type = IntegerType::UnsignedInt;
+        let parsed = arm_parse_architecture(&name);
+        if parsed != 0 {
+            target.arm_mut().architecture = parsed;
+        }
+        let abi = match target.triple.environment {
+            "android" | "gnueabi" | "gnueabit64" | "gnueabihf" | "gnueabihft64" | "musleabi"
+            | "musleabihf" => "aapcs-linux",
+            "eabihf" | "eabi" => "aapcs",
+            "gnu" => "apcs-gnu",
+            _ => "aapcs",
+        };
+        target.arm_set_abi(abi);
+        target.arm_set_atomic();
+        let cpu = target.options.cpu.clone();
+        if !cpu.is_empty() {
+            if cpu != "generic" {
+                let architecture = arm_processor(&cpu)
+                    .map(|processor| processor.architecture)
+                    .unwrap_or(0);
+                target.arm_mut().architecture = architecture;
+            }
+            if target.arm().architecture == 0 {
+                return Err(format!("target cpu {cpu}"));
+            }
+            target.arm_set_atomic();
+        }
+        let requested = target.options.abi.clone();
+        if !requested.is_empty() && !target.arm_set_abi(&requested) {
+            return Err(format!("target abi {requested}"));
+        }
+        Ok(target)
+    }
+
+    fn arm(&self) -> &ArmTarget {
+        match &self.family {
+            TargetFamily::Arm(state) => state,
+            _ => unreachable!(),
+        }
+    }
+
+    fn arm_mut(&mut self) -> &mut ArmTarget {
+        match &mut self.family {
+            TargetFamily::Arm(state) => state,
+            _ => unreachable!(),
+        }
+    }
+
+    fn arm_set_abi(&mut self, name: &str) -> bool {
+        match name {
+            "apcs-gnu" | "aapcs16" => {
+                let width = if name == "aapcs16" { 64 } else { 32 };
+                self.suitable_align = width;
+                self.wchar_type = IntegerType::Int;
+            }
+            "aapcs" | "aapcs-vfp" | "aapcs-linux" => {
+                self.suitable_align = 64;
+                self.wchar_type = IntegerType::UnsignedInt;
+            }
+            _ => return false,
+        }
+        self.arm_mut().abi = name.to_string();
+        true
+    }
+
+    fn arm_set_atomic(&mut self) {
+        let linux = self.triple.os == "linux";
+        let state = self.arm();
+        let (profile, version) = (state.profile(), state.version());
+        if profile == 'M' {
+            self.max_atomic_promote_width = 32;
+            if version >= 7 {
+                self.max_atomic_inline_width = 32;
+            }
+        } else {
+            self.max_atomic_promote_width = 64;
+            if linux || version >= 6 {
+                self.max_atomic_inline_width = 64;
+            }
+        }
+    }
+
+    fn select_features(&mut self) -> Result<(), String> {
+        let written = self.options.features.clone();
+        for feature in &written {
+            if !feature.starts_with('+') && !feature.starts_with('-') {
+                return Err(format!("target feature {feature}"));
+            }
+        }
+        let mut map: BTreeMap<String, bool> = BTreeMap::new();
+        let cpu = self.options.cpu.clone();
+        match &self.family {
+            TargetFamily::X86(_) => {
+                if self.triple.arch == "x86_64" {
+                    x86_set_feature(&mut map, "sse2", true);
+                }
+                let wide = x86_feature_index("64bit").unwrap_or(0) as u16;
+                if let Some(processor) = X86_PROCESSORS.iter().find(|item| item.name == cpu) {
+                    for index in processor.features {
+                        let name = X86_FEATURES[*index as usize];
+                        if *index != wide && !name.is_empty() {
+                            x86_set_feature(&mut map, name, true);
+                        }
+                    }
+                }
+                let mut updated: Vec<String> = Vec::new();
+                for feature in &written {
+                    if feature == "+general-regs-only" {
+                        updated.extend(["-x87", "-mmx", "-sse"].map(str::to_string));
+                    } else if feature == "+apxf" || feature == "-apxf" {
+                        let sign = &feature[..1];
+                        for part in [
+                            "egpr",
+                            "push2pop2",
+                            "ppx",
+                            "ndd",
+                            "ccmp",
+                            "nf",
+                            "zu",
+                            "jmpabs",
+                        ] {
+                            updated.push(format!("{sign}{part}"));
+                        }
+                    } else {
+                        updated.push(feature.clone());
+                    }
+                }
+                for feature in &updated {
+                    x86_set_feature(&mut map, &feature[1..], feature.starts_with('+'));
+                }
+                let written_has = |name: &str| updated.iter().any(|item| item == name);
+                for (trigger, implied, blocker) in [
+                    ("sse4.2", "popcnt", "-popcnt"),
+                    ("sse", "mmx", "-mmx"),
+                    ("avx", "xsave", "-xsave"),
+                    ("sse4.2", "crc32", "-crc32"),
+                ] {
+                    if map.get(trigger) == Some(&true) && !written_has(blocker) {
+                        map.insert(implied.to_string(), true);
+                    }
+                }
+            }
+            TargetFamily::AArch64(_) => {
+                for feature in &written {
+                    let name = &feature[1..];
+                    let enabled = feature.starts_with('+');
+                    map.insert(name.to_string(), enabled);
+                    if name == "v8a" {
+                        if enabled {
+                            map.insert("fp-armv8".to_string(), true);
+                            map.insert("neon".to_string(), true);
+                        }
+                    } else if (name.starts_with("v8") || name.starts_with("v9"))
+                        && name.ends_with(['a', 'r'])
+                    {
+                        return Err(format!("target feature {feature}"));
+                    }
+                }
+            }
+            TargetFamily::Arm(state) => {
+                let architecture = arm_parse_architecture(self.triple.arch_name());
+                let mut defaults: Vec<&'static str> = Vec::new();
+                arm_fpu_features(arm_default_fpu(&cpu, architecture), &mut defaults);
+                arm_extension_features(arm_default_extensions(&cpu, architecture), &mut defaults);
+                for feature in defaults {
+                    if let Some(name) = feature.strip_prefix('+') {
+                        map.insert(name.to_string(), true);
+                    }
+                }
+                map.insert("thumb-mode".to_string(), state.thumb);
+                for feature in &written {
+                    let fixed = match feature.as_str() {
+                        "+soft-float-abi" => continue,
+                        "+arm" => "-thumb-mode",
+                        "+thumb" => "+thumb-mode",
+                        other => other,
+                    };
+                    map.insert(fixed[1..].to_string(), fixed.starts_with('+'));
+                }
+            }
+        }
+        let features: Vec<String> = map
+            .iter()
+            .map(|(name, enabled)| format!("{}{name}", if *enabled { '+' } else { '-' }))
+            .collect();
+        match &mut self.family {
+            TargetFamily::X86(state) => {
+                for feature in &features {
+                    let Some(name) = feature.strip_prefix('+') else {
+                        continue;
+                    };
+                    state.features.insert(name.to_string());
+                    if let Some((_, level)) =
+                        X86_SSE_LEVELS.iter().find(|(item, _)| item == feature)
+                    {
+                        state.sse_level = state.sse_level.max(*level);
+                    }
+                    let xop = match name {
+                        "xop" => 3,
+                        "fma4" => 2,
+                        "sse4a" => 1,
+                        _ => 0,
+                    };
+                    state.xop_level = state.xop_level.max(xop);
+                }
+                self.has_float16 = state.sse_level >= 2;
+                if self.triple.arch == "x86" && state.features.contains("cx8") {
+                    self.max_atomic_inline_width = 64;
+                }
+                if self.triple.arch == "x86_64" && state.features.contains("cx16") {
+                    self.max_atomic_inline_width = 128;
+                }
+            }
+            TargetFamily::AArch64(state) => {
+                let mut no_floating_point = false;
+                let mut no_neon = false;
+                let mut no_scalable_vector = false;
+                for feature in &features {
+                    match feature.as_str() {
+                        "-fp-armv8" => no_floating_point = true,
+                        "-neon" => no_neon = true,
+                        "-sve" => no_scalable_vector = true,
+                        "-fmv" => state.multi_versioning = false,
+                        "+strict-align" => state.unaligned_access = false,
+                        _ => {}
+                    }
+                    if let Some((_, floating_point, flags)) = AARCH64_FEATURE_EFFECTS
+                        .iter()
+                        .find(|(name, _, _)| name == feature)
+                    {
+                        state.floating_point |= floating_point;
+                        state.flags.extend(flags.iter().copied());
+                    }
+                }
+                if features.iter().any(|feature| feature == "-d128") {
+                    state.flags.remove("d128");
+                }
+                if no_floating_point {
+                    state.floating_point &=
+                        !(AARCH64_FLOATING_POINT | AARCH64_NEON | AARCH64_SCALABLE_VECTOR);
+                }
+                if no_neon {
+                    state.floating_point &= !(AARCH64_NEON | AARCH64_SCALABLE_VECTOR);
+                }
+                if no_scalable_vector {
+                    state.floating_point &= !AARCH64_SCALABLE_VECTOR;
+                }
+            }
+            TargetFamily::Arm(state) => {
+                self.has_float16 = true;
+                for feature in &features {
+                    match feature.as_str() {
+                        "+soft-float" => state.soft_float = true,
+                        "+vfp2sp" | "+vfp2" => {
+                            state.floating_point |= ARM_FLOATING_POINT_VFP2;
+                            state.hardware_floating_point |= ARM_HARDWARE_SINGLE;
+                            if feature == "+vfp2" {
+                                state.hardware_floating_point |= ARM_HARDWARE_DOUBLE;
+                            }
+                        }
+                        "+vfp3sp" | "+vfp3d16sp" | "+vfp3" | "+vfp3d16" => {
+                            state.floating_point |= ARM_FLOATING_POINT_VFP3;
+                            state.hardware_floating_point |= ARM_HARDWARE_SINGLE;
+                            if feature == "+vfp3" || feature == "+vfp3d16" {
+                                state.hardware_floating_point |= ARM_HARDWARE_DOUBLE;
+                            }
+                        }
+                        "+vfp4sp" | "+vfp4d16sp" | "+vfp4" | "+vfp4d16" => {
+                            state.floating_point |= ARM_FLOATING_POINT_VFP4;
+                            state.hardware_floating_point |=
+                                ARM_HARDWARE_SINGLE | ARM_HARDWARE_HALF;
+                            if feature == "+vfp4" || feature == "+vfp4d16" {
+                                state.hardware_floating_point |= ARM_HARDWARE_DOUBLE;
+                            }
+                        }
+                        "+fp-armv8sp" | "+fp-armv8d16sp" | "+fp-armv8" | "+fp-armv8d16" => {
+                            state.floating_point |= ARM_FLOATING_POINT_ARMV8;
+                            state.hardware_floating_point |=
+                                ARM_HARDWARE_SINGLE | ARM_HARDWARE_HALF;
+                            if feature == "+fp-armv8" || feature == "+fp-armv8d16" {
+                                state.hardware_floating_point |= ARM_HARDWARE_DOUBLE;
+                            }
+                        }
+                        "+neon" => {
+                            state.floating_point |= ARM_FLOATING_POINT_NEON;
+                            state.hardware_floating_point |= ARM_HARDWARE_SINGLE;
+                        }
+                        "+hwdiv" => state.hardware_divide |= ARM_DIVIDE_THUMB,
+                        "+hwdiv-arm" => state.hardware_divide |= ARM_DIVIDE_ARM,
+                        "+crc" => state.crc = true,
+                        "+sha2" => state.sha2 = true,
+                        "+aes" => state.aes = true,
+                        "+dsp" => state.dsp = true,
+                        "+fp64" => state.hardware_floating_point |= ARM_HARDWARE_DOUBLE,
+                        "+8msecext" => {
+                            if state.cpu_profile() != "M" || state.version() != 8 {
+                                return Err("target feature +8msecext".to_string());
+                            }
+                        }
+                        "+strict-align" => state.unaligned_access = false,
+                        "+fp16" => state.hardware_floating_point |= ARM_HARDWARE_HALF,
+                        "+fullfp16" => state.fast_half = true,
+                        "+dotprod" => state.dot_product = true,
+                        "+mve" => state.vector_extension |= ARM_VECTOR_INTEGER,
+                        "+mve.fp" => {
+                            state.fast_half = true;
+                            state.floating_point |= ARM_FLOATING_POINT_ARMV8;
+                            state.vector_extension |= ARM_VECTOR_INTEGER | ARM_VECTOR_FLOAT;
+                            state.hardware_floating_point |=
+                                ARM_HARDWARE_SINGLE | ARM_HARDWARE_HALF;
+                        }
+                        "+i8mm" => state.matrix_multiply = true,
+                        "+bf16" => state.bfloat16 = true,
+                        "+pacbti" => {
+                            state.pointer_authentication = true;
+                            state.branch_target = true;
+                        }
+                        other => {
+                            if let Some(digit) = other.strip_prefix("+cdecp") {
+                                if let Ok(coprocessor) = digit.parse::<u32>() {
+                                    if digit.len() == 1 && coprocessor <= 7 {
+                                        state.coprocessor_mask |= 1 << coprocessor;
+                                    }
+                                }
+                            }
+                        }
+                    }
+                }
+                let profile = state.profile();
+                let kind = state.kind();
+                state.load_exclusive = match state.version() {
+                    6 if profile == 'M' => 0,
+                    6 if kind == "ARMV6K" || kind == "ARMV6KZ" => {
+                        ARM_EXCLUSIVE_DOUBLE
+                            | ARM_EXCLUSIVE_WORD
+                            | ARM_EXCLUSIVE_HALF
+                            | ARM_EXCLUSIVE_BYTE
+                    }
+                    6 => ARM_EXCLUSIVE_WORD,
+                    7 | 8 if profile == 'M' => {
+                        ARM_EXCLUSIVE_WORD | ARM_EXCLUSIVE_HALF | ARM_EXCLUSIVE_BYTE
+                    }
+                    7..=9 => {
+                        ARM_EXCLUSIVE_DOUBLE
+                            | ARM_EXCLUSIVE_WORD
+                            | ARM_EXCLUSIVE_HALF
+                            | ARM_EXCLUSIVE_BYTE
+                    }
+                    _ => 0,
+                };
+            }
+        }
+        Ok(())
+    }
+
+    pub fn char_width(&self) -> u32 {
+        8
+    }
+
+    pub fn type_width(&self, ty: IntegerType) -> u32 {
+        match ty {
+            IntegerType::SignedChar | IntegerType::UnsignedChar => self.char_width(),
+            IntegerType::Short | IntegerType::UnsignedShort => self.short_width,
+            IntegerType::Int | IntegerType::UnsignedInt => self.int_width,
+            IntegerType::Long | IntegerType::UnsignedLong => self.long_width,
+            IntegerType::LongLong | IntegerType::UnsignedLongLong => self.long_long_width,
+        }
+    }
+
+    pub fn type_constant_suffix(&self, ty: IntegerType) -> &'static str {
+        match ty {
+            IntegerType::SignedChar | IntegerType::Short | IntegerType::Int => "",
+            IntegerType::Long => "L",
+            IntegerType::LongLong => "LL",
+            IntegerType::UnsignedChar if self.char_width() < self.int_width => "",
+            IntegerType::UnsignedChar | IntegerType::UnsignedShort
+                if self.short_width < self.int_width =>
+            {
+                ""
+            }
+            IntegerType::UnsignedChar | IntegerType::UnsignedShort | IntegerType::UnsignedInt => {
+                "U"
+            }
+            IntegerType::UnsignedLong => "UL",
+            IntegerType::UnsignedLongLong => "ULL",
+        }
+    }
+
+    pub fn least_integer_type(&self, width: u32, signed: bool) -> Option<IntegerType> {
+        let pick = |signed_type: IntegerType| {
+            if signed {
+                signed_type
+            } else {
+                signed_type.unsigned_counterpart()
+            }
+        };
+        if self.char_width() >= width {
+            Some(pick(IntegerType::SignedChar))
+        } else if self.short_width >= width {
+            Some(pick(IntegerType::Short))
+        } else if self.int_width >= width {
+            Some(pick(IntegerType::Int))
+        } else if self.long_width >= width {
+            Some(pick(IntegerType::Long))
+        } else if self.long_long_width >= width {
+            Some(pick(IntegerType::LongLong))
+        } else {
+            None
+        }
+    }
+
+    pub fn has_builtin_atomic(&self, size: u32, alignment: u32) -> bool {
+        size <= alignment
+            && size <= self.max_atomic_inline_width
+            && (size <= self.char_width() || (size / self.char_width()).is_power_of_two())
+    }
+
+    pub fn has_int128(&self) -> bool {
+        self.triple.arch == "x86_64" || self.pointer_width >= 64
+    }
+
+    pub fn max_bit_int_width(&self) -> u32 {
+        match self.family {
+            TargetFamily::X86(_) => MAXIMUM_INTEGER_BITS,
+            _ => 128,
+        }
+    }
+
+    pub fn interference_sizes(&self) -> (u32, u32) {
+        match self.family {
+            TargetFamily::AArch64(_) => (256, 64),
+            _ => (64, 64),
+        }
+    }
+
+    pub fn is_big_endian(&self) -> bool {
+        !self.triple.is_little_endian()
+    }
+
+    pub fn wchar_signed(&self) -> bool {
+        self.wchar_type.signed()
+    }
+
+    pub fn is_windows(&self) -> bool {
+        self.triple.is_windows()
+    }
+
+    pub fn supports_cpu_is(&self) -> bool {
+        matches!(self.family, TargetFamily::X86(_))
+    }
+
+    pub fn supports_cpu_init(&self) -> bool {
+        matches!(self.family, TargetFamily::X86(_))
+    }
+
+    pub fn supports_cpu_supports(&self) -> bool {
+        matches!(self.family, TargetFamily::X86(_) | TargetFamily::AArch64(_))
+    }
+
+    pub fn floating_point_evaluation_method(&self) -> u32 {
+        match &self.family {
+            TargetFamily::X86(state) if state.sse_level == 0 => 2,
+            _ => 0,
+        }
+    }
+
+    pub fn is_target_architecture(&self, name: &str) -> bool {
+        let wanted = Triple::parse(&format!("{}--", name.to_ascii_lowercase()));
+        let sub_architecture_matches =
+            wanted.sub_arch.is_empty() || wanted.sub_arch == self.triple.sub_arch;
+        if self.triple.is_thumb()
+            && sub_architecture_matches
+            && ((self.triple.arch == "thumb" && wanted.arch == "arm")
+                || (self.triple.arch == "thumbeb" && wanted.arch == "armeb"))
+        {
+            return true;
+        }
+        sub_architecture_matches && wanted.arch == self.triple.arch
+    }
+
+    pub fn is_target_vendor(&self, name: &str) -> bool {
+        let vendor = match self.triple.vendor_name() {
+            "" => "unknown",
+            other => other,
+        };
+        vendor.eq_ignore_ascii_case(name)
+    }
+
+    pub fn is_target_system(&self, name: &str) -> bool {
+        let wanted = Triple::parse(&format!("unknown-unknown-{}", name.to_ascii_lowercase()));
+        if wanted.os == "darwin" {
+            return self.triple.is_darwin();
+        }
+        self.triple.os == wanted.os
+    }
+
+    pub fn is_target_environment(&self, name: &str) -> bool {
+        let wanted = Triple::parse(&format!("---{}", name.to_ascii_lowercase()));
+        if wanted.environment == "unknown" && wanted.environment_name() != "unknown" {
+            return false;
+        }
+        self.triple.environment == wanted.environment
+    }
+
+    fn target_defines(
+        &self,
+        language: &LanguageOptions,
+        posix_threads: bool,
+        builder: &mut MacroBuilder,
+    ) {
+        match &self.family {
+            TargetFamily::X86(state) => self.x86_defines(state, language, builder),
+            TargetFamily::AArch64(state) => self.aarch64_defines(state, builder),
+            TargetFamily::Arm(state) => self.arm_defines(state, builder),
+        }
+        if self.triple.os == "linux" {
+            builder.define_standard("unix", language.gnu);
+            builder.define_standard("linux", language.gnu);
+            if self.triple.is_android() {
+                builder.define("__ANDROID__", "1");
+                let major = self.triple.environment_version();
+                if major != 0 {
+                    builder.define("__ANDROID_MIN_SDK_VERSION__", &major.to_string());
+                    builder.define("__ANDROID_API__", "__ANDROID_MIN_SDK_VERSION__");
+                }
+            } else {
+                builder.define_one("__gnu_linux__");
+            }
+            if posix_threads {
+                builder.define_one("_REENTRANT");
+            }
+            if self.has_float128 {
+                builder.define_one("__FLOAT128__");
+            }
+            if self.triple.is_time64_abi() {
+                builder.define("_FILE_OFFSET_BITS", "64");
+                builder.define("_TIME_BITS", "64");
+            }
+        }
+    }
+
+    fn code_model(&self) -> String {
+        match self.options.code_model.as_str() {
+            "default" => "small".to_string(),
+            other => other.to_string(),
+        }
+    }
+
+    fn x86_defines(
+        &self,
+        state: &X86Target,
+        language: &LanguageOptions,
+        builder: &mut MacroBuilder,
+    ) {
+        let has = |name: &str| state.features.contains(name);
+        builder.define_one("__GCC_ASM_FLAG_OUTPUTS__");
+        builder.define_one(&format!("__code_model_{}__", self.code_model()));
+        if self.triple.arch == "x86_64" {
+            builder.define_one("__amd64__");
+            builder.define_one("__amd64");
+            builder.define_one("__x86_64");
+            builder.define_one("__x86_64__");
+            if self.triple.arch_name() == "x86_64h" {
+                builder.define_one("__x86_64h");
+                builder.define_one("__x86_64h__");
+            }
+        } else {
+            builder.define_standard("i386", language.gnu);
+        }
+        if self.triple.sub_arch == "lfi" {
+            builder.define_one("__LFI__");
+        }
+        builder.define_one("__SEG_GS");
+        builder.define_one("__SEG_FS");
+        builder.define("__seg_gs", "__attribute__((address_space(256)))");
+        builder.define("__seg_fs", "__attribute__((address_space(257)))");
+        let kind = X86_CPU_KINDS[state.cpu];
+        match kind {
+            "i386" => builder.define_one("__tune_i386__"),
+            "i486" | "WinChipC6" | "WinChip2" | "C3" => builder.define_processor("i486", true),
+            "PentiumMMX" | "i586" | "Pentium" => {
+                if kind == "PentiumMMX" {
+                    builder.define_one("__pentium_mmx__");
+                    builder.define_one("__tune_pentium_mmx__");
+                }
+                builder.define_processor("i586", true);
+                builder.define_processor("pentium", true);
+            }
+            "Pentium3" | "PentiumM" | "Pentium2" | "C3_2" | "PentiumPro" | "i686" => {
+                if matches!(kind, "Pentium3" | "PentiumM") {
+                    builder.define_one("__tune_pentium3__");
+                }
+                if matches!(kind, "Pentium3" | "PentiumM" | "Pentium2" | "C3_2") {
+                    builder.define_one("__tune_pentium2__");
+                }
+                builder.define_processor("i686", true);
+                builder.define_processor("pentiumpro", true);
+            }
+            "Pentium4" => builder.define_processor("pentium4", true),
+            "Yonah" | "Prescott" | "Nocona" => builder.define_processor("nocona", true),
+            "Core2" | "Penryn" => builder.define_processor("core2", true),
+            "Bonnell" => builder.define_processor("atom", true),
+            "Silvermont" => builder.define_processor("slm", true),
+            "Goldmont" => builder.define_processor("goldmont", true),
+            "GoldmontPlus" => builder.define_processor("goldmont_plus", true),
+            "Tremont" => builder.define_processor("tremont", true),
+            "Gracemont" | "Nehalem" | "Westmere" | "SandyBridge" | "IvyBridge" | "Haswell"
+            | "Broadwell" | "SkylakeClient" | "SkylakeServer" | "Cascadelake" | "Cooperlake"
+            | "Cannonlake" | "IcelakeClient" | "Rocketlake" | "IcelakeServer" | "Tigerlake"
+            | "SapphireRapids" | "Alderlake" | "Raptorlake" | "Meteorlake" | "Arrowlake"
+            | "ArrowlakeS" | "Lunarlake" | "Pantherlake" | "Wildcatlake" | "Novalake"
+            | "Sierraforest" | "Grandridge" | "Graniterapids" | "GraniterapidsD"
+            | "Emeraldrapids" | "Clearwaterforest" | "Diamondrapids" => {
+                builder.define_processor("corei7", true)
+            }
+            "KNL" => builder.define_processor("knl", true),
+            "Lakemont" => {
+                builder.define_processor("i586", false);
+                builder.define_processor("pentium", false);
+                builder.define_one("__tune_lakemont__");
+            }
+            "K6_2" | "K6_3" | "K6" => {
+                if kind == "K6_2" {
+                    builder.define_one("__k6_2__");
+                    builder.define_one("__tune_k6_2__");
+                }
+                if kind == "K6_3" {
+                    builder.define_one("__k6_3__");
+                    builder.define_one("__tune_k6_3__");
+                }
+                builder.define_processor("k6", true);
+            }
+            "Athlon" | "AthlonXP" => {
+                builder.define_processor("athlon", true);
+                if state.sse_level != 0 {
+                    builder.define_one("__athlon_sse__");
+                    builder.define_one("__tune_athlon_sse__");
+                }
+            }
+            "K8" | "K8SSE3" | "x86_64" => builder.define_processor("k8", true),
+            "AMDFAM10" => builder.define_processor("amdfam10", true),
+            "BTVER1" => builder.define_processor("btver1", true),
+            "BTVER2" => builder.define_processor("btver2", true),
+            "BDVER1" => builder.define_processor("bdver1", true),
+            "BDVER2" => builder.define_processor("bdver2", true),
+            "BDVER3" => builder.define_processor("bdver3", true),
+            "BDVER4" => builder.define_processor("bdver4", true),
+            "ZNVER1" => builder.define_processor("znver1", true),
+            "ZNVER2" => builder.define_processor("znver2", true),
+            "ZNVER3" => builder.define_processor("znver3", true),
+            "ZNVER4" => builder.define_processor("znver4", true),
+            "ZNVER5" => builder.define_processor("znver5", true),
+            "ZNVER6" => builder.define_processor("znver6", true),
+            "Geode" => builder.define_processor("geode", true),
+            "C86_4G_M4" => builder.define_processor("c86_4g_m4", true),
+            "C86_4G_M6" => builder.define_processor("c86_4g_m6", true),
+            "C86_4G_M7" => builder.define_processor("c86_4g_m7", true),
+            "C86_4G_M8" => builder.define_processor("c86_4g_m8", true),
+            _ => {}
+        }
+        builder.define("__REGISTER_PREFIX__", "");
+        builder.define_one("__NO_MATH_INLINES");
+        for (feature, name) in X86_FEATURE_MACROS_FIRST {
+            if has(feature) {
+                builder.define_one(name);
+            }
+        }
+        if has("sahf") || self.triple.arch == "x86" {
+            builder.define_one("__LAHF_SAHF__");
+        }
+        for (feature, name) in X86_FEATURE_MACROS_SECOND {
+            if has(feature) {
+                builder.define_one(name);
+            }
+        }
+        if state.xop_level >= 3 {
+            builder.define_one("__XOP__");
+        }
+        if state.xop_level >= 2 {
+            builder.define_one("__FMA4__");
+        }
+        if state.xop_level >= 1 {
+            builder.define_one("__SSE4A__");
+        }
+        for (feature, name) in X86_FEATURE_MACROS_THIRD {
+            if has(feature) {
+                builder.define_one(name);
+            }
+        }
+        if has("avx10.1") {
+            builder.define_one("__AVX10_1__");
+            builder.define_one("__AVX10_1_512__");
+        }
+        if has("avx10.2") {
+            builder.define_one("__AVX10_2__");
+            builder.define_one("__AVX10_2_512__");
+        }
+        for (feature, name) in X86_FEATURE_MACROS_FOURTH {
+            if has(feature) {
+                builder.define_one(name);
+            }
+        }
+        if [
+            "egpr",
+            "push2pop2",
+            "ppx",
+            "ndd",
+            "ccmp",
+            "nf",
+            "zu",
+            "jmpabs",
+        ]
+        .iter()
+        .all(|feature| has(feature))
+        {
+            builder.define_one("__APX_F__");
+        }
+        if has("egpr") && has("inline-asm-use-gpr32") {
+            builder.define_one("__APX_INLINE_ASM_USE_GPR32__");
+        }
+        for (level, names) in X86_SSE_MACROS {
+            if state.sse_level >= *level {
+                for name in names.iter() {
+                    builder.define_one(name);
+                }
+            }
+        }
+        if has("mmx") {
+            builder.define_one("__MMX__");
+        }
+        if state.cpu >= x86_kind_index("i486") || state.cpu == 0 {
+            builder.define_one("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1");
+            builder.define_one("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2");
+            builder.define_one("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4");
+        }
+        if has("cx8") {
+            builder.define_one("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8");
+        }
+        if has("cx16") && self.triple.arch == "x86_64" {
+            builder.define_one("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_16");
+        }
+        if self.has_float128 {
+            builder.define("__SIZEOF_FLOAT128__", "16");
+        }
+    }
+
+    fn aarch64_defines(&self, state: &AArch64Target, builder: &mut MacroBuilder) {
+        let has = |name: &str| state.flags.contains(name);
+        let scalable = state.floating_point & AARCH64_SCALABLE_VECTOR != 0;
+        let neon = state.floating_point & AARCH64_NEON != 0;
+        if self.is_big_endian() {
+            builder.define_one("__AARCH64EB__");
+            builder.define_one("__AARCH_BIG_ENDIAN");
+            builder.define_one("__ARM_BIG_ENDIAN");
+        } else {
+            builder.define_one("__AARCH64EL__");
+        }
+        builder.define_one("__aarch64__");
+        if self.triple.sub_arch == "lfi" {
+            builder.define_one("__LFI__");
+        }
+        builder.define_one("__GCC_ASM_FLAG_OUTPUTS__");
+        builder.define_one(&format!(
+            "__AARCH64_CMODEL_{}__",
+            self.code_model().to_ascii_uppercase()
+        ));
+        builder.define(
+            "__ARM_ACLE_VERSION(year, quarter, patch)",
+            "(100 * (year) + 10 * (quarter) + (patch))",
+        );
+        builder.define("__ARM_ACLE", "202420");
+        builder.define("__FUNCTION_MULTI_VERSIONING_SUPPORT_LEVEL", "202430");
+        builder.define("__ARM_ARCH", "8");
+        builder.define("__ARM_ARCH_PROFILE", "'A'");
+        builder.define("__ARM_64BIT_STATE", "1");
+        builder.define("__ARM_PCS_AAPCS64", "1");
+        builder.define("__ARM_ARCH_ISA_A64", "1");
+        builder.define("__ARM_FEATURE_CLZ", "1");
+        builder.define("__ARM_FEATURE_FMA", "1");
+        builder.define("__ARM_FEATURE_LDREX", "0xF");
+        builder.define("__ARM_FEATURE_IDIV", "1");
+        builder.define_one("__ARM_FEATURE_DIV");
+        builder.define("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
+        builder.define("__ARM_FEATURE_DIRECTED_ROUNDING", "1");
+        builder.define("__ARM_ALIGN_MAX_STACK_PWR", "4");
+        builder.define("__ARM_STATE_ZA", "1");
+        builder.define("__ARM_STATE_ZT0", "1");
+        if state.floating_point & AARCH64_FLOATING_POINT != 0 {
+            builder.define("__ARM_FP", "0xE");
+        }
+        builder.define("__ARM_FP16_FORMAT_IEEE", "1");
+        builder.define("__ARM_FP16_ARGS", "1");
+        builder.define("__ARM_NEON_SVE_BRIDGE", "1");
+        builder.define(
+            "__ARM_SIZEOF_WCHAR_T",
+            &self.options.wchar_size_or(4).to_string(),
+        );
+        builder.define("__ARM_SIZEOF_MINIMAL_ENUM", "4");
+        builder.define("__ARM_PREFETCH_RANGE", "1");
+        if neon {
+            builder.define("__ARM_NEON", "1");
+            builder.define("__ARM_NEON_FP", "0xE");
+        }
+        if scalable {
+            builder.define("__ARM_FEATURE_SVE", "1");
+        }
+        let sve2 = has("sve2");
+        let conditional: [(bool, &str, &str); 61] = [
+            (sve2, "__ARM_FEATURE_SVE2", "1"),
+            (has("sve2p1"), "__ARM_FEATURE_SVE2p1", "1"),
+            (sve2 && has("sve-aes"), "__ARM_FEATURE_SVE2_AES", "1"),
+            (
+                sve2 && has("sve-bitperm"),
+                "__ARM_FEATURE_SVE2_BITPERM",
+                "1",
+            ),
+            (sve2 && has("sve2-sha3"), "__ARM_FEATURE_SVE2_SHA3", "1"),
+            (sve2 && has("sve2-sm4"), "__ARM_FEATURE_SVE2_SM4", "1"),
+            (has("sve-b16b16"), "__ARM_FEATURE_SVE_B16B16", "1"),
+            (has("sme"), "__ARM_FEATURE_SME", "1"),
+            (has("sme"), "__ARM_FEATURE_LOCALLY_STREAMING", "1"),
+            (has("sme2"), "__ARM_FEATURE_SME2", "1"),
+            (has("sme2p1"), "__ARM_FEATURE_SME2p1", "1"),
+            (has("sme-f16f16"), "__ARM_FEATURE_SME_F16F16", "1"),
+            (has("sme-b16b16"), "__ARM_FEATURE_SME_B16B16", "1"),
+            (has("fp8"), "__ARM_FEATURE_FP8", "1"),
+            (has("fp8fma"), "__ARM_FEATURE_FP8FMA", "1"),
+            (has("fp8dot2"), "__ARM_FEATURE_FP8DOT2", "1"),
+            (has("fp8dot4"), "__ARM_FEATURE_FP8DOT4", "1"),
+            (has("ssve-fp8dot2"), "__ARM_FEATURE_SSVE_FP8DOT2", "1"),
+            (has("ssve-fp8dot4"), "__ARM_FEATURE_SSVE_FP8DOT4", "1"),
+            (has("ssve-fp8fma"), "__ARM_FEATURE_SSVE_FP8FMA", "1"),
+            (has("sme-f8f32"), "__ARM_FEATURE_SME_F8F32", "1"),
+            (has("sme-f8f16"), "__ARM_FEATURE_SME_F8F16", "1"),
+            (has("crc"), "__ARM_FEATURE_CRC32", "1"),
+            (has("cssc"), "__ARM_FEATURE_CSSC", "1"),
+            (has("rcpc3"), "__ARM_FEATURE_RCPC", "3"),
+            (!has("rcpc3") && has("rcpc"), "__ARM_FEATURE_RCPC", "1"),
+            (has("fprcvt"), "__ARM_FEATURE_FPRCVT", "1"),
+            (has("f8f16mm"), "__ARM_FEATURE_F8F16MM", "1"),
+            (has("f8f32mm"), "__ARM_FEATURE_F8F32MM", "1"),
+            (has("sve-f16f32mm"), "__ARM_FEATURE_SVE_F16F32MM", "1"),
+            (has("sve-bfscale"), "__ARM_FEATURE_SVE_BFSCALE", "1"),
+            (has("sve-b16mm"), "__ARM_FEATURE_SVE_B16MM", "1"),
+            (has("f16mm"), "__ARM_FEATURE_F16MM", "1"),
+            (has("f16f32dot"), "__ARM_FEATURE_F16F32DOT", "1"),
+            (has("f16f32mm"), "__ARM_FEATURE_F16F32MM", "1"),
+            (has("sve-aes2"), "__ARM_FEATURE_SVE_AES2", "1"),
+            (has("ssve-aes"), "__ARM_FEATURE_SSVE_AES", "1"),
+            (has("sve2p2"), "__ARM_FEATURE_SVE2p2", "1"),
+            (has("sve2p3"), "__ARM_FEATURE_SVE2p3", "1"),
+            (has("sme2p2"), "__ARM_FEATURE_SME2p2", "1"),
+            (has("sme2p3"), "__ARM_FEATURE_SME2p3", "1"),
+            (
+                state.multi_versioning,
+                "__HAVE_FUNCTION_MULTI_VERSIONING",
+                "1",
+            ),
+            (has("aes") && has("sha2"), "__ARM_FEATURE_CRYPTO", "1"),
+            (has("aes"), "__ARM_FEATURE_AES", "1"),
+            (has("sha2"), "__ARM_FEATURE_SHA2", "1"),
+            (has("sha3"), "__ARM_FEATURE_SHA3", "1"),
+            (has("sha3"), "__ARM_FEATURE_SHA512", "1"),
+            (has("sm4"), "__ARM_FEATURE_SM3", "1"),
+            (has("sm4"), "__ARM_FEATURE_SM4", "1"),
+            (has("pauth"), "__ARM_FEATURE_PAUTH", "1"),
+            (has("pauth-lr"), "__ARM_FEATURE_PAUTH_LR", "1"),
+            (has("bti"), "__ARM_FEATURE_BTI", "1"),
+            (state.unaligned_access, "__ARM_FEATURE_UNALIGNED", "1"),
+            (
+                neon && has("fullfp16"),
+                "__ARM_FEATURE_FP16_VECTOR_ARITHMETIC",
+                "1",
+            ),
+            (has("fullfp16"), "__ARM_FEATURE_FP16_SCALAR_ARITHMETIC", "1"),
+            (has("dotprod"), "__ARM_FEATURE_DOTPROD", "1"),
+            (has("mte"), "__ARM_FEATURE_MEMORY_TAGGING", "1"),
+            (has("i8mm"), "__ARM_FEATURE_MATMUL_INT8", "1"),
+            (has("lse"), "__ARM_FEATURE_ATOMICS", "1"),
+            (has("bf16"), "__ARM_FEATURE_BF16", "1"),
+            (has("bf16"), "__ARM_FEATURE_BF16_VECTOR_ARITHMETIC", "1"),
+        ];
+        for (enabled, name, value) in conditional {
+            if enabled {
+                builder.define(name, value);
+            }
+        }
+        let later: [(bool, &str); 11] = [
+            (has("bf16"), "__ARM_BF16_FORMAT_ALTERNATIVE"),
+            (has("bf16"), "__ARM_FEATURE_BF16_SCALAR_ARITHMETIC"),
+            (scalable && has("bf16"), "__ARM_FEATURE_SVE_BF16"),
+            (scalable && has("f64mm"), "__ARM_FEATURE_SVE_MATMUL_FP64"),
+            (scalable && has("f32mm"), "__ARM_FEATURE_SVE_MATMUL_FP32"),
+            (scalable && has("i8mm"), "__ARM_FEATURE_SVE_MATMUL_INT8"),
+            (neon && has("fp16fml"), "__ARM_FEATURE_FP16_FML"),
+            (has("ls64"), "__ARM_FEATURE_LS64"),
+            (has("rand"), "__ARM_FEATURE_RNG"),
+            (has("mops"), "__ARM_FEATURE_MOPS"),
+            (has("d128"), "__ARM_FEATURE_SYSREG128"),
+        ];
+        for (enabled, name) in later {
+            if enabled {
+                builder.define(name, "1");
+            }
+        }
+        if has("gcs") {
+            builder.define("__ARM_FEATURE_GCS", "1");
+        }
+        for width in ["1", "2", "4", "8", "16"] {
+            builder.define_one(&format!("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_{width}"));
+        }
+        builder.define("__FP_FAST_FMA", "1");
+        builder.define("__FP_FAST_FMAF", "1");
+        if scalable {
+            builder.define("__ARM_FEATURE_SVE_VECTOR_OPERATORS", "2");
+        }
+    }
+
+    fn arm_defines(&self, state: &ArmTarget, builder: &mut MacroBuilder) {
+        let version = state.version();
+        let profile = state.profile();
+        let cpu_profile = state.cpu_profile();
+        let cpu_attribute = arm_cpu_attribute(state.architecture);
+        let kind = state.kind();
+        if self.is_big_endian() {
+            builder.define_one("__ARMEB__");
+            builder.define_one("__ARM_BIG_ENDIAN");
+        } else {
+            builder.define_one("__ARMEL__");
+        }
+        builder.define_one("__arm");
+        builder.define_one("__arm__");
+        builder.define("__REGISTER_PREFIX__", "");
+        if !cpu_attribute.is_empty() {
+            builder.define_one(&format!("__ARM_ARCH_{cpu_attribute}__"));
+        }
+        builder.define("__ARM_ARCH", &version.to_string());
+        if version >= 8 {
+            if state.sha2 && state.aes {
+                builder.define("__ARM_FEATURE_CRYPTO", "1");
+            }
+            if state.sha2 {
+                builder.define("__ARM_FEATURE_SHA2", "1");
+            }
+            if state.aes {
+                builder.define("__ARM_FEATURE_AES", "1");
+            }
+            if state.crc {
+                builder.define("__ARM_FEATURE_CRC32", "1");
+            }
+            builder.define("__ARM_FEATURE_NUMERIC_MAXMIN", "1");
+            builder.define("__ARM_FEATURE_DIRECTED_ROUNDING", "1");
+        }
+        if cpu_profile.is_empty() || profile != 'M' {
+            builder.define("__ARM_ARCH_ISA_ARM", "1");
+        }
+        if state.supports_thumb2() {
+            builder.define("__ARM_ARCH_ISA_THUMB", "2");
+        } else if state.supports_thumb() {
+            builder.define("__ARM_ARCH_ISA_THUMB", "1");
+        }
+        builder.define("__ARM_32BIT_STATE", "1");
+        if !cpu_profile.is_empty() {
+            builder.define("__ARM_ARCH_PROFILE", &format!("'{cpu_profile}'"));
+        }
+        if state.unaligned_access {
+            builder.define("__ARM_FEATURE_UNALIGNED", "1");
+        }
+        if state.load_exclusive != 0 {
+            builder.define(
+                "__ARM_FEATURE_LDREX",
+                &format!("0x{:x}", state.load_exclusive),
+            );
+        }
+        if version == 5 || (version == 6 && cpu_profile != "M") || version > 6 {
+            builder.define("__ARM_FEATURE_CLZ", "1");
+        }
+        if state.hardware_floating_point != 0 {
+            builder.define(
+                "__ARM_FP",
+                &format!("0x{:x}", state.hardware_floating_point),
+            );
+        }
+        builder.define("__ARM_ACLE", "200");
+        builder.define("__ARM_FP16_FORMAT_IEEE", "1");
+        builder.define("__ARM_FP16_ARGS", "1");
+        if version >= 7 && state.floating_point & ARM_FLOATING_POINT_VFP4 != 0 {
+            builder.define("__ARM_FEATURE_FMA", "1");
+        }
+        if (5..=8).contains(&version) {
+            builder.define_one("__THUMB_INTERWORK__");
+        }
+        if matches!(state.abi.as_str(), "aapcs" | "aapcs-linux" | "aapcs-vfp") {
+            builder.define_one("__ARM_EABI__");
+            builder.define("__ARM_PCS", "1");
+        }
+        if (!state.soft_float && !state.soft_float_abi)
+            || state.abi == "aapcs-vfp"
+            || state.abi == "aapcs16"
+        {
+            builder.define("__ARM_PCS_VFP", "1");
+        }
+        if state.soft_float || (state.soft_float_abi && state.floating_point == 0) {
+            builder.define_one("__SOFTFP__");
+        }
+        let all = 0b1111u32;
+        let coprocessor = match kind {
+            "ARMV4" | "ARMV4T" => {
+                if state.thumb {
+                    0
+                } else {
+                    1
+                }
+            }
+            "ARMV5T" => {
+                if state.thumb {
+                    0
+                } else {
+                    0b11
+                }
+            }
+            "ARMV5TE" | "ARMV5TEJ" => {
+                if state.thumb {
+                    0
+                } else {
+                    0b111
+                }
+            }
+            "ARMV6" | "ARMV6K" | "ARMV6KZ" | "ARMV6T2" => {
+                if !state.thumb || kind == "ARMV6T2" {
+                    all
+                } else {
+                    0
+                }
+            }
+            "ARMV7A" | "ARMV7R" | "ARMV7M" | "ARMV7S" | "ARMV7EM" => all,
+            "ARMV8MMainline" | "ARMV8_1MMainline" => all,
+            other if other.starts_with("ARMV8") || other.starts_with("ARMV9") => {
+                if matches!(other, "ARMV8MBaseline") {
+                    0
+                } else {
+                    0b101
+                }
+            }
+            _ => 0,
+        };
+        builder.define("__ARM_FEATURE_COPROC", &format!("0x{coprocessor:x}"));
+        if kind == "XSCALE" {
+            builder.define_one("__XSCALE__");
+        }
+        if state.thumb {
+            builder.define_one("__THUMBEL__");
+            builder.define_one("__thumb__");
+            if state.supports_thumb2() {
+                builder.define_one("__thumb2__");
+            }
+        }
+        if (cpu_profile != "M" && version >= 6) || (cpu_profile == "M" && state.dsp) {
+            builder.define("__ARM_FEATURE_SIMD32", "1");
+        }
+        if (state.hardware_divide & ARM_DIVIDE_THUMB != 0 && state.thumb)
+            || (state.hardware_divide & ARM_DIVIDE_ARM != 0 && !state.thumb)
+        {
+            builder.define("__ARM_FEATURE_IDIV", "1");
+            builder.define("__ARM_ARCH_EXT_IDIV__", "1");
+        }
+        builder.define_one("__APCS_32__");
+        builder.define_one("__VFP_FP__");
+        if state.floating_point != 0 {
+            if state.floating_point & ARM_FLOATING_POINT_VFP2 != 0 {
+                builder.define_one("__ARM_VFPV2__");
+            }
+            if state.floating_point & ARM_FLOATING_POINT_VFP3 != 0 {
+                builder.define_one("__ARM_VFPV3__");
+            }
+            if state.floating_point & ARM_FLOATING_POINT_VFP4 != 0 {
+                builder.define_one("__ARM_VFPV4__");
+            }
+            if state.floating_point & ARM_FLOATING_POINT_ARMV8 != 0 {
+                builder.define_one("__ARM_FPV5__");
+            }
+        }
+        if state.floating_point & ARM_FLOATING_POINT_NEON != 0 && !state.soft_float && version >= 7
+        {
+            builder.define("__ARM_NEON", "1");
+            builder.define_one("__ARM_NEON__");
+            builder.define(
+                "__ARM_NEON_FP",
+                &format!(
+                    "0x{:x}",
+                    state.hardware_floating_point & !ARM_HARDWARE_DOUBLE
+                ),
+            );
+        }
+        if state.has_vector_extension() {
+            builder.define(
+                "__ARM_FEATURE_MVE",
+                if state.vector_extension & ARM_VECTOR_FLOAT != 0 {
+                    "3"
+                } else {
+                    "1"
+                },
+            );
+        }
+        if state.coprocessor_mask != 0 {
+            builder.define("__ARM_FEATURE_CDE", "1");
+            builder.define(
+                "__ARM_FEATURE_CDE_COPROC",
+                &format!("0x{:x}", state.coprocessor_mask),
+            );
+        }
+        builder.define(
+            "__ARM_SIZEOF_WCHAR_T",
+            &self.options.wchar_size_or(4).to_string(),
+        );
+        builder.define("__ARM_SIZEOF_MINIMAL_ENUM", "4");
+        if version == 8 && profile == 'M' {
+            builder.define("__ARM_FEATURE_CMSE", "1");
+        }
+        if version >= 6 && cpu_attribute != "6M" && cpu_attribute != "8M_BASE" {
+            for width in ["1", "2", "4", "8"] {
+                builder.define_one(&format!("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_{width}"));
+            }
+        }
+        if state.dsp {
+            builder.define("__ARM_FEATURE_DSP", "1");
+        }
+        let saturating = (version == 6 && cpu_profile != "M") || version > 6;
+        if saturating {
+            builder.define("__ARM_FEATURE_SAT", "1");
+        }
+        if state.dsp || saturating {
+            builder.define("__ARM_FEATURE_QBIT", "1");
+        }
+        if state.floating_point & ARM_FLOATING_POINT_NEON != 0 && state.fast_half {
+            builder.define("__ARM_FEATURE_FP16_VECTOR_ARITHMETIC", "1");
+        }
+        if state.fast_half {
+            builder.define("__ARM_FEATURE_FP16_SCALAR_ARITHMETIC", "1");
+        }
+        if state.dot_product {
+            builder.define("__ARM_FEATURE_DOTPROD", "1");
+        }
+        if state.matrix_multiply {
+            builder.define("__ARM_FEATURE_MATMUL_INT8", "1");
+        }
+        if state.pointer_authentication {
+            builder.define("__ARM_FEATURE_PAUTH", "1");
+        }
+        if state.branch_target {
+            builder.define("__ARM_FEATURE_BTI", "1");
+        }
+        if state.bfloat16 {
+            builder.define("__ARM_FEATURE_BF16", "1");
+            builder.define("__ARM_FEATURE_BF16_VECTOR_ARITHMETIC", "1");
+            builder.define("__ARM_BF16_FORMAT_ALTERNATIVE", "1");
+        }
+        match kind {
+            "ARMV8_1A" | "ARMV8_2A" => builder.define("__ARM_FEATURE_QRDMX", "1"),
+            other
+                if (other.starts_with("ARMV8_") && other.ends_with('A'))
+                    || other.starts_with("ARMV9") =>
+            {
+                builder.define("__ARM_FEATURE_COMPLEX", "1");
+                builder.define("__ARM_FEATURE_QRDMX", "1");
+            }
+            _ => {}
+        }
+    }
+}
+
+impl TargetOptions {
+    fn wchar_size_or(&self, fallback: u32) -> u32 {
+        if self.wchar_size == 0 {
+            fallback
+        } else {
+            self.wchar_size
+        }
     }
 }
 
@@ -4937,6 +10646,13 @@ pub struct PreprocessorOptions {
     pub pie: bool,
     pub embed_directories: Vec<String>,
     pub spell_checking: bool,
+    pub fast_math: bool,
+    pub math_errno: bool,
+    pub no_honor_infinities: bool,
+    pub no_honor_nans: bool,
+    pub gnu_inline: Option<bool>,
+    pub exceptions: bool,
+    pub posix_threads: bool,
 }
 
 impl Default for PreprocessorOptions {
@@ -4971,6 +10687,13 @@ impl Default for PreprocessorOptions {
             pie: false,
             embed_directories: Vec::new(),
             spell_checking: true,
+            fast_math: false,
+            math_errno: false,
+            no_honor_infinities: false,
+            no_honor_nans: false,
+            gnu_inline: None,
+            exceptions: false,
+            posix_threads: false,
         }
     }
 }
@@ -10758,94 +16481,18 @@ fn attribute_table() -> &'static AttributeTable {
     })
 }
 
-fn llvm_architecture(target: &TargetInfo) -> String {
-    let architecture = target.architecture.as_str();
-    match architecture {
-        "amd64" => "x86_64".to_string(),
-        "i386" | "i486" | "i586" | "i686" => "x86".to_string(),
-        "arm64" => "aarch64".to_string(),
-        _ if architecture.starts_with("armeb") => "armeb".to_string(),
-        _ if architecture.starts_with("thumbeb") => "thumbeb".to_string(),
-        _ if architecture.starts_with("arm") && architecture != "arm64ec" => "arm".to_string(),
-        _ if architecture.starts_with("thumb") => "thumb".to_string(),
-        _ => architecture.to_string(),
-    }
-}
-
-fn environment_kind(name: &str) -> &'static str {
-    const KINDS: &[&str] = &[
-        "eabihf",
-        "eabi",
-        "gnuabin32",
-        "gnuabi64",
-        "gnueabihft64",
-        "gnueabihf",
-        "gnueabit64",
-        "gnueabi",
-        "gnuf32",
-        "gnuf64",
-        "gnusf",
-        "gnux32",
-        "gnu_ilp32",
-        "code16",
-        "gnut64",
-        "gnu",
-        "android",
-        "muslabin32",
-        "muslabi64",
-        "musleabihf",
-        "musleabi",
-        "muslf32",
-        "muslsf",
-        "muslx32",
-        "muslwali",
-        "musl",
-        "msvc",
-        "itanium",
-        "cygnus",
-        "coreclr",
-        "simulator",
-        "macabi",
-        "pixel",
-        "vertex",
-        "geometry",
-        "hull",
-        "domain",
-        "compute",
-        "library",
-        "raygeneration",
-        "intersection",
-        "anyhit",
-        "closesthit",
-        "miss",
-        "callable",
-        "mesh",
-        "amplification",
-        "rootsignature",
-        "opencl",
-        "ohos",
-        "pauthtest",
-        "llvm",
-        "mlibc",
-    ];
-    KINDS
-        .iter()
-        .find(|kind| name.starts_with(**kind))
-        .copied()
-        .unwrap_or("unknown")
+fn llvm_architecture(target: &TargetInfo) -> &'static str {
+    target.triple.arch
 }
 
 fn object_format(target: &TargetInfo) -> &'static str {
-    let system = target.system.as_str();
-    if target.is_windows() {
-        "COFF"
-    } else if system.starts_with("darwin")
-        || system.starts_with("macos")
-        || system.starts_with("ios")
-    {
-        "MachO"
-    } else {
-        "ELF"
+    match target.triple.object_format {
+        "coff" => "COFF",
+        "macho" => "MachO",
+        "xcoff" => "XCOFF",
+        "goff" => "GOFF",
+        "wasm" => "Wasm",
+        _ => "ELF",
     }
 }
 
@@ -10854,7 +16501,7 @@ fn target_condition_holds(condition: &str, target: &TargetInfo) -> bool {
         return true;
     }
     let architecture = llvm_architecture(target);
-    let microsoft = target.is_windows() && !target.environment.starts_with("gnu");
+    let microsoft = target.is_windows() && !target.triple.environment.starts_with("gnu");
     condition.split('/').all(|part| match part.split_once('=') {
         Some(("a", list)) => list.split(',').any(|item| item == architecture),
         Some(("o", list)) => list
@@ -10863,7 +16510,7 @@ fn target_condition_holds(condition: &str, target: &TargetInfo) -> bool {
         Some(("f", list)) => list.split(',').any(|item| item == object_format(target)),
         Some(("c", "msrecord")) | Some(("c", "msabi")) => microsoft,
         Some(("c", "itanium")) => !microsoft,
-        Some(("c", "dllimport")) => target.is_windows() || target.system.starts_with("ps"),
+        Some(("c", "dllimport")) => target.is_windows() || target.triple.os.starts_with("ps"),
         Some(("c", "arm64ec")) => architecture == "arm64ec",
         Some(("c", "musttail")) => true,
         Some(("c", "ifunc")) => {
@@ -10871,8 +16518,8 @@ fn target_condition_holds(condition: &str, target: &TargetInfo) -> bool {
                 || (target.is_windows() && architecture == "aarch64")
                 || architecture == "avr"
                 || (object_format(target) == "ELF"
-                    && ((target.system == "linux" && !target.environment.starts_with("musl"))
-                        || target.system.starts_with("freebsd")))
+                    && ((target.triple.os == "linux" && !target.triple.is_musl())
+                        || target.triple.os == "freebsd"))
         }
         _ => false,
     })
@@ -12546,14 +18193,12 @@ impl<'files> Preprocessor<'files> {
                 text = depth.to_string().into_bytes();
             }
             Builtin::FloatEvaluationMethod => {
-                let method = if self.options.target.architecture.starts_with('i')
-                    && self.options.target.architecture.ends_with("86")
-                {
-                    "2"
-                } else {
-                    "0"
-                };
-                text = method.as_bytes().to_vec();
+                text = self
+                    .options
+                    .target
+                    .floating_point_evaluation_method()
+                    .to_string()
+                    .into_bytes();
             }
             Builtin::Counter => {
                 let message = if self.language.at_least(CStandard::C2y) {
@@ -12653,6 +18298,13 @@ impl<'files> Preprocessor<'files> {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
+                let target = &self.options.target;
+                match name.as_str() {
+                    "__builtin_cpu_is" => return u64::from(target.supports_cpu_is()),
+                    "__builtin_cpu_init" => return u64::from(target.supports_cpu_init()),
+                    "__builtin_cpu_supports" => return u64::from(target.supports_cpu_supports()),
+                    _ => {}
+                }
                 let known = name.starts_with("__builtin_")
                     || name.starts_with("__sync_")
                     || name.starts_with("__atomic_")
@@ -12733,37 +18385,25 @@ impl<'files> Preprocessor<'files> {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
-                let architecture = self.options.target.architecture.to_ascii_lowercase();
-                let wanted = name.to_ascii_lowercase();
-                u64::from(
-                    architecture == wanted
-                        || (wanted == "x86"
-                            && architecture.starts_with('i')
-                            && architecture.ends_with("86")),
-                )
+                u64::from(self.options.target.is_target_architecture(&name))
             }
             Builtin::IsTargetVendor => {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
-                u64::from(self.options.target.vendor.eq_ignore_ascii_case(&name))
+                u64::from(self.options.target.is_target_vendor(&name))
             }
             Builtin::IsTargetSystem => {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
-                let system = self.options.target.system.to_ascii_lowercase();
-                u64::from(system.starts_with(&name.to_ascii_lowercase()))
+                u64::from(self.options.target.is_target_system(&name))
             }
             Builtin::IsTargetEnvironment => {
                 let Some(name) = self.expect_feature_identifier(token) else {
                     return 0;
                 };
-                let wanted = environment_kind(&name.to_ascii_lowercase());
-                if wanted == "unknown" && !name.eq_ignore_ascii_case("unknown") {
-                    return 0;
-                }
-                u64::from(environment_kind(&self.options.target.environment) == wanted)
+                u64::from(self.options.target.is_target_environment(&name))
             }
             Builtin::IsTargetVariantSystem | Builtin::IsTargetVariantEnvironment => {
                 let _ = self.expect_feature_identifier(token);
@@ -13476,22 +19116,7 @@ impl<'files> Preprocessor<'files> {
 
     fn predefines_text(&self) -> Vec<u8> {
         let mut text = String::from("# 1 \"<built-in>\" 3\n");
-        if !self.options.undefine_predefined {
-            for (name, value) in predefined_macros(&self.options) {
-                text.push_str("#define ");
-                text.push_str(&name);
-                text.push(' ');
-                text.push_str(&value);
-                text.push('\n');
-            }
-        }
-        for (name, value) in standard_macros(&self.options) {
-            text.push_str("#define ");
-            text.push_str(&name);
-            text.push(' ');
-            text.push_str(&value);
-            text.push('\n');
-        }
+        text.push_str(&predefined_macro_text(&self.options));
         text.push_str("# 1 \"<command line>\" 1\n");
         for option in &self.options.macros {
             match option {
@@ -13534,780 +19159,589 @@ impl<'files> Preprocessor<'files> {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq)]
-enum IntegerType {
-    SignedChar,
-    UnsignedChar,
-    Short,
-    UnsignedShort,
-    Int,
-    UnsignedInt,
-    Long,
-    UnsignedLong,
-    LongLong,
-    UnsignedLongLong,
-}
-
-impl IntegerType {
-    fn name(self) -> &'static str {
-        match self {
-            IntegerType::SignedChar => "signed char",
-            IntegerType::UnsignedChar => "unsigned char",
-            IntegerType::Short => "short",
-            IntegerType::UnsignedShort => "unsigned short",
-            IntegerType::Int => "int",
-            IntegerType::UnsignedInt => "unsigned int",
-            IntegerType::Long => "long int",
-            IntegerType::UnsignedLong => "long unsigned int",
-            IntegerType::LongLong => "long long int",
-            IntegerType::UnsignedLongLong => "long long unsigned int",
-        }
-    }
-
-    fn signed(self) -> bool {
-        matches!(
-            self,
-            IntegerType::SignedChar
-                | IntegerType::Short
-                | IntegerType::Int
-                | IntegerType::Long
-                | IntegerType::LongLong
-        )
-    }
-
-    fn suffix(self) -> &'static str {
-        match self {
-            IntegerType::UnsignedInt => "U",
-            IntegerType::Long => "L",
-            IntegerType::UnsignedLong => "UL",
-            IntegerType::LongLong => "LL",
-            IntegerType::UnsignedLongLong => "ULL",
-            _ => "",
-        }
-    }
-
-    fn format_modifier(self) -> &'static str {
-        match self {
-            IntegerType::SignedChar | IntegerType::UnsignedChar => "hh",
-            IntegerType::Short | IntegerType::UnsignedShort => "h",
-            IntegerType::Long | IntegerType::UnsignedLong => "l",
-            IntegerType::LongLong | IntegerType::UnsignedLongLong => "ll",
-            _ => "",
-        }
-    }
-
-    fn unsigned_of(self) -> IntegerType {
-        match self {
-            IntegerType::SignedChar => IntegerType::UnsignedChar,
-            IntegerType::Short => IntegerType::UnsignedShort,
-            IntegerType::Int => IntegerType::UnsignedInt,
-            IntegerType::Long => IntegerType::UnsignedLong,
-            IntegerType::LongLong => IntegerType::UnsignedLongLong,
-            other => other,
-        }
-    }
-}
-
-struct TypeModel {
-    long_width: u32,
-    pointer_width: u32,
-    wchar: IntegerType,
-    wint: IntegerType,
-    size: IntegerType,
-    ptrdiff: IntegerType,
-    intptr: IntegerType,
-    intmax: IntegerType,
-    int64: IntegerType,
-    long_double: u32,
-    biggest_alignment: u32,
-}
-
-impl TypeModel {
-    fn for_target(target: &TargetInfo) -> TypeModel {
-        let pointer_width = target.pointer_width();
-        let long_width = target.long_width();
-        let lp64 = long_width == 64;
-        let wchar = if target.is_windows() {
-            IntegerType::UnsignedShort
-        } else if target.wchar_signed() {
-            IntegerType::Int
-        } else {
-            IntegerType::UnsignedInt
-        };
-        let size = if pointer_width == 64 {
-            if lp64 {
-                IntegerType::UnsignedLong
-            } else {
-                IntegerType::UnsignedLongLong
-            }
-        } else {
-            IntegerType::UnsignedInt
-        };
-        let ptrdiff = match size {
-            IntegerType::UnsignedLong => IntegerType::Long,
-            IntegerType::UnsignedLongLong => IntegerType::LongLong,
-            _ => IntegerType::Int,
-        };
-        let long_double = match target.architecture.as_str() {
-            "x86_64" => 128,
-            "i386" | "i486" | "i586" | "i686" => 96,
-            "aarch64" | "arm64" if !target.system.starts_with("darwin") && !target.is_windows() => {
-                128
-            }
-            _ => 64,
-        };
-        TypeModel {
-            long_width,
-            pointer_width,
-            wchar,
-            wint: IntegerType::UnsignedInt,
-            size,
-            ptrdiff,
-            intptr: ptrdiff,
-            intmax: if lp64 {
-                IntegerType::Long
-            } else {
-                IntegerType::LongLong
-            },
-            int64: if lp64 {
-                IntegerType::Long
-            } else {
-                IntegerType::LongLong
-            },
-            long_double,
-            biggest_alignment: if target.architecture == "x86_64"
-                || target.architecture.starts_with("aarch64")
-                || target.architecture.starts_with('i')
-            {
-                16
-            } else {
-                8
-            },
-        }
-    }
-
-    fn width(&self, ty: IntegerType) -> u32 {
-        match ty {
-            IntegerType::SignedChar | IntegerType::UnsignedChar => 8,
-            IntegerType::Short | IntegerType::UnsignedShort => 16,
-            IntegerType::Int | IntegerType::UnsignedInt => 32,
-            IntegerType::Long | IntegerType::UnsignedLong => self.long_width,
-            IntegerType::LongLong | IntegerType::UnsignedLongLong => 64,
-        }
-    }
-
-    fn maximum(&self, ty: IntegerType) -> String {
-        let width = self.width(ty);
-        let value: u64 = if ty.signed() {
-            (1u64 << (width - 1)) - 1
-        } else if width == 64 {
-            u64::MAX
-        } else {
-            (1u64 << width) - 1
-        };
-        format!("{value}{}", ty.suffix())
-    }
-
-    fn least(&self, width: u32) -> IntegerType {
-        match width {
-            8 => IntegerType::SignedChar,
-            16 => IntegerType::Short,
-            32 => IntegerType::Int,
-            _ => self.int64,
-        }
-    }
-}
-
-fn define_formats(out: &mut Vec<(String, String)>, prefix: &str, ty: IntegerType, c23: bool) {
-    let letters: &[char] = if ty.signed() {
-        &['d', 'i']
-    } else {
-        &['o', 'u', 'x', 'X']
-    };
-    for letter in letters {
-        out.push((
-            format!("{prefix}_FMT{letter}__"),
-            format!("\"{}{letter}\"", ty.format_modifier()),
-        ));
-    }
-    if c23 && !ty.signed() {
-        for letter in ['b', 'B'] {
-            out.push((
-                format!("{prefix}_FMT{letter}__"),
-                format!("\"{}{letter}\"", ty.format_modifier()),
-            ));
-        }
-    }
-}
-
-fn define_float(out: &mut Vec<(String, String)>, prefix: &str, width: u32, suffix: &str) {
-    let (
-        denorm,
-        norm,
-        digits,
-        decimal,
-        epsilon,
-        mantissa,
-        min10,
-        max10,
-        min_exp,
-        max_exp,
-        minimum,
-        maximum,
-    ) = match width {
-        32 => (
-            "1.40129846e-45",
-            "3.40282347e+38",
-            6,
-            9,
-            "1.19209290e-7",
-            24,
-            -37,
-            38,
-            -125,
-            128,
-            "1.17549435e-38",
-            "3.40282347e+38",
-        ),
-        64 => (
-            "4.9406564584124654e-324",
-            "1.7976931348623157e+308",
-            15,
-            17,
-            "2.2204460492503131e-16",
-            53,
-            -307,
-            308,
-            -1021,
-            1024,
-            "2.2250738585072014e-308",
-            "1.7976931348623157e+308",
-        ),
-        80 | 96 => (
-            "3.64519953188247460253e-4951",
-            "1.18973149535723176502e+4932",
-            18,
-            21,
-            "1.08420217248550443401e-19",
-            64,
-            -4931,
-            4932,
-            -16381,
-            16384,
-            "3.36210314311209350626e-4932",
-            "1.18973149535723176502e+4932",
-        ),
-        _ => (
-            "6.47517511943802511092443895822764655e-4966",
-            "1.18973149535723176508575932662800702e+4932",
-            33,
-            36,
-            "1.92592994438723585305597794258492732e-34",
-            113,
-            -4931,
-            4932,
-            -16381,
-            16384,
-            "3.36210314311209350626267781732175260e-4932",
-            "1.18973149535723176508575932662800702e+4932",
-        ),
-    };
+fn define_float_macros(
+    builder: &mut MacroBuilder,
+    prefix: &str,
+    format: FloatFormat,
+    suffix: &str,
+) {
+    let normal_maximum = format.pick([
+        "6.5504e+4",
+        "3.40282347e+38",
+        "1.7976931348623157e+308",
+        "1.18973149535723176502e+4932",
+        "8.98846567431157953864652595394501e+307",
+        "1.18973149535723176508575932662800702e+4932",
+    ]);
+    let denormal_minimum = format.pick([
+        "5.9604644775390625e-8",
+        "1.40129846e-45",
+        "4.9406564584124654e-324",
+        "3.64519953188247460253e-4951",
+        "4.94065645841246544176568792868221e-324",
+        "6.47517511943802511092443895822764655e-4966",
+    ]);
+    let digits = format.pick([3, 6, 15, 18, 31, 33]);
+    let decimal_digits = format.pick([5, 9, 17, 21, 33, 36]);
+    let epsilon = format.pick([
+        "9.765625e-4",
+        "1.19209290e-7",
+        "2.2204460492503131e-16",
+        "1.08420217248550443401e-19",
+        "4.94065645841246544176568792868221e-324",
+        "1.92592994438723585305597794258492732e-34",
+    ]);
+    let mantissa_digits = format.pick([11, 24, 53, 64, 106, 113]);
+    let minimum_decimal_exponent = format.pick([-4, -37, -307, -4931, -291, -4931]);
+    let maximum_decimal_exponent = format.pick([4, 38, 308, 4932, 308, 4932]);
+    let minimum_exponent = format.pick([-13, -125, -1021, -16381, -968, -16381]);
+    let maximum_exponent = format.pick([16, 128, 1024, 16384, 1024, 16384]);
+    let minimum = format.pick([
+        "6.103515625e-5",
+        "1.17549435e-38",
+        "2.2250738585072014e-308",
+        "3.36210314311209350626e-4932",
+        "2.00416836000897277799610805135016e-292",
+        "3.36210314311209350626267781732175260e-4932",
+    ]);
+    let maximum = format.pick([
+        "6.5504e+4",
+        "3.40282347e+38",
+        "1.7976931348623157e+308",
+        "1.18973149535723176502e+4932",
+        "1.79769313486231580793728971405301e+308",
+        "1.18973149535723176508575932662800702e+4932",
+    ]);
     let head = format!("__{prefix}_");
-    out.push((format!("{head}DENORM_MIN__"), format!("{denorm}{suffix}")));
-    out.push((format!("{head}NORM_MAX__"), format!("{norm}{suffix}")));
-    out.push((format!("{head}HAS_DENORM__"), "1".to_string()));
-    out.push((format!("{head}DIG__"), digits.to_string()));
-    out.push((format!("{head}DECIMAL_DIG__"), decimal.to_string()));
-    out.push((format!("{head}EPSILON__"), format!("{epsilon}{suffix}")));
-    out.push((format!("{head}HAS_INFINITY__"), "1".to_string()));
-    out.push((format!("{head}HAS_QUIET_NAN__"), "1".to_string()));
-    out.push((format!("{head}MANT_DIG__"), mantissa.to_string()));
-    out.push((format!("{head}MAX_10_EXP__"), max10.to_string()));
-    out.push((format!("{head}MAX_EXP__"), max_exp.to_string()));
-    out.push((format!("{head}MAX__"), format!("{maximum}{suffix}")));
-    out.push((format!("{head}MIN_10_EXP__"), format!("({min10})")));
-    out.push((format!("{head}MIN_EXP__"), format!("({min_exp})")));
-    out.push((format!("{head}MIN__"), format!("{minimum}{suffix}")));
+    builder.define(
+        &format!("{head}DENORM_MIN__"),
+        &format!("{denormal_minimum}{suffix}"),
+    );
+    builder.define(
+        &format!("{head}NORM_MAX__"),
+        &format!("{normal_maximum}{suffix}"),
+    );
+    builder.define_one(&format!("{head}HAS_DENORM__"));
+    builder.define(&format!("{head}DIG__"), &digits.to_string());
+    builder.define(&format!("{head}DECIMAL_DIG__"), &decimal_digits.to_string());
+    builder.define(&format!("{head}EPSILON__"), &format!("{epsilon}{suffix}"));
+    builder.define_one(&format!("{head}HAS_INFINITY__"));
+    builder.define_one(&format!("{head}HAS_QUIET_NAN__"));
+    builder.define(&format!("{head}MANT_DIG__"), &mantissa_digits.to_string());
+    builder.define(
+        &format!("{head}MAX_10_EXP__"),
+        &maximum_decimal_exponent.to_string(),
+    );
+    builder.define(&format!("{head}MAX_EXP__"), &maximum_exponent.to_string());
+    builder.define(&format!("{head}MAX__"), &format!("{maximum}{suffix}"));
+    builder.define(
+        &format!("{head}MIN_10_EXP__"),
+        &format!("({minimum_decimal_exponent})"),
+    );
+    builder.define(
+        &format!("{head}MIN_EXP__"),
+        &format!("({minimum_exponent})"),
+    );
+    builder.define(&format!("{head}MIN__"), &format!("{minimum}{suffix}"));
 }
 
-pub fn predefined_macros(options: &PreprocessorOptions) -> Vec<(String, String)> {
+fn type_maximum(width: u32, signed: bool) -> u128 {
+    if signed {
+        (1u128 << (width - 1)) - 1
+    } else {
+        (1u128 << width) - 1
+    }
+}
+
+fn define_type_size(builder: &mut MacroBuilder, name: &str, ty: IntegerType, target: &TargetInfo) {
+    let value = type_maximum(target.type_width(ty), ty.signed());
+    builder.define(name, &format!("{value}{}", target.type_constant_suffix(ty)));
+}
+
+fn define_type_minimum(
+    builder: &mut MacroBuilder,
+    prefix: &str,
+    ty: IntegerType,
+    target: &TargetInfo,
+) {
+    let value = if ty.signed() {
+        format!("(-{prefix}_MAX__ - 1)")
+    } else {
+        format!("0{}", target.type_constant_suffix(ty))
+    };
+    builder.define(&format!("{prefix}_MIN__"), &value);
+}
+
+fn define_format(builder: &mut MacroBuilder, c23: bool, prefix: &str, ty: IntegerType) {
+    let modifier = ty.format_modifier();
+    let letters = if ty.signed() { "di" } else { "ouxX" };
+    let mut emit = |letter: char| {
+        builder.define(
+            &format!("{prefix}_FMT{letter}__"),
+            &format!("\"{modifier}{letter}\""),
+        );
+    };
+    letters.chars().for_each(&mut emit);
+    if c23 && !ty.signed() {
+        "bB".chars().for_each(&mut emit);
+    }
+}
+
+fn define_type_size_and_width(
+    builder: &mut MacroBuilder,
+    prefix: &str,
+    ty: IntegerType,
+    target: &TargetInfo,
+) {
+    define_type_size(builder, &format!("{prefix}_MAX__"), ty, target);
+    builder.define(
+        &format!("{prefix}_WIDTH__"),
+        &target.type_width(ty).to_string(),
+    );
+}
+
+fn define_constant_suffix(builder: &mut MacroBuilder, prefix: &str, suffix: &str) {
+    builder.define(&format!("{prefix}_C_SUFFIX__"), suffix);
+    let body = if suffix.is_empty() {
+        "c".to_string()
+    } else {
+        format!("c##{suffix}")
+    };
+    builder.define(&format!("{prefix}_C(c)"), &body);
+}
+
+fn define_exact_width_type(
+    builder: &mut MacroBuilder,
+    c23: bool,
+    ty: IntegerType,
+    target: &TargetInfo,
+) {
+    let width = target.type_width(ty);
+    let signed = ty.signed();
+    let mut actual = ty;
+    if width == 64 {
+        actual = if signed {
+            target.int64_type
+        } else {
+            target.int64_type.unsigned_counterpart()
+        };
+    }
+    if width == 16 {
+        actual = if signed {
+            target.int16_type
+        } else {
+            target.int16_type.unsigned_counterpart()
+        };
+    }
+    let prefix = format!("{}{width}", if signed { "__INT" } else { "__UINT" });
+    builder.define(&format!("{prefix}_TYPE__"), actual.name());
+    define_format(builder, c23, &prefix, actual);
+    define_constant_suffix(builder, &prefix, target.type_constant_suffix(actual));
+}
+
+fn define_exact_width_type_size(builder: &mut MacroBuilder, ty: IntegerType, target: &TargetInfo) {
+    let width = target.type_width(ty);
+    let signed = ty.signed();
+    let actual = if width == 64 {
+        if signed {
+            target.int64_type
+        } else {
+            target.int64_type.unsigned_counterpart()
+        }
+    } else {
+        ty
+    };
+    let prefix = if signed { "__INT" } else { "__UINT" };
+    define_type_size(builder, &format!("{prefix}{width}_MAX__"), actual, target);
+}
+
+fn define_least_width_type(
+    builder: &mut MacroBuilder,
+    c23: bool,
+    head: &str,
+    width: u32,
+    signed: bool,
+    target: &TargetInfo,
+) {
+    let Some(ty) = target.least_integer_type(width, signed) else {
+        return;
+    };
+    let prefix = format!("{}{head}{width}", if signed { "__INT_" } else { "__UINT_" });
+    builder.define(&format!("{prefix}_TYPE__"), ty.name());
+    if signed {
+        define_type_size_and_width(builder, &prefix, ty, target);
+    } else {
+        define_type_size(builder, &format!("{prefix}_MAX__"), ty, target);
+    }
+    define_format(builder, c23, &prefix, ty);
+}
+
+fn lock_free_value(width: u32, target: &TargetInfo) -> &'static str {
+    if target.has_builtin_atomic(width, width) {
+        "2"
+    } else {
+        "1"
+    }
+}
+
+fn initialize_predefined_macros(options: &PreprocessorOptions, builder: &mut MacroBuilder) {
     let target = &options.target;
     let language = &options.language;
-    let model = TypeModel::for_target(target);
     let c23 = language.at_least(CStandard::C23);
-    let mut out: Vec<(String, String)> = Vec::new();
-    let mut define = |name: &str, value: &str| out.push((name.to_string(), value.to_string()));
-    define("__llvm__", "1");
-    define("__clang__", "1");
-    define("__clang_major__", "24");
-    define("__clang_minor__", "0");
-    define("__clang_patchlevel__", "0");
-    define("__clang_version__", "\"24.0.0 \"");
+    builder.define_one("__llvm__");
+    builder.define_one("__clang__");
+    builder.define("__clang_major__", "24");
+    builder.define("__clang_minor__", "0");
+    builder.define("__clang_patchlevel__", "0");
+    builder.define("__clang_version__", "\"24.0.0 \"");
     if let Some((major, minor, patch)) = options.gnuc_version {
-        out.push(("__GNUC__".to_string(), major.to_string()));
-        out.push(("__GNUC_MINOR__".to_string(), minor.to_string()));
-        out.push(("__GNUC_PATCHLEVEL__".to_string(), patch.to_string()));
-        out.push(("__GXX_ABI_VERSION".to_string(), "1002".to_string()));
+        builder.define("__GNUC__", &major.to_string());
+        builder.define("__GNUC_MINOR__", &minor.to_string());
+        builder.define("__GNUC_PATCHLEVEL__", &patch.to_string());
+        builder.define("__GXX_ABI_VERSION", "1002");
     }
-    let mut define = |name: &str, value: &str| out.push((name.to_string(), value.to_string()));
-    define("__ATOMIC_RELAXED", "0");
-    define("__ATOMIC_CONSUME", "1");
-    define("__ATOMIC_ACQUIRE", "2");
-    define("__ATOMIC_RELEASE", "3");
-    define("__ATOMIC_ACQ_REL", "4");
-    define("__ATOMIC_SEQ_CST", "5");
-    define("__MEMORY_SCOPE_SYSTEM", "0");
-    define("__MEMORY_SCOPE_DEVICE", "1");
-    define("__MEMORY_SCOPE_WRKGRP", "2");
-    define("__MEMORY_SCOPE_WVFRNT", "3");
-    define("__MEMORY_SCOPE_SINGLE", "4");
-    define("__MEMORY_SCOPE_CLUSTR", "5");
-    define("__OPENCL_MEMORY_SCOPE_WORK_ITEM", "0");
-    define("__OPENCL_MEMORY_SCOPE_WORK_GROUP", "1");
-    define("__OPENCL_MEMORY_SCOPE_DEVICE", "2");
-    define("__OPENCL_MEMORY_SCOPE_ALL_SVM_DEVICES", "3");
-    define("__OPENCL_MEMORY_SCOPE_SUB_GROUP", "4");
-    define("__FPCLASS_SNAN", "0x0001");
-    define("__FPCLASS_QNAN", "0x0002");
-    define("__FPCLASS_NEGINF", "0x0004");
-    define("__FPCLASS_NEGNORMAL", "0x0008");
-    define("__FPCLASS_NEGSUBNORMAL", "0x0010");
-    define("__FPCLASS_NEGZERO", "0x0020");
-    define("__FPCLASS_POSZERO", "0x0040");
-    define("__FPCLASS_POSSUBNORMAL", "0x0080");
-    define("__FPCLASS_POSNORMAL", "0x0100");
-    define("__FPCLASS_POSINF", "0x0200");
-    define("__PRAGMA_REDEFINE_EXTNAME", "1");
-    define("__VERSION__", "\"Clang 24.0.0\"");
+    for (name, value) in [
+        ("__ATOMIC_RELAXED", "0"),
+        ("__ATOMIC_CONSUME", "1"),
+        ("__ATOMIC_ACQUIRE", "2"),
+        ("__ATOMIC_RELEASE", "3"),
+        ("__ATOMIC_ACQ_REL", "4"),
+        ("__ATOMIC_SEQ_CST", "5"),
+        ("__MEMORY_SCOPE_SYSTEM", "0"),
+        ("__MEMORY_SCOPE_DEVICE", "1"),
+        ("__MEMORY_SCOPE_WRKGRP", "2"),
+        ("__MEMORY_SCOPE_WVFRNT", "3"),
+        ("__MEMORY_SCOPE_SINGLE", "4"),
+        ("__MEMORY_SCOPE_CLUSTR", "5"),
+        ("__OPENCL_MEMORY_SCOPE_WORK_ITEM", "0"),
+        ("__OPENCL_MEMORY_SCOPE_WORK_GROUP", "1"),
+        ("__OPENCL_MEMORY_SCOPE_DEVICE", "2"),
+        ("__OPENCL_MEMORY_SCOPE_ALL_SVM_DEVICES", "3"),
+        ("__OPENCL_MEMORY_SCOPE_SUB_GROUP", "4"),
+        ("__FPCLASS_SNAN", "0x0001"),
+        ("__FPCLASS_QNAN", "0x0002"),
+        ("__FPCLASS_NEGINF", "0x0004"),
+        ("__FPCLASS_NEGNORMAL", "0x0008"),
+        ("__FPCLASS_NEGSUBNORMAL", "0x0010"),
+        ("__FPCLASS_NEGZERO", "0x0020"),
+        ("__FPCLASS_POSZERO", "0x0040"),
+        ("__FPCLASS_POSSUBNORMAL", "0x0080"),
+        ("__FPCLASS_POSNORMAL", "0x0100"),
+        ("__FPCLASS_POSINF", "0x0200"),
+        ("__PRAGMA_REDEFINE_EXTNAME", "1"),
+        ("__VERSION__", "\"Clang 24.0.0\""),
+    ] {
+        builder.define(name, value);
+    }
     if !language.gnu {
-        define("__STRICT_ANSI__", "1");
+        builder.define_one("__STRICT_ANSI__");
     }
-    define("__OBJC_BOOL_IS_BOOL", "0");
-    define("__CONSTANT_CFSTRINGS__", "1");
-    define("__clang_literal_encoding__", "\"UTF-8\"");
-    define(
-        "__clang_wide_literal_encoding__",
-        if model.width(model.wchar) >= 32 {
-            "\"UTF-32\""
-        } else {
-            "\"UTF-16\""
-        },
-    );
-    if options.optimize > 0 {
-        define("__OPTIMIZE__", "1");
+    builder.define("__OBJC_BOOL_IS_BOOL", "0");
+    builder.define_one("__CONSTANT_CFSTRINGS__");
+    if options.exceptions {
+        builder.define_one("__EXCEPTIONS");
+    }
+    builder.define("__clang_literal_encoding__", "\"UTF-8\"");
+    if target.type_width(target.wchar_type) >= 32 {
+        builder.define("__clang_wide_literal_encoding__", "\"UTF-32\"");
+    } else {
+        builder.define("__clang_wide_literal_encoding__", "\"UTF-16\"");
+    }
+    if options.optimize != 0 {
+        builder.define_one("__OPTIMIZE__");
     }
     if options.optimize_size {
-        define("__OPTIMIZE_SIZE__", "1");
+        builder.define_one("__OPTIMIZE_SIZE__");
     }
-    define("__ORDER_LITTLE_ENDIAN__", "1234");
-    define("__ORDER_BIG_ENDIAN__", "4321");
-    define("__ORDER_PDP_ENDIAN__", "3412");
-    define("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
-    define("__LITTLE_ENDIAN__", "1");
-    if model.pointer_width == 64 && model.long_width == 64 {
-        define("_LP64", "1");
-        define("__LP64__", "1");
+    if options.fast_math {
+        builder.define_one("__FAST_MATH__");
     }
-    if model.pointer_width == 32 && model.long_width == 32 {
-        define("_ILP32", "1");
-        define("__ILP32__", "1");
+    builder.define("__ORDER_LITTLE_ENDIAN__", "1234");
+    builder.define("__ORDER_BIG_ENDIAN__", "4321");
+    builder.define("__ORDER_PDP_ENDIAN__", "3412");
+    if target.is_big_endian() {
+        builder.define("__BYTE_ORDER__", "__ORDER_BIG_ENDIAN__");
+        builder.define_one("__BIG_ENDIAN__");
+    } else {
+        builder.define("__BYTE_ORDER__", "__ORDER_LITTLE_ENDIAN__");
+        builder.define_one("__LITTLE_ENDIAN__");
     }
-    define("__CHAR_BIT__", "8");
-    define("__BOOL_WIDTH__", "1");
-    define("__SHRT_WIDTH__", "16");
-    define("__INT_WIDTH__", "32");
-    let long_width = model.long_width.to_string();
-    define("__LONG_WIDTH__", &long_width);
-    define("__LLONG_WIDTH__", "64");
-    define(
+    if target.pointer_width == 64 && target.long_width == 64 && target.int_width == 32 {
+        builder.define_one("_LP64");
+        builder.define_one("__LP64__");
+    }
+    if target.pointer_width == 32 && target.long_width == 32 && target.int_width == 32 {
+        builder.define_one("_ILP32");
+        builder.define_one("__ILP32__");
+    }
+    builder.define("__CHAR_BIT__", &target.char_width().to_string());
+    builder.define("__BOOL_WIDTH__", "1");
+    builder.define("__SHRT_WIDTH__", &target.short_width.to_string());
+    builder.define("__INT_WIDTH__", &target.int_width.to_string());
+    builder.define("__LONG_WIDTH__", &target.long_width.to_string());
+    builder.define("__LLONG_WIDTH__", &target.long_long_width.to_string());
+    builder.define(
         "__BITINT_MAXWIDTH__",
-        if model.pointer_width == 64 {
-            "8388608"
-        } else {
-            "128"
-        },
+        &target.max_bit_int_width().to_string(),
     );
-    define("__SCHAR_MAX__", "127");
-    define("__SHRT_MAX__", "32767");
-    define("__INT_MAX__", "2147483647");
-    let long_max = model.maximum(IntegerType::Long);
-    define("__LONG_MAX__", &long_max);
-    define("__LONG_LONG_MAX__", "9223372036854775807LL");
-    let sized = |prefix: &str, ty: IntegerType, minimum: bool, out: &mut Vec<(String, String)>| {
-        out.push((format!("{prefix}_MAX__"), model.maximum(ty)));
-        out.push((format!("{prefix}_WIDTH__"), model.width(ty).to_string()));
-        if minimum {
-            let value = if ty.signed() {
-                format!("(-{prefix}_MAX__ - 1)")
-            } else {
-                format!("0{}", ty.suffix())
-            };
-            out.push((format!("{prefix}_MIN__"), value));
-        }
-    };
-    sized("__WCHAR", model.wchar, true, &mut out);
-    sized("__WINT", model.wint, true, &mut out);
-    sized("__INTMAX", model.intmax, false, &mut out);
-    sized("__SIZE", model.size, false, &mut out);
-    sized("__UINTMAX", model.intmax.unsigned_of(), false, &mut out);
-    sized("__PTRDIFF", model.ptrdiff, false, &mut out);
-    sized("__INTPTR", model.intptr, false, &mut out);
-    sized("__UINTPTR", model.intptr.unsigned_of(), false, &mut out);
-    let mut define = |name: &str, value: String| out.push((name.to_string(), value));
-    define("__SIZEOF_DOUBLE__", "8".to_string());
-    define("__SIZEOF_FLOAT__", "4".to_string());
-    define("__SIZEOF_INT__", "4".to_string());
-    define("__SIZEOF_LONG__", (model.long_width / 8).to_string());
-    define(
-        "__SIZEOF_LONG_DOUBLE__",
-        (model.long_double / 8).to_string(),
-    );
-    define("__SIZEOF_LONG_LONG__", "8".to_string());
-    define("__SIZEOF_POINTER__", (model.pointer_width / 8).to_string());
-    define("__SIZEOF_SHORT__", "2".to_string());
-    define(
+    define_type_size(builder, "__SCHAR_MAX__", IntegerType::SignedChar, target);
+    define_type_size(builder, "__SHRT_MAX__", IntegerType::Short, target);
+    define_type_size(builder, "__INT_MAX__", IntegerType::Int, target);
+    define_type_size(builder, "__LONG_MAX__", IntegerType::Long, target);
+    define_type_size(builder, "__LONG_LONG_MAX__", IntegerType::LongLong, target);
+    define_type_size_and_width(builder, "__WCHAR", target.wchar_type, target);
+    define_type_minimum(builder, "__WCHAR", target.wchar_type, target);
+    define_type_size_and_width(builder, "__WINT", target.wint_type, target);
+    define_type_minimum(builder, "__WINT", target.wint_type, target);
+    define_type_size_and_width(builder, "__INTMAX", target.intmax_type, target);
+    define_type_size_and_width(builder, "__SIZE", target.size_type, target);
+    let unsigned_intmax = target.intmax_type.unsigned_counterpart();
+    let unsigned_intptr = target.intptr_type.unsigned_counterpart();
+    define_type_size_and_width(builder, "__UINTMAX", unsigned_intmax, target);
+    define_type_size_and_width(builder, "__PTRDIFF", target.ptrdiff_type, target);
+    define_type_size_and_width(builder, "__INTPTR", target.intptr_type, target);
+    define_type_size_and_width(builder, "__UINTPTR", unsigned_intptr, target);
+    let size_of = |width: u32| (width / target.char_width()).to_string();
+    builder.define("__SIZEOF_DOUBLE__", &size_of(target.double_width));
+    builder.define("__SIZEOF_FLOAT__", &size_of(target.float_width));
+    builder.define("__SIZEOF_INT__", &size_of(target.int_width));
+    builder.define("__SIZEOF_LONG__", &size_of(target.long_width));
+    builder.define("__SIZEOF_LONG_DOUBLE__", &size_of(target.long_double_width));
+    builder.define("__SIZEOF_LONG_LONG__", &size_of(target.long_long_width));
+    builder.define("__SIZEOF_POINTER__", &size_of(target.pointer_width));
+    builder.define("__SIZEOF_SHORT__", &size_of(target.short_width));
+    builder.define(
         "__SIZEOF_PTRDIFF_T__",
-        (model.width(model.ptrdiff) / 8).to_string(),
+        &size_of(target.type_width(target.ptrdiff_type)),
     );
-    define(
+    builder.define(
         "__SIZEOF_SIZE_T__",
-        (model.width(model.size) / 8).to_string(),
+        &size_of(target.type_width(target.size_type)),
     );
-    define(
+    builder.define(
         "__SIZEOF_WCHAR_T__",
-        (model.width(model.wchar) / 8).to_string(),
+        &size_of(target.type_width(target.wchar_type)),
     );
-    define(
+    builder.define(
         "__SIZEOF_WINT_T__",
-        (model.width(model.wint) / 8).to_string(),
+        &size_of(target.type_width(target.wint_type)),
     );
-    if model.pointer_width == 64 {
-        define("__SIZEOF_INT128__", "16".to_string());
+    if target.has_int128() {
+        builder.define("__SIZEOF_INT128__", &size_of(128));
     }
-    define("__INTMAX_TYPE__", model.intmax.name().to_string());
-    define_formats(&mut out, "__INTMAX", model.intmax, c23);
-    let mut define = |name: &str, value: String| out.push((name.to_string(), value));
-    define("__INTMAX_C_SUFFIX__", model.intmax.suffix().to_string());
-    define("__INTMAX_C(c)", format!("c##{}", model.intmax.suffix()));
-    define(
-        "__UINTMAX_TYPE__",
-        model.intmax.unsigned_of().name().to_string(),
+    builder.define("__INTMAX_TYPE__", target.intmax_type.name());
+    define_format(builder, c23, "__INTMAX", target.intmax_type);
+    define_constant_suffix(
+        builder,
+        "__INTMAX",
+        target.type_constant_suffix(target.intmax_type),
     );
-    define_formats(&mut out, "__UINTMAX", model.intmax.unsigned_of(), c23);
-    let mut define = |name: &str, value: String| out.push((name.to_string(), value));
-    define(
-        "__UINTMAX_C_SUFFIX__",
-        model.intmax.unsigned_of().suffix().to_string(),
+    builder.define("__UINTMAX_TYPE__", unsigned_intmax.name());
+    define_format(builder, c23, "__UINTMAX", unsigned_intmax);
+    define_constant_suffix(
+        builder,
+        "__UINTMAX",
+        target.type_constant_suffix(unsigned_intmax),
     );
-    define(
-        "__UINTMAX_C(c)",
-        format!("c##{}", model.intmax.unsigned_of().suffix()),
-    );
-    define("__PTRDIFF_TYPE__", model.ptrdiff.name().to_string());
-    define_formats(&mut out, "__PTRDIFF", model.ptrdiff, c23);
-    out.push((
-        "__INTPTR_TYPE__".to_string(),
-        model.intptr.name().to_string(),
-    ));
-    define_formats(&mut out, "__INTPTR", model.intptr, c23);
-    out.push(("__SIZE_TYPE__".to_string(), model.size.name().to_string()));
-    define_formats(&mut out, "__SIZE", model.size, c23);
-    out.push(("__WCHAR_TYPE__".to_string(), model.wchar.name().to_string()));
-    out.push(("__WINT_TYPE__".to_string(), model.wint.name().to_string()));
-    out.push(("__SIG_ATOMIC_TYPE__".to_string(), "int".to_string()));
-    out.push(("__SIG_ATOMIC_MAX__".to_string(), "2147483647".to_string()));
-    out.push(("__SIG_ATOMIC_WIDTH__".to_string(), "32".to_string()));
-    out.push((
-        "__SIG_ATOMIC_MIN__".to_string(),
-        "(-__SIG_ATOMIC_MAX__ - 1)".to_string(),
-    ));
+    builder.define("__PTRDIFF_TYPE__", target.ptrdiff_type.name());
+    define_format(builder, c23, "__PTRDIFF", target.ptrdiff_type);
+    builder.define("__INTPTR_TYPE__", target.intptr_type.name());
+    define_format(builder, c23, "__INTPTR", target.intptr_type);
+    builder.define("__SIZE_TYPE__", target.size_type.name());
+    define_format(builder, c23, "__SIZE", target.size_type);
+    builder.define("__WCHAR_TYPE__", target.wchar_type.name());
+    builder.define("__WINT_TYPE__", target.wint_type.name());
+    builder.define("__SIG_ATOMIC_TYPE__", target.sig_atomic_type.name());
+    define_type_size_and_width(builder, "__SIG_ATOMIC", target.sig_atomic_type, target);
+    define_type_minimum(builder, "__SIG_ATOMIC", target.sig_atomic_type, target);
     if c23 {
-        out.push(("__CHAR8_TYPE__".to_string(), "unsigned char".to_string()));
+        builder.define("__CHAR8_TYPE__", IntegerType::UnsignedChar.name());
     }
-    out.push(("__CHAR16_TYPE__".to_string(), "unsigned short".to_string()));
-    out.push(("__CHAR32_TYPE__".to_string(), "unsigned int".to_string()));
-    out.push((
-        "__UINTPTR_TYPE__".to_string(),
-        model.intptr.unsigned_of().name().to_string(),
-    ));
-    define_formats(&mut out, "__UINTPTR", model.intptr.unsigned_of(), c23);
-    define_float(&mut out, "FLT", 32, "F");
-    define_float(&mut out, "DBL", 64, "");
-    let long_double_format = match model.long_double {
-        64 => 64,
-        96 => 80,
-        128 if target.architecture == "x86_64" => 80,
-        _ => 128,
-    };
-    define_float(&mut out, "LDBL", long_double_format, "L");
-    out.push((
-        "__POINTER_WIDTH__".to_string(),
-        model.pointer_width.to_string(),
-    ));
-    out.push((
-        "__BIGGEST_ALIGNMENT__".to_string(),
-        model.biggest_alignment.to_string(),
-    ));
+    builder.define("__CHAR16_TYPE__", target.char16_type.name());
+    builder.define("__CHAR32_TYPE__", target.char32_type.name());
+    builder.define("__UINTPTR_TYPE__", unsigned_intptr.name());
+    define_format(builder, c23, "__UINTPTR", unsigned_intptr);
+    if target.has_float16 {
+        define_float_macros(builder, "FLT16", target.half_format, "F16");
+    }
+    define_float_macros(builder, "FLT", target.float_format, "F");
+    define_float_macros(builder, "DBL", target.double_format, "");
+    define_float_macros(builder, "LDBL", target.long_double_format, "L");
+    builder.define("__POINTER_WIDTH__", &target.pointer_width.to_string());
+    builder.define(
+        "__BIGGEST_ALIGNMENT__",
+        &(target.suitable_align / target.char_width()).to_string(),
+    );
     if !language.char_is_signed {
-        out.push(("__CHAR_UNSIGNED__".to_string(), "1".to_string()));
+        builder.define_one("__CHAR_UNSIGNED__");
     }
-    if !model.wchar.signed() {
-        out.push(("__WCHAR_UNSIGNED__".to_string(), "1".to_string()));
+    if !target.wchar_type.signed() {
+        builder.define_one("__WCHAR_UNSIGNED__");
     }
-    out.push(("__WINT_UNSIGNED__".to_string(), "1".to_string()));
-    let exact = |out: &mut Vec<(String, String)>, ty: IntegerType| {
-        let width = model.width(ty);
-        let actual = if width == 64 {
-            if ty.signed() {
-                model.int64
-            } else {
-                model.int64.unsigned_of()
-            }
-        } else {
-            ty
-        };
-        let prefix = if ty.signed() { "__INT" } else { "__UINT" };
-        out.push((format!("{prefix}{width}_TYPE__"), actual.name().to_string()));
-        define_formats(out, &format!("{prefix}{width}"), actual, c23);
-        out.push((
-            format!("{prefix}{width}_C_SUFFIX__"),
-            actual.suffix().to_string(),
-        ));
-        let body = if actual.suffix().is_empty() {
-            "c".to_string()
-        } else {
-            format!("c##{}", actual.suffix())
-        };
-        out.push((format!("{prefix}{width}_C(c)"), body));
-    };
-    let exact_size = |out: &mut Vec<(String, String)>, ty: IntegerType| {
-        let width = model.width(ty);
-        let actual = if width == 64 {
-            if ty.signed() {
-                model.int64
-            } else {
-                model.int64.unsigned_of()
-            }
-        } else {
-            ty
-        };
-        let prefix = if ty.signed() { "__INT" } else { "__UINT" };
-        out.push((format!("{prefix}{width}_MAX__"), model.maximum(actual)));
-    };
-    exact(&mut out, IntegerType::SignedChar);
-    exact(&mut out, IntegerType::Short);
-    exact(&mut out, IntegerType::Int);
-    if model.long_width > 32 {
-        exact(&mut out, IntegerType::Long);
-    } else {
-        exact(&mut out, IntegerType::LongLong);
+    if !target.wint_type.signed() {
+        builder.define_one("__WINT_UNSIGNED__");
     }
-    exact(&mut out, IntegerType::UnsignedChar);
-    exact_size(&mut out, IntegerType::UnsignedChar);
-    exact_size(&mut out, IntegerType::SignedChar);
-    exact(&mut out, IntegerType::UnsignedShort);
-    exact_size(&mut out, IntegerType::UnsignedShort);
-    exact_size(&mut out, IntegerType::Short);
-    exact(&mut out, IntegerType::UnsignedInt);
-    exact_size(&mut out, IntegerType::UnsignedInt);
-    exact_size(&mut out, IntegerType::Int);
-    let wide = if model.long_width > 32 {
-        IntegerType::Long
-    } else {
-        IntegerType::LongLong
-    };
-    exact(&mut out, wide.unsigned_of());
-    exact_size(&mut out, wide.unsigned_of());
-    exact_size(&mut out, wide);
-    for (kind, label) in [("LEAST", "__INT_LEAST"), ("FAST", "__INT_FAST")] {
-        let _ = kind;
-        for width in [8u32, 16, 32, 64] {
-            for signed in [true, false] {
-                let base = model.least(width);
-                let ty = if signed { base } else { base.unsigned_of() };
-                let prefix = if signed {
-                    label.to_string()
-                } else {
-                    label.replacen("__INT", "__UINT", 1)
-                };
-                out.push((format!("{prefix}{width}_TYPE__"), ty.name().to_string()));
-                out.push((format!("{prefix}{width}_MAX__"), model.maximum(ty)));
-                if signed {
-                    out.push((
-                        format!("{prefix}{width}_WIDTH__"),
-                        model.width(ty).to_string(),
-                    ));
-                }
-                define_formats(&mut out, &format!("{prefix}{width}"), ty, c23);
-            }
+    define_exact_width_type(builder, c23, IntegerType::SignedChar, target);
+    if target.short_width > target.char_width() {
+        define_exact_width_type(builder, c23, IntegerType::Short, target);
+    }
+    if target.int_width > target.short_width {
+        define_exact_width_type(builder, c23, IntegerType::Int, target);
+    }
+    if target.long_width > target.int_width {
+        define_exact_width_type(builder, c23, IntegerType::Long, target);
+    }
+    if target.long_long_width > target.long_width {
+        define_exact_width_type(builder, c23, IntegerType::LongLong, target);
+    }
+    define_exact_width_type(builder, c23, IntegerType::UnsignedChar, target);
+    define_exact_width_type_size(builder, IntegerType::UnsignedChar, target);
+    define_exact_width_type_size(builder, IntegerType::SignedChar, target);
+    for (narrow, wide, unsigned_wide, signed_wide) in [
+        (
+            target.char_width(),
+            target.short_width,
+            IntegerType::UnsignedShort,
+            IntegerType::Short,
+        ),
+        (
+            target.short_width,
+            target.int_width,
+            IntegerType::UnsignedInt,
+            IntegerType::Int,
+        ),
+        (
+            target.int_width,
+            target.long_width,
+            IntegerType::UnsignedLong,
+            IntegerType::Long,
+        ),
+        (
+            target.long_width,
+            target.long_long_width,
+            IntegerType::UnsignedLongLong,
+            IntegerType::LongLong,
+        ),
+    ] {
+        if wide > narrow {
+            define_exact_width_type(builder, c23, unsigned_wide, target);
+            define_exact_width_type_size(builder, unsigned_wide, target);
+            define_exact_width_type_size(builder, signed_wide, target);
         }
     }
-    let mut define = |name: &str, value: &str| out.push((name.to_string(), value.to_string()));
-    define("__USER_LABEL_PREFIX__", "");
-    define("__FINITE_MATH_ONLY__", "0");
+    for head in ["LEAST", "FAST"] {
+        for width in [8, 16, 32, 64] {
+            define_least_width_type(builder, c23, head, width, true, target);
+            define_least_width_type(builder, c23, head, width, false, target);
+        }
+    }
+    builder.define("__USER_LABEL_PREFIX__", target.user_label_prefix);
+    if !options.math_errno {
+        builder.define_one("__NO_MATH_ERRNO__");
+    }
+    if options.fast_math || (options.no_honor_infinities && options.no_honor_nans) {
+        builder.define("__FINITE_MATH_ONLY__", "1");
+    } else {
+        builder.define("__FINITE_MATH_ONLY__", "0");
+    }
     if options.gnuc_version.is_some() {
-        define("__GNUC_STDC_INLINE__", "1");
-        define("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
-    }
-    define("__GCC_DESTRUCTIVE_SIZE", "64");
-    define("__GCC_CONSTRUCTIVE_SIZE", "64");
-    for prefix in ["__GCC_ATOMIC_", "__CLANG_ATOMIC_"] {
-        for name in [
-            "BOOL", "CHAR", "CHAR16_T", "CHAR32_T", "WCHAR_T", "SHORT", "INT", "LONG", "LLONG",
-            "POINTER",
-        ] {
-            out.push((format!("{prefix}{name}_LOCK_FREE"), "2".to_string()));
+        let gnu_inline = options
+            .gnu_inline
+            .unwrap_or(!language.at_least(CStandard::C99));
+        if gnu_inline {
+            builder.define_one("__GNUC_GNU_INLINE__");
+        } else {
+            builder.define_one("__GNUC_STDC_INLINE__");
         }
+        builder.define("__GCC_ATOMIC_TEST_AND_SET_TRUEVAL", "1");
+    }
+    let (destructive, constructive) = target.interference_sizes();
+    builder.define("__GCC_DESTRUCTIVE_SIZE", &destructive.to_string());
+    builder.define("__GCC_CONSTRUCTIVE_SIZE", &constructive.to_string());
+    builder.append("#pragma push_macro(\"__GCC_DESTRUCTIVE_SIZE\")");
+    builder.append("#pragma push_macro(\"__GCC_CONSTRUCTIVE_SIZE\")");
+    let mut prefixes = vec!["__CLANG_ATOMIC_"];
+    if options.gnuc_version.is_some() {
+        prefixes.push("__GCC_ATOMIC_");
+    }
+    for prefix in prefixes {
+        let char_width = target.char_width();
+        let mut entries = vec![("BOOL", target.bool_width), ("CHAR", char_width)];
         if c23 {
-            out.push((format!("{prefix}CHAR8_T_LOCK_FREE"), "2".to_string()));
+            entries.push(("CHAR8_T", char_width));
+        }
+        entries.extend([
+            ("CHAR16_T", target.type_width(target.char16_type)),
+            ("CHAR32_T", target.type_width(target.char32_type)),
+            ("WCHAR_T", target.type_width(target.wchar_type)),
+            ("SHORT", target.short_width),
+            ("INT", target.int_width),
+            ("LONG", target.long_width),
+            ("LLONG", target.long_long_width),
+            ("POINTER", target.pointer_width),
+        ]);
+        for (name, width) in entries {
+            builder.define(
+                &format!("{prefix}{name}_LOCK_FREE"),
+                lock_free_value(width, target),
+            );
         }
     }
-    let mut define = |name: &str, value: &str| out.push((name.to_string(), value.to_string()));
     if options.optimize == 0 || options.no_inline {
-        define("__NO_INLINE__", "1");
+        builder.define_one("__NO_INLINE__");
     }
     if options.pic_level > 0 {
         let level = options.pic_level.to_string();
-        define("__PIC__", &level);
-        define("__pic__", &level);
+        builder.define("__PIC__", &level);
+        builder.define("__pic__", &level);
         if options.pie {
-            define("__PIE__", &level);
-            define("__pie__", &level);
+            builder.define("__PIE__", &level);
+            builder.define("__pie__", &level);
         }
     }
-    define("__FLT_RADIX__", "2");
-    define("__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__");
-    define("__GCC_IEC_559", "2");
-    define("__GCC_IEC_559_COMPLEX", "2");
-    let system = target.system.as_str();
-    let binary_elf = !(system.starts_with("darwin")
-        || system.starts_with("macos")
-        || system.starts_with("ios")
-        || target.is_windows());
-    if binary_elf {
-        define("__ELF__", "1");
+    builder.define("__FLT_RADIX__", "2");
+    builder.define("__DECIMAL_DIG__", "__LDBL_DECIMAL_DIG__");
+    if target.triple.is_elf() {
+        builder.define_one("__ELF__");
     }
-    target_macros(target, &mut out);
-    out
+    target.target_defines(language, options.posix_threads, builder);
 }
 
-fn target_macros(target: &TargetInfo, out: &mut Vec<(String, String)>) {
-    let mut define = |name: &str, value: &str| out.push((name.to_string(), value.to_string()));
-    let system = target.system.as_str();
-    if system.starts_with("linux") || target.environment.starts_with("android") {
-        define("__gnu_linux__", "1");
-        define("__linux", "1");
-        define("__linux__", "1");
-        define("__unix", "1");
-        define("__unix__", "1");
-        define("linux", "1");
-        define("unix", "1");
-        if target.environment.starts_with("android") {
-            define("__ANDROID__", "1");
-        }
-        define("_GNU_SOURCE", "1");
+fn initialize_standard_predefined_macros(
+    options: &PreprocessorOptions,
+    builder: &mut MacroBuilder,
+) {
+    let language = &options.language;
+    if !language.traditional {
+        builder.define_one("__STDC__");
     }
-    match target.architecture.as_str() {
-        "x86_64" => {
-            define("__amd64", "1");
-            define("__amd64__", "1");
-            define("__x86_64", "1");
-            define("__x86_64__", "1");
-            define("__SEG_FS", "1");
-            define("__SEG_GS", "1");
-            define("__seg_fs", "__attribute__((address_space(257)))");
-            define("__seg_gs", "__attribute__((address_space(256)))");
-            define("__k8", "1");
-            define("__k8__", "1");
-            define("__tune_k8__", "1");
-            define("__REGISTER_PREFIX__", "");
-            define("__NO_MATH_INLINES", "1");
-            define("__MMX__", "1");
-            define("__SSE__", "1");
-            define("__SSE2__", "1");
-            define("__SSE_MATH__", "1");
-            define("__SSE2_MATH__", "1");
-            define("__FXSR__", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8", "1");
-            define("__SIZEOF_FLOAT128__", "16");
-        }
-        "i386" | "i486" | "i586" | "i686" => {
-            define("i386", "1");
-            define("__i386", "1");
-            define("__i386__", "1");
-            define("__REGISTER_PREFIX__", "");
-            define("__NO_MATH_INLINES", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1");
-        }
-        "aarch64" | "arm64" => {
-            define("__aarch64__", "1");
-            define("__AARCH64EL__", "1");
-            define("__ARM_64BIT_STATE", "1");
-            define("__ARM_ARCH", "8");
-            define("__ARM_ARCH_ISA_A64", "1");
-            define("__ARM_ARCH_PROFILE", "'A'");
-            define("__ARM_FEATURE_CLZ", "1");
-            define("__ARM_FEATURE_FMA", "1");
-            define("__ARM_FEATURE_IDIV", "1");
-            define("__ARM_FEATURE_UNALIGNED", "1");
-            define("__ARM_FP", "0xE");
-            define("__ARM_NEON", "1");
-            define("__ARM_PCS_AAPCS64", "1");
-            define("__ARM_SIZEOF_MINIMAL_ENUM", "4");
-            define("__ARM_SIZEOF_WCHAR_T", "4");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_1", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_2", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_4", "1");
-            define("__GCC_HAVE_SYNC_COMPARE_AND_SWAP_8", "1");
-        }
-        architecture if architecture.starts_with("arm") || architecture.starts_with("thumb") => {
-            define("__arm", "1");
-            define("__arm__", "1");
-            define("__ARMEL__", "1");
-            define("__ARM_ARCH", "7");
-            define("__ARM_ARCH_7A__", "1");
-            define("__ARM_ARCH_PROFILE", "'A'");
-            define("__ARM_EABI__", "1");
-            define("__ARM_FEATURE_CLZ", "1");
-            define("__ARM_SIZEOF_MINIMAL_ENUM", "4");
-            define("__ARM_SIZEOF_WCHAR_T", "4");
-            define("__APCS_32__", "1");
-            define("__REGISTER_PREFIX__", "");
-            if architecture.starts_with("thumb") {
-                define("__thumb__", "1");
-                define("__THUMBEL__", "1");
-            }
-        }
-        _ => {}
+    if options.freestanding {
+        builder.define("__STDC_HOSTED__", "0");
+    } else {
+        builder.define_one("__STDC_HOSTED__");
+    }
+    if let Some(version) = language.standard.version_macro() {
+        builder.define("__STDC_VERSION__", version);
+    }
+    builder.define("__STDC_UTF_16__", "1");
+    builder.define("__STDC_UTF_32__", "1");
+    builder.define("__STDC_EMBED_NOT_FOUND__", "0");
+    builder.define("__STDC_EMBED_FOUND__", "1");
+    builder.define("__STDC_EMBED_EMPTY__", "2");
+    if language.assembly {
+        builder.define_one("__ASSEMBLER__");
     }
 }
 
-pub fn standard_macros(options: &PreprocessorOptions) -> Vec<(String, String)> {
-    let mut out = Vec::new();
-    if !options.language.traditional {
-        out.push(("__STDC__".to_string(), "1".to_string()));
+pub fn predefined_macro_text(options: &PreprocessorOptions) -> String {
+    let mut builder = MacroBuilder {
+        text: String::new(),
+    };
+    if !options.undefine_predefined {
+        initialize_predefined_macros(options, &mut builder);
     }
-    out.push((
-        "__STDC_HOSTED__".to_string(),
-        if options.freestanding { "0" } else { "1" }.to_string(),
-    ));
-    if let Some(version) = options.language.standard.version_macro() {
-        out.push(("__STDC_VERSION__".to_string(), version.to_string()));
-    }
-    out.push(("__STDC_UTF_16__".to_string(), "1".to_string()));
-    out.push(("__STDC_UTF_32__".to_string(), "1".to_string()));
-    out.push(("__STDC_EMBED_NOT_FOUND__".to_string(), "0".to_string()));
-    out.push(("__STDC_EMBED_FOUND__".to_string(), "1".to_string()));
-    out.push(("__STDC_EMBED_EMPTY__".to_string(), "2".to_string()));
-    if options.language.assembly {
-        out.push(("__ASSEMBLER__".to_string(), "1".to_string()));
-    }
-    out
+    initialize_standard_predefined_macros(options, &mut builder);
+    builder.text
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -14338,6 +19772,7 @@ pub struct CompilerInvocation {
     pub preprocessor: PreprocessorOptions,
     pub verify: Option<Vec<String>>,
     pub unsupported: Vec<String>,
+    pub target_problem: Option<String>,
     pub show_source: bool,
     pub dump_macros: bool,
 }
@@ -14385,9 +19820,11 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
         preprocessor: PreprocessorOptions::default(),
         verify: None,
         unsupported: Vec::new(),
+        target_problem: None,
         show_source: true,
         dump_macros: false,
     };
+    let mut target_options = TargetOptions::default();
     let mut standard: Option<String> = None;
     let mut trigraphs: Option<bool> = None;
     let mut dollars: Option<bool> = None;
@@ -14459,24 +19896,33 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
             | "-fno-file-reproducible"
             | "-fgnu-keywords"
             | "-fno-gnu-keywords"
-            | "-fno-signed-wchar"
-            | "-fsigned-wchar"
             | "-fno-diagnostics-fixit-info"
             | "-fdiagnostics-parseable-fixits"
             | "-fno-common"
             | "-fcommon"
             | "-disable-free"
-            | "-fexceptions"
-            | "-fno-exceptions"
-            | "-fgnu89-inline"
-            | "-fno-math-errno"
-            | "-fmath-errno"
-            | "-ffast-math"
             | "-fno-rtti"
             | "-fno-elide-type"
             | "-fno-integrated-cc1"
             | "-fgnuc-version=0" => {}
             "-fno-caret-diagnostics" => invocation.show_source = false,
+            "-fno-signed-wchar" => target_options.wchar_signed = false,
+            "-fsigned-wchar" => target_options.wchar_signed = true,
+            "-fexceptions" => options.exceptions = true,
+            "-fno-exceptions" => options.exceptions = false,
+            "-fgnu89-inline" => options.gnu_inline = Some(true),
+            "-fno-gnu89-inline" => options.gnu_inline = Some(false),
+            "-fmath-errno" => options.math_errno = true,
+            "-fno-math-errno" => options.math_errno = false,
+            "-ffast-math" => {
+                options.fast_math = true;
+                options.no_honor_infinities = true;
+                options.no_honor_nans = true;
+            }
+            "-fno-fast-math" => options.fast_math = false,
+            "-menable-no-infs" => options.no_honor_infinities = true,
+            "-menable-no-nans" => options.no_honor_nans = true,
+            "-pthread" => options.posix_threads = true,
             "-fno-spell-checking" => options.spell_checking = false,
             "-pic-is-pie" => options.pie = true,
             "-fno-inline" | "-fno-inline-functions" => options.no_inline = true,
@@ -14571,14 +20017,35 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
                     });
                 } else if argument == "-triple" || argument == "-target" {
                     if let Some(value) = take_value(&mut index, argument, "") {
-                        options.target = TargetInfo::from_triple(&value);
+                        target_options.triple = value;
                     }
                 } else if let Some(rest) = argument.strip_prefix("--embed-dir=") {
                     options.embed_directories.push(rest.to_string());
                 } else if let Some(rest) = argument.strip_prefix("-triple=") {
-                    options.target = TargetInfo::from_triple(rest);
+                    target_options.triple = rest.to_string();
                 } else if let Some(rest) = argument.strip_prefix("--target=") {
-                    options.target = TargetInfo::from_triple(rest);
+                    target_options.triple = rest.to_string();
+                } else if argument == "-target-cpu" {
+                    if let Some(value) = take_value(&mut index, argument, "") {
+                        target_options.cpu = value;
+                    }
+                } else if argument == "-target-feature" {
+                    if let Some(value) = take_value(&mut index, argument, "") {
+                        target_options.features.push(value);
+                    }
+                } else if argument == "-target-abi" {
+                    if let Some(value) = take_value(&mut index, argument, "") {
+                        target_options.abi = value;
+                    }
+                } else if let Some(rest) = argument.strip_prefix("-mcmodel=") {
+                    target_options.code_model = rest.to_string();
+                } else if let Some(rest) = argument.strip_prefix("-fwchar-type=") {
+                    match rest {
+                        "char" => target_options.wchar_size = 1,
+                        "short" => target_options.wchar_size = 2,
+                        "int" => target_options.wchar_size = 4,
+                        _ => invocation.unsupported.push(argument.to_string()),
+                    }
                 } else if argument == "-ferror-limit" || argument.starts_with("-ferror-limit=") {
                     let rest = argument.strip_prefix("-ferror-limit=").unwrap_or("");
                     let value = take_value(&mut index, "-ferror-limit", rest);
@@ -14599,9 +20066,6 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
                     options.pic_level = value.and_then(|value| value.parse().ok()).unwrap_or(0);
                 } else if argument == "-main-file-name"
                     || argument == "-fmacro-backtrace-limit"
-                    || argument == "-target-cpu"
-                    || argument == "-target-abi"
-                    || argument == "-target-feature"
                     || argument == "-mrelocation-model"
                     || argument == "-fmessage-length"
                     || argument == "-ftabstop"
@@ -14638,12 +20102,15 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     if !after_directories.is_empty() {
         options.directories.extend(after_directories);
     }
-    let target_char_signed = options.target.char_signed();
+    match TargetInfo::create(&target_options) {
+        Ok(target) => invocation.preprocessor.target = target,
+        Err(reason) => invocation.target_problem = Some(reason),
+    }
     let input_kind = invocation
         .inputs
         .first()
         .map(|path| invocation.input_language(path))
-        .unwrap_or(InputLanguage::C);
+        .unwrap_or(invocation.language_kind.unwrap_or(InputLanguage::C));
     let mut language = match &standard {
         Some(name) => match LanguageOptions::for_standard(name) {
             Some(language) => language,
@@ -14668,7 +20135,7 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     language.microsoft_extensions = microsoft;
     language.declspec_keyword = declspec.unwrap_or(microsoft);
     language.traditional = traditional;
-    language.char_is_signed = signed_char.unwrap_or(target_char_signed);
+    language.char_is_signed = signed_char.unwrap_or(true);
     language.preprocessed_output = invocation.action == FrontendAction::PreprocessOnly
         || (invocation.action == FrontendAction::Preprocess && !invocation.dump_macros);
     let options = &mut invocation.preprocessor;

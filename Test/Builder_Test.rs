@@ -71866,8 +71866,8 @@ mod c_front_end {
     use super::table_gen::publish_with_scope;
     use crate::compilers::cpp::{
         parse_compiler_arguments, render_diagnostic, BufferKind, CDiagnostic, CSeverity,
-        FrontendAction, InputLanguage, Place, PreprocessOutcome, Preprocessor, PreprocessorOptions,
-        SourceFiles, SourceMap,
+        FrontendAction, InputLanguage, Place, PreprocessOutcome, Preprocessor, SourceFiles,
+        SourceMap,
     };
     use std::collections::BTreeMap;
 
@@ -71893,27 +71893,6 @@ mod c_front_end {
         fn read(&self, path: &str) -> Option<Vec<u8>> {
             self.files.get(path).cloned()
         }
-    }
-
-    fn supported_target(options: &PreprocessorOptions) -> Result<(), String> {
-        let target = &options.target;
-        let architecture = target.architecture.as_str();
-        let known_architecture = architecture == "x86_64"
-            || matches!(architecture, "i386" | "i486" | "i586" | "i686")
-            || architecture == "aarch64"
-            || architecture == "arm64"
-            || architecture.starts_with("arm")
-            || architecture.starts_with("thumb");
-        if !known_architecture {
-            return Err(format!("target architecture {architecture}"));
-        }
-        if !matches!(
-            target.system.as_str(),
-            "linux" | "unknown" | "none" | "elf" | "linux-gnu"
-        ) {
-            return Err(format!("target system {}", target.system));
-        }
-        Ok(())
     }
 
     fn out_of_scope(world: &mut World, reason: String) -> ToolOutcome {
@@ -71972,7 +71951,7 @@ mod c_front_end {
             }
             InputLanguage::Other => return out_of_scope(world, "input language".to_string()),
         }
-        if let Err(reason) = supported_target(&invocation.preprocessor) {
+        if let Some(reason) = invocation.target_problem.clone() {
             return out_of_scope(world, reason);
         }
         let (name, bytes) = if path == "-" {
@@ -73347,5 +73326,214 @@ mod c_front_end {
             outcomes,
         };
         publish_with_scope(&report);
+    }
+
+    fn predefined(arguments: &[&str]) -> String {
+        let mut owned = vec!["-E", "-dM"];
+        owned.extend_from_slice(arguments);
+        owned.push("empty.c");
+        let (output, stderr, status) = preprocess(&owned, &[("empty.c", "")]);
+        assert_eq!(status, 0, "{stderr}");
+        output
+    }
+
+    fn has_line(output: &str, line: &str) -> bool {
+        output.lines().any(|candidate| candidate == line)
+    }
+
+    #[test]
+    fn android_aarch64_predefines_follow_the_linux_and_aarch64_targets() {
+        let output = predefined(&["-triple", "aarch64-linux-android24"]);
+        for line in [
+            "#define __ANDROID__ 1",
+            "#define __ANDROID_MIN_SDK_VERSION__ 24",
+            "#define __ANDROID_API__ __ANDROID_MIN_SDK_VERSION__",
+            "#define __AARCH64EL__ 1",
+            "#define __ARM_ARCH 8",
+            "#define __ARM_FP 0xE",
+            "#define __GCC_DESTRUCTIVE_SIZE 256",
+            "#define __GCC_CONSTRUCTIVE_SIZE 64",
+            "#define __WINT_TYPE__ unsigned int",
+            "#define __WCHAR_TYPE__ unsigned int",
+            "#define __SIZEOF_LONG_DOUBLE__ 16",
+            "#define __NO_MATH_ERRNO__ 1",
+            "#define linux 1",
+        ] {
+            assert!(has_line(&output, line), "missing {line}\n{output}");
+        }
+        assert!(!has_line(&output, "#define __ARM_NEON 1"));
+        assert!(!has_line(&output, "#define __gnu_linux__ 1"));
+        let neon = predefined(&[
+            "-triple",
+            "aarch64-linux-android24",
+            "-target-feature",
+            "+v8a",
+        ]);
+        assert!(has_line(&neon, "#define __ARM_NEON 1"));
+        assert!(has_line(&neon, "#define __ARM_NEON_FP 0xE"));
+    }
+
+    #[test]
+    fn x86_processor_selection_drives_feature_macros() {
+        let output = predefined(&["-triple", "i386-pc-linux-gnu", "-target-cpu", "pentium4"]);
+        for line in [
+            "#define __pentium4 1",
+            "#define __pentium4__ 1",
+            "#define __tune_pentium4__ 1",
+            "#define __SSE2__ 1",
+            "#define __MMX__ 1",
+            "#define __LAHF_SAHF__ 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_8 1",
+            "#define __SIZEOF_FLOAT128__ 16",
+            "#define __SIZEOF_LONG_DOUBLE__ 12",
+            "#define __i386__ 1",
+            "#define i386 1",
+        ] {
+            assert!(has_line(&output, line), "missing {line}\n{output}");
+        }
+        let bare = predefined(&["-triple", "i386-none-none"]);
+        assert!(has_line(&bare, "#define __WINT_TYPE__ int"));
+        assert!(!has_line(&bare, "#define __SSE__ 1"));
+        let wide = predefined(&["-triple", "x86_64-linux-gnu", "-target-cpu", "x86-64-v3"]);
+        for line in [
+            "#define __AVX2__ 1",
+            "#define __BMI2__ 1",
+            "#define __XSAVE__ 1",
+            "#define __CRC32__ 1",
+            "#define __POPCNT__ 1",
+            "#define __GCC_HAVE_SYNC_COMPARE_AND_SWAP_16 1",
+            "#define __BITINT_MAXWIDTH__ 8388608",
+        ] {
+            assert!(has_line(&wide, line), "missing {line}\n{wide}");
+        }
+        let reduced = predefined(&["-triple", "x86_64-linux-gnu", "-target-feature", "-sse"]);
+        assert!(!has_line(&reduced, "#define __SSE2__ 1"));
+        assert!(!has_line(&reduced, "#define __MMX__ 1"));
+    }
+
+    #[test]
+    fn floating_point_evaluation_method_follows_the_sse_level() {
+        let source = "__FLT_EVAL_METHOD__\n";
+        for (triple, expected) in [("i386-none-none", "2"), ("x86_64-linux-gnu", "0")] {
+            let (output, stderr, status) =
+                preprocess(&["-E", "-triple", triple, "main.c"], &[("main.c", source)]);
+            assert_eq!(status, 0, "{stderr}");
+            assert_eq!(body(&output), expected);
+        }
+    }
+
+    #[test]
+    fn arm_architecture_and_processor_select_floating_point_macros() {
+        let output = predefined(&["-triple", "armv7a-linux-androideabi24"]);
+        for line in [
+            "#define __ARM_ARCH_7A__ 1",
+            "#define __ARM_ARCH 7",
+            "#define __ARM_ARCH_PROFILE 'A'",
+            "#define __ARM_FEATURE_LDREX 0xf",
+            "#define __ARM_EABI__ 1",
+            "#define __ARM_PCS_VFP 1",
+            "#define __ARM_FEATURE_COPROC 0xf",
+            "#define __ARMEL__ 1",
+            "#define __SIZE_TYPE__ unsigned int",
+        ] {
+            assert!(has_line(&output, line), "missing {line}\n{output}");
+        }
+        assert!(!has_line(&output, "#define __ARM_NEON__ 1"));
+        let processor = predefined(&[
+            "-triple",
+            "armv7-linux-gnueabihf",
+            "-target-cpu",
+            "cortex-a8",
+        ]);
+        assert!(has_line(&processor, "#define __ARM_NEON__ 1"));
+        assert!(has_line(&processor, "#define __ARM_FP 0xc"));
+        assert!(has_line(&processor, "#define __ARM_VFPV3__ 1"));
+        let thumb = predefined(&["-triple", "thumbv7m-none-eabi"]);
+        for line in [
+            "#define __thumb__ 1",
+            "#define __thumb2__ 1",
+            "#define __ARM_ARCH_7M__ 1",
+            "#define __ARM_ARCH_PROFILE 'M'",
+        ] {
+            assert!(has_line(&thumb, line), "missing {line}\n{thumb}");
+        }
+        assert!(!has_line(&thumb, "#define __ARM_ARCH_ISA_ARM 1"));
+        assert!(!has_line(&thumb, "#define __ARM_FEATURE_IDIV 1"));
+    }
+
+    #[test]
+    fn time64_environments_request_wide_time_types() {
+        let wide = predefined(&["-triple", "i686-pc-linux-gnut64"]);
+        assert!(has_line(&wide, "#define _FILE_OFFSET_BITS 64"));
+        assert!(has_line(&wide, "#define _TIME_BITS 64"));
+        let narrow = predefined(&["-triple", "i686-pc-linux-gnu"]);
+        assert!(!has_line(&narrow, "#define _TIME_BITS 64"));
+    }
+
+    #[test]
+    fn unsupported_targets_are_reported_instead_of_guessed() {
+        for arguments in [
+            vec!["-triple", "x86_64-apple-darwin"],
+            vec!["-triple", "powerpc64-linux-gnu"],
+            vec!["-triple", "x86_64-pc-windows-msvc"],
+            vec!["-triple", "x86_64-linux-gnu", "-target-cpu", "imaginary"],
+            vec![
+                "-triple",
+                "armv7-linux-gnueabihf",
+                "-target-cpu",
+                "imaginary",
+            ],
+        ] {
+            let owned: Vec<String> = arguments.iter().map(|item| item.to_string()).collect();
+            let invocation = parse_compiler_arguments(&owned);
+            assert!(invocation.target_problem.is_some(), "{arguments:?}");
+        }
+        let owned: Vec<String> = ["-triple", "aarch64-linux-android21"]
+            .iter()
+            .map(|item| item.to_string())
+            .collect();
+        assert!(parse_compiler_arguments(&owned).target_problem.is_none());
+    }
+
+    #[test]
+    fn target_queries_compare_triple_components() {
+        let source = "#if __is_target_arch(arm) && __is_target_arch(thumb) && !__is_target_arch(aarch64)\nthumb\n#endif\n#if __is_target_os(linux) && __is_target_environment(gnueabihf) && __is_target_vendor(unknown)\nsystem\n#endif\n#if __has_builtin(__builtin_cpu_supports) || __has_builtin(__builtin_cpu_is)\ncpu\n#endif\n";
+        let (output, stderr, status) = preprocess(
+            &["-E", "-triple", "thumbv7-linux-gnueabihf", "main.c"],
+            &[("main.c", source)],
+        );
+        assert_eq!(status, 0, "{stderr}");
+        assert_eq!(body(&output), "thumb\nsystem");
+    }
+
+    #[test]
+    fn language_options_shape_the_predefined_macros() {
+        let assembler = parse_compiler_arguments(&[
+            "-E".to_string(),
+            "-x".to_string(),
+            "assembler-with-cpp".to_string(),
+        ]);
+        assert!(assembler.preprocessor.language.assembly);
+        let fast = predefined(&[
+            "-ffast-math",
+            "-fmath-errno",
+            "-fexceptions",
+            "-fwchar-type=short",
+            "-fno-signed-wchar",
+        ]);
+        for line in [
+            "#define __FAST_MATH__ 1",
+            "#define __FINITE_MATH_ONLY__ 1",
+            "#define __EXCEPTIONS 1",
+            "#define __WCHAR_TYPE__ unsigned short",
+            "#define __SIZEOF_WCHAR_T__ 2",
+        ] {
+            assert!(has_line(&fast, line), "missing {line}\n{fast}");
+        }
+        assert!(!has_line(&fast, "#define __NO_MATH_ERRNO__ 1"));
+        let old = predefined(&["-std=gnu89", "-fgnuc-version=4.2.1"]);
+        assert!(has_line(&old, "#define __GNUC_GNU_INLINE__ 1"));
+        let modern = predefined(&["-std=gnu17", "-fgnuc-version=4.2.1"]);
+        assert!(has_line(&modern, "#define __GNUC_STDC_INLINE__ 1"));
     }
 }
