@@ -43,7 +43,7 @@ impl Plugin for CppPlugin {
     }
 }
 
-use std::collections::{BTreeMap, BTreeSet};
+use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet, VecDeque};
 use std::rc::Rc;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -154,7 +154,7 @@ impl Default for LanguageOptions {
     }
 }
 
-#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug, Default)]
+#[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Hash, Debug, Default)]
 pub struct Place {
     pub buffer: u32,
     pub offset: u32,
@@ -548,6 +548,7 @@ const COMMA_AFTER_ELIDED: u16 = 1 << 6;
 const LEADING_EMPTY_MACRO: u16 = 1 << 7;
 const HAS_UCN: u16 = 1 << 8;
 const PLACEHOLDER: u16 = 1 << 9;
+const MACRO_ARGUMENT: u16 = 1 << 10;
 
 #[derive(Clone, Debug)]
 pub struct Token {
@@ -556,6 +557,7 @@ pub struct Token {
     pub place: Place,
     pub length: u32,
     pub site: Place,
+    pub file_site: Place,
     flags: u16,
 }
 
@@ -567,6 +569,7 @@ impl Token {
             place,
             length,
             site: place,
+            file_site: place,
             flags: 0,
         }
     }
@@ -2148,6 +2151,7 @@ enum MessageClass {
     ExtWarn,
     ExtWarnInSystemHeaders,
     ExtWarnError,
+    WarningError,
     Note,
 }
 
@@ -2313,11 +2317,7 @@ pub enum Message {
     PragmaFinalMacro,
     VisibilityNonMacro,
     NanInfinityDisabled,
-    EmptyTranslationUnit,
-    ExtraSemi,
-    ExtraneousClosingBrace,
-    ExpectedExternalDeclaration,
-    PragmaFenvRequiresPrecise,
+    Clang(u16),
     DefinedMacroName,
     DefinedInEmbed,
     PasteAtStart,
@@ -2872,23 +2872,10 @@ impl Message {
                 "nan-infinity-disabled",
                 "use of %select{infinity|NaN}0%select{| via a macro}1 is undefined behavior due to the currently enabled floating-point options",
             ),
-            Message::EmptyTranslationUnit => (
-                Extension,
-                "empty-translation-unit",
-                "ISO C requires a translation unit to contain at least one declaration",
-            ),
-            Message::ExtraSemi => (
-                Extension,
-                "extra-semi",
-                "extra ';' %select{outside of a function|inside a %1|inside instance variable list|after member function definition}0",
-            ),
-            Message::ExtraneousClosingBrace => (Error, "", "extraneous closing brace ('}')"),
-            Message::ExpectedExternalDeclaration => (Error, "", "expected external declaration"),
-            Message::PragmaFenvRequiresPrecise => (
-                Error,
-                "",
-                "'#pragma STDC FENV_ACCESS ON' is illegal when precise is disabled",
-            ),
+            Message::Clang(index) => {
+                let entry = &CLANG_DIAGNOSTICS[usize::from(index)];
+                (entry.1, entry.2, entry.3)
+            }
             Message::PragmaCommentIgnored => {
                 (Warning, "ignored-pragmas", "'#pragma comment %0' ignored")
             }
@@ -3160,22 +3147,170 @@ fn render_message(template: &str, arguments: &[String]) -> String {
             at = number_end;
             continue;
         }
-        let mut number_end = at + 1;
-        while number_end < bytes.len() && bytes[number_end].is_ascii_digit() {
+        let mut name_end = at + 1;
+        while name_end < bytes.len() && bytes[name_end].is_ascii_alphabetic() {
+            name_end += 1;
+        }
+        let modifier = &template[at + 1..name_end];
+        let mut choice_text = "";
+        let mut digits_start = name_end;
+        if name_end < bytes.len() && bytes[name_end] == b'{' && !modifier.is_empty() {
+            let mut depth = 1usize;
+            let mut close = name_end + 1;
+            while close < bytes.len() {
+                match bytes[close] {
+                    b'{' => depth += 1,
+                    b'}' => {
+                        depth -= 1;
+                        if depth == 0 {
+                            break;
+                        }
+                    }
+                    _ => {}
+                }
+                close += 1;
+            }
+            choice_text = &template[name_end + 1..close];
+            digits_start = close + 1;
+        }
+        let mut number_end = digits_start;
+        while number_end < bytes.len()
+            && (bytes[number_end].is_ascii_digit()
+                || (modifier == "diff"
+                    && bytes[number_end] == b','
+                    && number_end + 1 < bytes.len()
+                    && bytes[number_end + 1].is_ascii_digit()))
+        {
             number_end += 1;
         }
-        if number_end == at + 1 {
+        if number_end == digits_start {
             out.push('%');
             at += 1;
             continue;
         }
-        let index: usize = template[at + 1..number_end].parse().unwrap_or(0);
-        if let Some(value) = arguments.get(index) {
-            out.push_str(value);
+        let indices: Vec<usize> = template[digits_start..number_end]
+            .split(',')
+            .map(|text| text.parse().unwrap_or(0))
+            .collect();
+        let value = arguments.get(indices[0]).cloned().unwrap_or_default();
+        let number: i64 = value.parse().unwrap_or(0);
+        match modifier {
+            "s" => {
+                if number != 1 {
+                    out.push('s');
+                }
+            }
+            "quoted" => {
+                out.push('\'');
+                out.push_str(&value);
+                out.push('\'');
+            }
+            "ordinal" => {
+                let suffix = match (number % 100, number % 10) {
+                    (11..=13, _) => "th",
+                    (_, 1) => "st",
+                    (_, 2) => "nd",
+                    (_, 3) => "rd",
+                    _ => "th",
+                };
+                out.push_str(&format!("{number}{suffix}"));
+            }
+            "plural" => {
+                let mut picked = "";
+                for case in split_choices(choice_text) {
+                    let Some(colon) = case.find(':') else {
+                        continue;
+                    };
+                    if plural_condition_holds(&case[..colon], number) {
+                        picked = &case[colon + 1..];
+                        break;
+                    }
+                }
+                out.push_str(&render_message(picked, arguments));
+            }
+            "diff" => {
+                let first = split_choices(choice_text).first().copied().unwrap_or("");
+                let mut rendered = String::new();
+                let mut next = 0usize;
+                for character in first.chars() {
+                    if character == '$' {
+                        if let Some(index) = indices.get(next) {
+                            rendered.push_str(&arguments.get(*index).cloned().unwrap_or_default());
+                        }
+                        next += 1;
+                    } else {
+                        rendered.push(character);
+                    }
+                }
+                out.push_str(&render_message(&rendered, arguments));
+            }
+            _ => out.push_str(&value),
         }
         at = number_end;
     }
     out
+}
+
+fn split_choices(text: &str) -> Vec<&str> {
+    let bytes = text.as_bytes();
+    let mut choices = Vec::new();
+    let mut depth = 0usize;
+    let mut start = 0usize;
+    for (position, byte) in bytes.iter().enumerate() {
+        match byte {
+            b'{' => depth += 1,
+            b'}' => depth = depth.saturating_sub(1),
+            b'|' if depth == 0 => {
+                choices.push(&text[start..position]);
+                start = position + 1;
+            }
+            _ => {}
+        }
+    }
+    choices.push(&text[start..]);
+    choices
+}
+
+fn plural_condition_holds(condition: &str, number: i64) -> bool {
+    if condition.is_empty() {
+        return true;
+    }
+    condition.split(',').any(|part| {
+        let (value, part) = match part.strip_prefix('%') {
+            Some(rest) => {
+                let Some(equals) = rest.find('=') else {
+                    return false;
+                };
+                let modulus: i64 = rest[..equals].parse().unwrap_or(1).max(1);
+                (number % modulus, &rest[equals + 1..])
+            }
+            None => (number, part),
+        };
+        if let Some(range) = part
+            .strip_prefix('[')
+            .and_then(|rest| rest.strip_suffix(']'))
+        {
+            let mut bounds = range.split(',');
+            let low: i64 = bounds
+                .next()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(i64::MIN);
+            let high: i64 = bounds
+                .next()
+                .and_then(|text| text.parse().ok())
+                .unwrap_or(i64::MAX);
+            low <= value && value <= high
+        } else {
+            part.parse::<i64>().is_ok_and(|expected| expected == value)
+        }
+    })
+}
+
+pub fn clang_message(name: &str) -> Message {
+    match CLANG_DIAGNOSTICS.binary_search_by(|entry| entry.0.cmp(name)) {
+        Ok(index) => Message::Clang(index as u16),
+        Err(_) => panic!("{name}"),
+    }
 }
 
 fn quoted(name: &[u8]) -> String {
@@ -4320,6 +4455,83 @@ write-strings writable-strings\n\
 xor-used-as-pow\n\
 zero-as-null-pointer-constant\n\
 zero-length-array\n\
+abi\n\
+gnu-empty-initializer\n\
+aggregate-return\n\
+auto-import\n\
+c2x-compat c23-compat\n\
+char-align\n\
+ctor-dtor-privacy\n\
+override-init initializer-overrides\n\
+deprecated-copy-dtor deprecated-copy-with-dtor\n\
+partial-availability unguarded-availability\n\
+disabled-optimization\n\
+discard-qual\n\
+div-by-zero division-by-zero\n\
+c++1z-compat-mangling c++17-compat-mangling\n\
+pre-c2x-compat pre-c23-compat\n\
+pre-c2x-compat-pedantic pre-c23-compat-pedantic\n\
+c++98-c++11-compat pre-c++14-compat\n\
+c++98-c++11-compat-pedantic pre-c++14-compat-pedantic\n\
+c++98-c++11-c++14-compat pre-c++17-compat\n\
+c++98-c++11-c++14-compat-pedantic pre-c++17-compat-pedantic\n\
+c++98-c++11-c++14-c++17-compat pre-c++20-compat\n\
+c++98-c++11-c++14-c++17-compat-pedantic pre-c++20-compat-pedantic\n\
+pre-c++2c-compat pre-c++26-compat\n\
+pre-c++2c-compat-pedantic pre-c++26-compat-pedantic\n\
+c++0x-narrowing c++11-narrowing\n\
+narrowing c++11-narrowing\n\
+c++0x-compat c++11-compat\n\
+c++1z-compat c++17-compat\n\
+c++2a-compat c++20-compat\n\
+c++2a-compat-pedantic c++20-compat-pedantic\n\
+return-local-addr return-stack-address\n\
+import\n\
+init-self\n\
+inline\n\
+invalid-pch\n\
+nested-externs\n\
+nonportable-cfstrings\n\
+effc++ non-virtual-dtor\n\
+old-style-definition\n\
+overflow\n\
+redundant-decls\n\
+sign-promo\n\
+synth\n\
+sequence-point unsequenced\n\
+strict-aliasing=0\n\
+strict-aliasing=1\n\
+strict-aliasing=2\n\
+strict-aliasing\n\
+strict-overflow=0\n\
+strict-overflow=1\n\
+strict-overflow=2\n\
+strict-overflow=3\n\
+strict-overflow=4\n\
+strict-overflow=5\n\
+strict-overflow\n\
+at-protocol\n\
+address pointer-bool-conversion string-compare tautological-pointer-compare\n\
+CL4 all extra\n\
+endif-labels extra-tokens\n\
+cpp #warnings\n\
+comments comment\n\
+conversion-null null-conversion\n\
+bool-conversions bool-conversion\n\
+int-conversions int-conversion\n\
+vector-conversions vector-conversion\n\
+matrix-conversions matrix-conversion\n\
+unused-local-typedefs unused-local-typedef\n\
+c++0x-extensions c++11-extensions\n\
+c++1y-extensions c++14-extensions\n\
+c++1z-extensions c++17-extensions\n\
+c++2a-extensions c++20-extensions\n\
+c++2b-extensions c++23-extensions\n\
+c++2c-extensions c++26-extensions\n\
+c2x-extensions c23-extensions\n\
+msvc-include microsoft-include\n\
+frame-larger-than= frame-larger-than\n\
+spirv-compat spir-compat\n\
 ";
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
@@ -4416,6 +4628,7 @@ fn group_descendants(name: &str) -> BTreeSet<&'static str> {
 #[derive(Clone, Debug, Default)]
 struct DiagnosticState {
     groups: BTreeMap<&'static str, GroupMapping>,
+    all_override: Option<CSeverity>,
     extension_behavior: Option<CSeverity>,
     ignore_all: bool,
     enable_all: bool,
@@ -4435,6 +4648,7 @@ struct DiagnosticEngine {
     diagnostics: Vec<CDiagnostic>,
     errors: usize,
     warnings: usize,
+    uncompilable_error: bool,
     unknown_flags: Vec<String>,
 }
 
@@ -4588,17 +4802,28 @@ impl DiagnosticEngine {
             MessageClass::WarningOff
             | MessageClass::WarningOffInSystemHeaders
             | MessageClass::Extension => CSeverity::Ignored,
-            MessageClass::ExtWarnError => CSeverity::Error,
+            MessageClass::ExtWarnError | MessageClass::WarningError => CSeverity::Error,
         };
         if class == MessageClass::Note {
             return (CSeverity::Note, false);
         }
         let group = message.group();
-        let mapping = if group.is_empty() {
+        let mut mapping = if group.is_empty() {
             GroupMapping::default()
         } else {
             self.state.groups.get(group).copied().unwrap_or_default()
         };
+        if !mapping.user {
+            if let Some(all) = self.state.all_override {
+                if message.is_warning_like() {
+                    mapping = GroupMapping {
+                        severity: Some(all),
+                        no_werror: false,
+                        user: true,
+                    };
+                }
+            }
+        }
         let mut result = match mapping.severity {
             Some(CSeverity::Warning) if default >= CSeverity::Error => default,
             Some(severity) => severity,
@@ -5344,6 +5569,7 @@ const KEYWORD_C23: u32 = 0x400;
 const KEYWORD_FIXED_POINT: u32 = 0x10000000;
 const KEYWORD_DEFER: u32 = 0x20000000;
 const KEYWORD_EVERYWHERE: u32 = 0x3bffe7ff;
+const KEYWORD_IN_CPLUSPLUS: u32 = 0x10a026;
 
 #[derive(Clone, Copy, PartialEq, Eq, PartialOrd, Ord, Debug)]
 pub enum KeywordStatus {
@@ -5391,6 +5617,40 @@ pub fn keyword_status(language: &LanguageOptions, flags: u32) -> KeywordStatus {
     } else {
         status
     }
+}
+
+pub fn keyword_identifier_status(language: &LanguageOptions, spelling: &[u8]) -> (bool, bool) {
+    let mut status = (false, false);
+    for (name, _, flags) in KEYWORD_TABLE.iter() {
+        if name.as_bytes() != spelling {
+            continue;
+        }
+        match keyword_status(language, *flags) {
+            KeywordStatus::Enabled => status = (false, false),
+            KeywordStatus::Extension => status = (true, false),
+            KeywordStatus::Future => status = (false, true),
+            _ => {}
+        }
+    }
+    status
+}
+
+static CPLUSPLUS_OPERATOR_KEYWORDS: [&str; 11] = [
+    "and", "and_eq", "bitand", "bitor", "compl", "not", "not_eq", "or", "or_eq", "xor", "xor_eq",
+];
+
+pub fn keyword_in_cplusplus(language: &LanguageOptions, spelling: &[u8]) -> bool {
+    if CPLUSPLUS_OPERATOR_KEYWORDS
+        .iter()
+        .any(|name| name.as_bytes() == spelling)
+    {
+        return true;
+    }
+    KEYWORD_TABLE.iter().any(|(name, _, flags)| {
+        name.as_bytes() == spelling
+            && flags & KEYWORD_IN_CPLUSPLUS != 0
+            && keyword_status(language, *flags) == KeywordStatus::Disabled
+    })
 }
 
 pub fn keyword_kind(language: &LanguageOptions, spelling: &[u8]) -> Option<&'static str> {
@@ -11487,6 +11747,7 @@ pub struct PreprocessorOptions {
     pub collect_comments: bool,
     pub syntax_only: bool,
     pub freestanding: bool,
+    pub bracket_depth: u32,
     pub gnuc_version: Option<(u32, u32, u32)>,
     pub optimize: u32,
     pub optimize_size: bool,
@@ -11528,6 +11789,7 @@ impl Default for PreprocessorOptions {
             collect_comments: false,
             syntax_only: false,
             freestanding: false,
+            bracket_depth: 2048,
             gnuc_version: None,
             optimize: 0,
             optimize_size: false,
@@ -11572,6 +11834,7 @@ pub struct PreprocessOutcome {
     pub fatal: bool,
     pub unknown_warning_flags: Vec<String>,
     pub linker_comments: Vec<(String, Vec<u8>)>,
+    pub gap: Option<String>,
 }
 
 struct Printer {
@@ -11628,6 +11891,7 @@ pub struct Preprocessor<'files> {
     macros: BTreeMap<Rc<[u8]>, Rc<MacroDefinition>>,
     pushed_macros: BTreeMap<Rc<[u8]>, Vec<Option<Rc<MacroDefinition>>>>,
     poisoned: BTreeSet<Rc<[u8]>>,
+    future_keywords_reported: BTreeSet<Rc<[u8]>>,
     once_files: BTreeSet<String>,
     engine: DiagnosticEngine,
     printer: Option<Printer>,
@@ -11658,6 +11922,7 @@ pub struct Preprocessor<'files> {
     last_expression_simple: bool,
     seen_copyright_comment: bool,
     linker_comments: Vec<(String, Vec<u8>)>,
+    gap: Option<String>,
     macro_annotations: BTreeMap<Rc<[u8]>, MacroAnnotations>,
 }
 
@@ -11710,6 +11975,7 @@ impl<'files> Preprocessor<'files> {
             macros: BTreeMap::new(),
             pushed_macros: BTreeMap::new(),
             poisoned: BTreeSet::new(),
+            future_keywords_reported: BTreeSet::new(),
             once_files: BTreeSet::new(),
             engine,
             printer,
@@ -11740,6 +12006,7 @@ impl<'files> Preprocessor<'files> {
             last_expression_simple: false,
             seen_copyright_comment: false,
             linker_comments: Vec::new(),
+            gap: None,
             macro_annotations: BTreeMap::new(),
         };
         for (name, builtin) in BUILTIN_MACROS {
@@ -11801,6 +12068,7 @@ impl<'files> Preprocessor<'files> {
         let place = self.scratch_place(length);
         let mut token = Token::new(kind, Rc::from(spelling), place, length as u32);
         token.site = site.0;
+        token.file_site = site.0;
         token
     }
 
@@ -11818,6 +12086,17 @@ impl<'files> Preprocessor<'files> {
     fn report(&mut self, message: Message, place: Place, arguments: Vec<String>) {
         let in_system = self.in_system_header(place);
         let (severity, as_error) = self.engine.severity_of(message, in_system);
+        if matches!(severity, CSeverity::Error | CSeverity::Fatal)
+            && matches!(
+                message.class(),
+                MessageClass::Error
+                    | MessageClass::Fatal
+                    | MessageClass::ExtWarnError
+                    | MessageClass::WarningError
+            )
+        {
+            self.engine.uncompilable_error = true;
+        }
         if severity != CSeverity::Note {
             if self.engine.last_fatal {
                 self.engine.fatal_occurred = true;
@@ -11892,7 +12171,7 @@ impl<'files> Preprocessor<'files> {
     }
 
     fn report_token(&mut self, message: Message, token: &Token, arguments: Vec<String>) {
-        self.report(message, token.site, arguments);
+        self.report(message, token.file_site, arguments);
     }
 
     fn message_ignored(&self, message: Message, place: Place) -> bool {
@@ -12063,6 +12342,7 @@ impl<'files> Preprocessor<'files> {
             if pragma_lexer {
                 if let Some(site) = self.pragma_site {
                     token.site = site;
+                    token.file_site = site;
                 }
             }
             match token.kind {
@@ -12134,10 +12414,14 @@ impl<'files> Preprocessor<'files> {
         let mut from_paste = false;
         if paste_next {
             token = self.paste_tokens(top, token);
+            token.flags &= !MACRO_ARGUMENT;
             from_paste = true;
         }
         if let Some((begin, _)) = site {
             token.site = begin;
+            if !token.has(MACRO_ARGUMENT) {
+                token.file_site = begin;
+            }
         }
         if first {
             token.set(START_OF_LINE, start);
@@ -12210,7 +12494,12 @@ impl<'files> Preprocessor<'files> {
         if from_file && !raw && self.poisoned.contains(&token.spelling) {
             self.report_poisoned(token);
         }
+        let check_keyword =
+            !raw && !self.disable_expansion && !(from_file && self.in_macro_arguments);
         let Some(definition) = self.macros.get(&token.spelling).cloned() else {
+            if check_keyword {
+                self.diagnose_keyword_identifier(token);
+            }
             return Some(token.clone());
         };
         if self.disable_expansion {
@@ -12229,7 +12518,30 @@ impl<'files> Preprocessor<'files> {
                 self.report_token(Message::DisabledMacroExpansion, token, Vec::new());
             }
         }
+        if check_keyword {
+            self.diagnose_keyword_identifier(token);
+        }
         Some(token.clone())
+    }
+
+    fn diagnose_keyword_identifier(&mut self, token: &Token) {
+        let (extension, future) = keyword_identifier_status(&self.language, &token.spelling);
+        if future && !self.future_keywords_reported.contains(&token.spelling) {
+            self.future_keywords_reported.insert(token.spelling.clone());
+            let name = String::from_utf8_lossy(&token.spelling).into_owned();
+            self.report_token(clang_message("warn_c23_keyword"), token, vec![name]);
+        }
+        if keyword_in_cplusplus(&self.language, &token.spelling) {
+            let name = String::from_utf8_lossy(&token.spelling).into_owned();
+            self.report_token(
+                clang_message("warn_pp_identifier_is_cpp_keyword"),
+                token,
+                vec![format!("'{name}'")],
+            );
+        }
+        if extension {
+            self.report_token(clang_message("ext_token_used"), token, Vec::new());
+        }
     }
 
     fn mark_used(&mut self, definition: &MacroDefinition) {
@@ -12278,6 +12590,8 @@ impl<'files> Preprocessor<'files> {
             replacement.set(START_OF_LINE, identifier.at_start_of_line());
             replacement.set(LEADING_SPACE, identifier.has_leading_space());
             replacement.site = identifier.site;
+            replacement.file_site = identifier.file_site;
+            replacement.flags &= !MACRO_ARGUMENT;
             if replacement.kind == TokenKind::Identifier {
                 if let Some(other) = self.macros.get(&replacement.spelling).cloned() {
                     let same = Rc::ptr_eq(&other, &definition);
@@ -12846,6 +13160,7 @@ impl<'files> Preprocessor<'files> {
                         if token.kind == TokenKind::HashHash {
                             token.kind = TokenKind::Unknown;
                         }
+                        token.flags |= MACRO_ARGUMENT;
                         result.push(token);
                     }
                     result[first].set(LEADING_SPACE, next_gets_space);
@@ -12885,6 +13200,7 @@ impl<'files> Preprocessor<'files> {
                     if token.kind == TokenKind::HashHash {
                         token.kind = TokenKind::Unknown;
                     }
+                    token.flags |= MACRO_ARGUMENT;
                     result.push(token);
                 }
                 if !pseudo_paste && length > 0 {
@@ -12991,6 +13307,7 @@ impl<'files> Preprocessor<'files> {
                 let mut operator = source.tokens[source.index].clone();
                 if let Some((begin, _)) = source.site {
                     operator.site = begin;
+                    operator.file_site = begin;
                 }
                 source.index += 1;
                 if source.index >= source.tokens.len() {
@@ -13036,16 +13353,30 @@ impl<'files> Preprocessor<'files> {
                 return (left, true);
             }
             if invalid {
+                if self.language.microsoft_extensions
+                    && left.kind == TokenKind::Slash
+                    && right.kind == TokenKind::Slash
+                {
+                    if self.gap.is_none() {
+                        self.gap = Some("Microsoft comment paste".to_string());
+                    }
+                    return (left, true);
+                }
+                let message = if self.language.microsoft_extensions {
+                    clang_message("ext_pp_bad_paste_ms")
+                } else {
+                    Message::BadPaste
+                };
                 if let Some(operator) = operator {
                     let place = operator.site;
                     self.report(
-                        Message::BadPaste,
+                        message,
                         place,
                         vec![String::from_utf8_lossy(&spelling).into_owned()],
                     );
                 } else {
                     self.report_token(
-                        Message::BadPaste,
+                        message,
                         &left,
                         vec![String::from_utf8_lossy(&spelling).into_owned()],
                     );
@@ -13868,6 +14199,13 @@ impl<'files> Preprocessor<'files> {
             let value = &definition.body[0];
             if value.kind == TokenKind::Identifier && value.spelling == name.spelling {
                 return true;
+            }
+            if value.kind == TokenKind::Identifier {
+                let name_kind = keyword_kind(&self.language, &name.spelling);
+                if name_kind.is_some() && name_kind == keyword_kind(&self.language, &value.spelling)
+                {
+                    return true;
+                }
             }
             if value.kind != TokenKind::Identifier || !self.is_keyword(&value.spelling) {
                 return false;
@@ -17768,6 +18106,9 @@ impl<'files> Preprocessor<'files> {
             }
         }
         let Some((path, bytes, search_index, relative, character)) = found else {
+            if GENERATED_BUILTIN_HEADERS.contains(&name.as_str()) && self.gap.is_none() {
+                self.gap = Some(format!("generated builtin header {name}"));
+            }
             self.report_token(Message::FileNotFound, &filename_token, vec![name]);
             return;
         };
@@ -18162,6 +18503,9 @@ impl<'files> Preprocessor<'files> {
                 if let Some(Source::File(file)) = self.stack.last_mut() {
                     file.lexer.read_to_end_of_line();
                 }
+            }
+            "system_header" if self.language.microsoft_extensions => {
+                self.pragma_system_header(&first)
             }
             "push_macro" => self.pragma_push_macro(&first, true),
             "pop_macro" => self.pragma_push_macro(&first, false),
@@ -18863,6 +19207,11 @@ impl<'files> Preprocessor<'files> {
             return;
         }
         let name = command.text().to_string();
+        if self.parser_pragmas_active() && matches!(name.as_str(), "captured" | "dump") {
+            let value = format!("unsupported clang __debug {name}");
+            self.push_pragma_annotation(&command, &value);
+            return;
+        }
         match name.as_str() {
             "dump" | "diag_mapping" | "llvm_fatal_error" | "llvm_unreachable" | "macro"
             | "module_map" | "module_lookup" | "overflow_stack" | "handle_crash"
@@ -18937,10 +19286,8 @@ impl<'files> Preprocessor<'files> {
         }
         let group = &option[2..];
         let known = if group == "everything" {
-            self.engine.state.enable_all = severity != CSeverity::Ignored;
-            if severity == CSeverity::Ignored {
-                self.engine.state.ignore_all = true;
-            }
+            self.engine.state.all_override = Some(severity);
+            self.engine.state.groups.clear();
             true
         } else {
             self.engine.set_group(group, Some(severity), None)
@@ -20319,6 +20666,7 @@ impl<'files> Preprocessor<'files> {
             unknown_warning_flags: std::mem::take(&mut self.engine.unknown_flags),
             sources: std::mem::take(&mut self.sources),
             linker_comments: std::mem::take(&mut self.linker_comments),
+            gap: self.gap.take(),
         }
     }
 
@@ -21255,6 +21603,12 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
                         "int" => target_options.wchar_size = 4,
                         _ => invocation.unsupported.push(argument.to_string()),
                     }
+                } else if argument == "-fbracket-depth" || argument.starts_with("-fbracket-depth=")
+                {
+                    let rest = argument.strip_prefix("-fbracket-depth=").unwrap_or("");
+                    let value = take_value(&mut index, "-fbracket-depth", rest);
+                    options.bracket_depth =
+                        value.and_then(|value| value.parse().ok()).unwrap_or(2048);
                 } else if argument == "-ferror-limit" || argument.starts_with("-ferror-limit=") {
                     let rest = argument.strip_prefix("-ferror-limit=").unwrap_or("");
                     let value = take_value(&mut index, "-ferror-limit", rest);
@@ -21365,84 +21719,11436 @@ pub fn parse_compiler_arguments(arguments: &[String]) -> CompilerInvocation {
     invocation
 }
 
+pub const QUALIFIER_CONST: u8 = 1;
+pub const QUALIFIER_RESTRICT: u8 = 2;
+pub const QUALIFIER_VOLATILE: u8 = 4;
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum BuiltinType {
+    Void,
+    Bool,
+    CharSigned,
+    CharUnsigned,
+    SignedChar,
+    UnsignedChar,
+    Short,
+    UnsignedShort,
+    Int,
+    UnsignedInt,
+    Long,
+    UnsignedLong,
+    LongLong,
+    UnsignedLongLong,
+    Int128,
+    UnsignedInt128,
+    Half,
+    Float16,
+    BFloat16,
+    Float,
+    Double,
+    LongDouble,
+    Float128,
+    Ibm128,
+}
+
+impl BuiltinType {
+    pub fn name(self, bool_keyword: bool) -> &'static str {
+        match self {
+            BuiltinType::Void => "void",
+            BuiltinType::Bool => {
+                if bool_keyword {
+                    "bool"
+                } else {
+                    "_Bool"
+                }
+            }
+            BuiltinType::CharSigned | BuiltinType::CharUnsigned => "char",
+            BuiltinType::SignedChar => "signed char",
+            BuiltinType::UnsignedChar => "unsigned char",
+            BuiltinType::Short => "short",
+            BuiltinType::UnsignedShort => "unsigned short",
+            BuiltinType::Int => "int",
+            BuiltinType::UnsignedInt => "unsigned int",
+            BuiltinType::Long => "long",
+            BuiltinType::UnsignedLong => "unsigned long",
+            BuiltinType::LongLong => "long long",
+            BuiltinType::UnsignedLongLong => "unsigned long long",
+            BuiltinType::Int128 => "__int128",
+            BuiltinType::UnsignedInt128 => "unsigned __int128",
+            BuiltinType::Half => "__fp16",
+            BuiltinType::Float16 => "_Float16",
+            BuiltinType::BFloat16 => "__bf16",
+            BuiltinType::Float => "float",
+            BuiltinType::Double => "double",
+            BuiltinType::LongDouble => "long double",
+            BuiltinType::Float128 => "__float128",
+            BuiltinType::Ibm128 => "__ibm128",
+        }
+    }
+
+    pub fn is_integer(self) -> bool {
+        matches!(
+            self,
+            BuiltinType::Bool
+                | BuiltinType::CharSigned
+                | BuiltinType::CharUnsigned
+                | BuiltinType::SignedChar
+                | BuiltinType::UnsignedChar
+                | BuiltinType::Short
+                | BuiltinType::UnsignedShort
+                | BuiltinType::Int
+                | BuiltinType::UnsignedInt
+                | BuiltinType::Long
+                | BuiltinType::UnsignedLong
+                | BuiltinType::LongLong
+                | BuiltinType::UnsignedLongLong
+                | BuiltinType::Int128
+                | BuiltinType::UnsignedInt128
+        )
+    }
+
+    pub fn is_signed_integer(self) -> bool {
+        matches!(
+            self,
+            BuiltinType::CharSigned
+                | BuiltinType::SignedChar
+                | BuiltinType::Short
+                | BuiltinType::Int
+                | BuiltinType::Long
+                | BuiltinType::LongLong
+                | BuiltinType::Int128
+        )
+    }
+
+    pub fn is_unsigned_integer(self) -> bool {
+        self.is_integer() && !self.is_signed_integer()
+    }
+
+    pub fn is_floating(self) -> bool {
+        matches!(
+            self,
+            BuiltinType::Half
+                | BuiltinType::Float16
+                | BuiltinType::BFloat16
+                | BuiltinType::Float
+                | BuiltinType::Double
+                | BuiltinType::LongDouble
+                | BuiltinType::Float128
+                | BuiltinType::Ibm128
+        )
+    }
+
+    pub fn integer_rank(self) -> u32 {
+        match self {
+            BuiltinType::Bool => 1,
+            BuiltinType::CharSigned
+            | BuiltinType::CharUnsigned
+            | BuiltinType::SignedChar
+            | BuiltinType::UnsignedChar => 2,
+            BuiltinType::Short | BuiltinType::UnsignedShort => 3,
+            BuiltinType::Int | BuiltinType::UnsignedInt => 4,
+            BuiltinType::Long | BuiltinType::UnsignedLong => 5,
+            BuiltinType::LongLong | BuiltinType::UnsignedLongLong => 6,
+            BuiltinType::Int128 | BuiltinType::UnsignedInt128 => 7,
+            _ => 0,
+        }
+    }
+
+    pub fn floating_rank(self) -> u32 {
+        match self {
+            BuiltinType::BFloat16 => 1,
+            BuiltinType::Half | BuiltinType::Float16 => 2,
+            BuiltinType::Float => 3,
+            BuiltinType::Double => 4,
+            BuiltinType::LongDouble => 5,
+            BuiltinType::Float128 | BuiltinType::Ibm128 => 6,
+            _ => 0,
+        }
+    }
+
+    pub fn unsigned_counterpart(self) -> BuiltinType {
+        match self {
+            BuiltinType::CharSigned | BuiltinType::CharUnsigned | BuiltinType::SignedChar => {
+                BuiltinType::UnsignedChar
+            }
+            BuiltinType::Short => BuiltinType::UnsignedShort,
+            BuiltinType::Int => BuiltinType::UnsignedInt,
+            BuiltinType::Long => BuiltinType::UnsignedLong,
+            BuiltinType::LongLong => BuiltinType::UnsignedLongLong,
+            BuiltinType::Int128 => BuiltinType::UnsignedInt128,
+            other => other,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TagKind {
+    Struct,
+    Union,
+    Enum,
+}
+
+impl TagKind {
+    pub fn name(self) -> &'static str {
+        match self {
+            TagKind::Struct => "struct",
+            TagKind::Union => "union",
+            TagKind::Enum => "enum",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ArrayModifier {
+    Normal,
+    Static,
+    Star,
+}
+
+#[derive(Clone, PartialEq, Eq, Debug)]
+pub struct QualifiedType {
+    pub node: Rc<TypeNode>,
+    pub qualifiers: u8,
+}
+
+#[derive(PartialEq, Eq, Debug)]
+pub enum TypeNode {
+    Builtin(BuiltinType),
+    Complex(QualifiedType),
+    Pointer(QualifiedType),
+    ConstantArray {
+        element: QualifiedType,
+        size: u64,
+        modifier: ArrayModifier,
+        index_qualifiers: u8,
+    },
+    IncompleteArray {
+        element: QualifiedType,
+        modifier: ArrayModifier,
+        index_qualifiers: u8,
+    },
+    VariableArray {
+        element: QualifiedType,
+        size: Option<String>,
+        modifier: ArrayModifier,
+        index_qualifiers: u8,
+        identity: u32,
+        folded: Option<u64>,
+    },
+    FunctionPrototype {
+        result: QualifiedType,
+        parameters: Vec<QualifiedType>,
+        variadic: bool,
+        noreturn: bool,
+    },
+    FunctionNoPrototype {
+        result: QualifiedType,
+        noreturn: bool,
+    },
+    Tag {
+        declaration: usize,
+        kind: TagKind,
+        keyword: bool,
+    },
+    Typedef {
+        declaration: usize,
+        name: Rc<str>,
+        underlying: QualifiedType,
+    },
+    Atomic(QualifiedType),
+    BitInt {
+        unsigned: bool,
+        bits: u32,
+    },
+    TypeOfExpression {
+        text: String,
+        underlying: QualifiedType,
+        unqualified: bool,
+    },
+    TypeOfType {
+        written: QualifiedType,
+        unqualified: bool,
+    },
+}
+
+impl QualifiedType {
+    pub fn new(node: TypeNode) -> QualifiedType {
+        QualifiedType {
+            node: Rc::new(node),
+            qualifiers: 0,
+        }
+    }
+
+    pub fn builtin(kind: BuiltinType) -> QualifiedType {
+        QualifiedType::new(TypeNode::Builtin(kind))
+    }
+
+    pub fn pointer_to(pointee: QualifiedType) -> QualifiedType {
+        QualifiedType::new(TypeNode::Pointer(pointee))
+    }
+
+    pub fn with_qualifiers(&self, qualifiers: u8) -> QualifiedType {
+        QualifiedType {
+            node: self.node.clone(),
+            qualifiers: self.qualifiers | qualifiers,
+        }
+    }
+
+    pub fn unqualified(&self) -> QualifiedType {
+        QualifiedType {
+            node: self.node.clone(),
+            qualifiers: 0,
+        }
+    }
+
+    pub fn single_step_desugar(&self) -> Option<QualifiedType> {
+        let inner = match &*self.node {
+            TypeNode::Typedef { underlying, .. } => underlying.clone(),
+            TypeNode::TypeOfExpression {
+                underlying,
+                unqualified,
+                ..
+            } => {
+                if *unqualified {
+                    underlying.unqualified()
+                } else {
+                    underlying.clone()
+                }
+            }
+            TypeNode::TypeOfType {
+                written,
+                unqualified,
+            } => {
+                if *unqualified {
+                    written.unqualified()
+                } else {
+                    written.clone()
+                }
+            }
+            TypeNode::Tag {
+                declaration,
+                kind,
+                keyword: true,
+            } => QualifiedType::new(TypeNode::Tag {
+                declaration: *declaration,
+                kind: *kind,
+                keyword: false,
+            }),
+            _ => return None,
+        };
+        Some(inner.with_qualifiers(self.qualifiers))
+    }
+
+    pub fn is_sugared(&self) -> bool {
+        matches!(
+            &*self.node,
+            TypeNode::Typedef { .. }
+                | TypeNode::TypeOfExpression { .. }
+                | TypeNode::TypeOfType { .. }
+                | TypeNode::Tag { keyword: true, .. }
+        )
+    }
+
+    pub fn desugared(&self) -> QualifiedType {
+        let mut current = self.clone();
+        while let Some(next) = current.single_step_desugar() {
+            current = next;
+        }
+        current
+    }
+
+    pub fn canonical(&self) -> QualifiedType {
+        let top = self.desugared();
+        let qualifiers = top.qualifiers;
+        let node = match &*top.node {
+            TypeNode::Builtin(kind) => TypeNode::Builtin(*kind),
+            TypeNode::Complex(element) => TypeNode::Complex(element.canonical()),
+            TypeNode::Pointer(pointee) => TypeNode::Pointer(pointee.canonical()),
+            TypeNode::ConstantArray {
+                element,
+                size,
+                modifier,
+                index_qualifiers,
+            } => {
+                return QualifiedType::new(TypeNode::ConstantArray {
+                    element: element.canonical().with_qualifiers(qualifiers),
+                    size: *size,
+                    modifier: *modifier,
+                    index_qualifiers: *index_qualifiers,
+                })
+            }
+            TypeNode::IncompleteArray {
+                element,
+                modifier,
+                index_qualifiers,
+            } => {
+                return QualifiedType::new(TypeNode::IncompleteArray {
+                    element: element.canonical().with_qualifiers(qualifiers),
+                    modifier: *modifier,
+                    index_qualifiers: *index_qualifiers,
+                })
+            }
+            TypeNode::VariableArray {
+                element,
+                size,
+                modifier,
+                index_qualifiers,
+                identity,
+                folded,
+            } => {
+                return QualifiedType::new(TypeNode::VariableArray {
+                    element: element.canonical().with_qualifiers(qualifiers),
+                    size: size.clone(),
+                    modifier: *modifier,
+                    index_qualifiers: *index_qualifiers,
+                    identity: *identity,
+                    folded: *folded,
+                })
+            }
+            TypeNode::FunctionPrototype {
+                result,
+                parameters,
+                variadic,
+                noreturn,
+            } => TypeNode::FunctionPrototype {
+                result: result.canonical(),
+                parameters: parameters
+                    .iter()
+                    .map(|parameter| parameter.canonical().unqualified())
+                    .collect(),
+                variadic: *variadic,
+                noreturn: *noreturn,
+            },
+            TypeNode::FunctionNoPrototype { result, noreturn } => TypeNode::FunctionNoPrototype {
+                result: result.canonical(),
+                noreturn: *noreturn,
+            },
+            TypeNode::Tag {
+                declaration, kind, ..
+            } => TypeNode::Tag {
+                declaration: *declaration,
+                kind: *kind,
+                keyword: false,
+            },
+            TypeNode::Atomic(value) => TypeNode::Atomic(value.canonical()),
+            TypeNode::BitInt { unsigned, bits } => TypeNode::BitInt {
+                unsigned: *unsigned,
+                bits: *bits,
+            },
+            TypeNode::Typedef { .. }
+            | TypeNode::TypeOfExpression { .. }
+            | TypeNode::TypeOfType { .. } => unreachable!(),
+        };
+        QualifiedType {
+            node: Rc::new(node),
+            qualifiers,
+        }
+    }
+
+    pub fn canonical_qualifiers(&self) -> u8 {
+        let mut current = self.clone();
+        let mut qualifiers = current.qualifiers;
+        loop {
+            match &*current.node {
+                TypeNode::ConstantArray { element, .. }
+                | TypeNode::IncompleteArray { element, .. }
+                | TypeNode::VariableArray { element, .. } => {
+                    current = element.clone();
+                    qualifiers |= current.qualifiers;
+                }
+                _ => match current.single_step_desugar() {
+                    Some(next) => {
+                        current = next;
+                        qualifiers |= current.qualifiers;
+                    }
+                    None => return qualifiers,
+                },
+            }
+        }
+    }
+
+    pub fn is_const(&self) -> bool {
+        self.canonical_qualifiers() & QUALIFIER_CONST != 0
+    }
+
+    pub fn is_volatile(&self) -> bool {
+        self.canonical_qualifiers() & QUALIFIER_VOLATILE != 0
+    }
+
+    pub fn builtin_kind(&self) -> Option<BuiltinType> {
+        match &*self.desugared().node {
+            TypeNode::Builtin(kind) => Some(*kind),
+            _ => None,
+        }
+    }
+
+    pub fn is_void(&self) -> bool {
+        self.builtin_kind() == Some(BuiltinType::Void)
+    }
+
+    pub fn is_bool(&self) -> bool {
+        self.builtin_kind() == Some(BuiltinType::Bool)
+    }
+
+    pub fn pointee(&self) -> Option<QualifiedType> {
+        match &*self.desugared().node {
+            TypeNode::Pointer(pointee) => Some(pointee.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_pointer(&self) -> bool {
+        self.pointee().is_some()
+    }
+
+    pub fn is_function(&self) -> bool {
+        matches!(
+            &*self.desugared().node,
+            TypeNode::FunctionPrototype { .. } | TypeNode::FunctionNoPrototype { .. }
+        )
+    }
+
+    pub fn is_function_pointer(&self) -> bool {
+        self.pointee().is_some_and(|pointee| pointee.is_function())
+    }
+
+    pub fn function_result(&self) -> Option<QualifiedType> {
+        match &*self.desugared().node {
+            TypeNode::FunctionPrototype { result, .. }
+            | TypeNode::FunctionNoPrototype { result, .. } => Some(result.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn array_element(&self) -> Option<QualifiedType> {
+        let top = self.desugared();
+        match &*top.node {
+            TypeNode::ConstantArray { element, .. }
+            | TypeNode::IncompleteArray { element, .. }
+            | TypeNode::VariableArray { element, .. } => {
+                Some(element.with_qualifiers(top.qualifiers))
+            }
+            _ => None,
+        }
+    }
+
+    pub fn is_array(&self) -> bool {
+        self.array_element().is_some()
+    }
+
+    pub fn is_constant_array(&self) -> bool {
+        matches!(&*self.desugared().node, TypeNode::ConstantArray { .. })
+    }
+
+    pub fn is_incomplete_array(&self) -> bool {
+        matches!(&*self.desugared().node, TypeNode::IncompleteArray { .. })
+    }
+
+    pub fn is_variable_array(&self) -> bool {
+        matches!(&*self.desugared().node, TypeNode::VariableArray { .. })
+    }
+
+    pub fn base_element(&self) -> QualifiedType {
+        let mut current = self.clone();
+        while let Some(element) = current.array_element() {
+            current = element;
+        }
+        current
+    }
+
+    pub fn is_variably_modified(&self) -> bool {
+        let top = self.desugared();
+        match &*top.node {
+            TypeNode::VariableArray { .. } => true,
+            TypeNode::ConstantArray { element, .. } | TypeNode::IncompleteArray { element, .. } => {
+                element.is_variably_modified()
+            }
+            TypeNode::Pointer(pointee) => pointee.is_variably_modified(),
+            TypeNode::FunctionPrototype { result, .. }
+            | TypeNode::FunctionNoPrototype { result, .. } => result.is_variably_modified(),
+            _ => false,
+        }
+    }
+
+    pub fn tag(&self) -> Option<(usize, TagKind)> {
+        match &*self.desugared().node {
+            TypeNode::Tag {
+                declaration, kind, ..
+            } => Some((*declaration, *kind)),
+            _ => None,
+        }
+    }
+
+    pub fn is_record(&self) -> bool {
+        matches!(
+            self.tag(),
+            Some((_, TagKind::Struct)) | Some((_, TagKind::Union))
+        )
+    }
+
+    pub fn is_enumeration(&self) -> bool {
+        matches!(self.tag(), Some((_, TagKind::Enum)))
+    }
+
+    pub fn atomic_value(&self) -> Option<QualifiedType> {
+        match &*self.desugared().node {
+            TypeNode::Atomic(value) => Some(value.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn is_atomic(&self) -> bool {
+        self.atomic_value().is_some()
+    }
+
+    pub fn is_complex(&self) -> bool {
+        matches!(&*self.desugared().node, TypeNode::Complex(_))
+    }
+
+    pub fn complex_element(&self) -> Option<QualifiedType> {
+        match &*self.desugared().node {
+            TypeNode::Complex(element) => Some(element.clone()),
+            _ => None,
+        }
+    }
+
+    pub fn bit_int(&self) -> Option<(bool, u32)> {
+        match &*self.desugared().node {
+            TypeNode::BitInt { unsigned, bits } => Some((*unsigned, *bits)),
+            _ => None,
+        }
+    }
+
+    pub fn is_integer(&self) -> bool {
+        self.builtin_kind().is_some_and(BuiltinType::is_integer)
+            || self.is_enumeration()
+            || self.bit_int().is_some()
+    }
+
+    pub fn is_floating(&self) -> bool {
+        self.builtin_kind().is_some_and(BuiltinType::is_floating)
+            || self
+                .complex_element()
+                .is_some_and(|element| element.is_floating())
+    }
+
+    pub fn is_real_floating(&self) -> bool {
+        self.builtin_kind().is_some_and(BuiltinType::is_floating)
+    }
+
+    pub fn is_arithmetic(&self) -> bool {
+        self.is_integer() || self.is_floating() || self.is_complex()
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        self.is_arithmetic() || self.is_pointer()
+    }
+
+    pub fn is_aggregate(&self) -> bool {
+        self.is_array() || self.is_record()
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct TagInformation {
+    pub name: Option<Rc<str>>,
+    pub kind: TagKind,
+    pub anonymous_description: String,
+    pub typedef_for_anonymous: Option<Rc<str>>,
+}
+
+pub struct TypePrinter<'tags> {
+    pub tags: &'tags [Tag],
+    pub restrict_keyword: bool,
+    pub bool_keyword: bool,
+    empty_placeholder: bool,
+    out: String,
+}
+
+impl<'tags> TypePrinter<'tags> {
+    pub fn new(tags: &'tags [Tag], language: &LanguageOptions) -> TypePrinter<'tags> {
+        TypePrinter {
+            tags,
+            restrict_keyword: language.at_least(CStandard::C99),
+            bool_keyword: language.at_least(CStandard::C23),
+            empty_placeholder: true,
+            out: String::new(),
+        }
+    }
+
+    pub fn print(mut self, ty: &QualifiedType, placeholder: &str) -> String {
+        self.print_into(ty, placeholder);
+        self.out
+    }
+
+    fn print_into(&mut self, ty: &QualifiedType, placeholder: &str) {
+        let saved = self.empty_placeholder;
+        self.empty_placeholder = placeholder.is_empty();
+        self.print_before(ty);
+        self.out.push_str(placeholder);
+        self.print_after(ty);
+        self.empty_placeholder = saved;
+    }
+
+    fn qualifier_text(&self, qualifiers: u8) -> String {
+        let mut parts = Vec::new();
+        if qualifiers & QUALIFIER_CONST != 0 {
+            parts.push("const");
+        }
+        if qualifiers & QUALIFIER_VOLATILE != 0 {
+            parts.push("volatile");
+        }
+        if qualifiers & QUALIFIER_RESTRICT != 0 {
+            parts.push(if self.restrict_keyword {
+                "restrict"
+            } else {
+                "__restrict"
+            });
+        }
+        parts.join(" ")
+    }
+
+    fn can_prefix_qualifiers(node: &TypeNode) -> bool {
+        match node {
+            TypeNode::Builtin(_)
+            | TypeNode::Complex(_)
+            | TypeNode::Typedef { .. }
+            | TypeNode::TypeOfExpression { .. }
+            | TypeNode::TypeOfType { .. }
+            | TypeNode::Tag { .. }
+            | TypeNode::Atomic(_)
+            | TypeNode::BitInt { .. } => true,
+            TypeNode::ConstantArray { element, .. }
+            | TypeNode::IncompleteArray { element, .. }
+            | TypeNode::VariableArray { element, .. } => {
+                TypePrinter::can_prefix_qualifiers(&element.node)
+            }
+            TypeNode::Pointer(_)
+            | TypeNode::FunctionPrototype { .. }
+            | TypeNode::FunctionNoPrototype { .. } => false,
+        }
+    }
+
+    fn space_before_placeholder(&mut self) {
+        if !self.empty_placeholder {
+            self.out.push(' ');
+        }
+    }
+
+    fn print_before(&mut self, ty: &QualifiedType) {
+        let saved = self.empty_placeholder;
+        let prefix = TypePrinter::can_prefix_qualifiers(&ty.node);
+        let qualifiers = ty.qualifiers;
+        if prefix && qualifiers != 0 {
+            let text = self.qualifier_text(qualifiers);
+            self.out.push_str(&text);
+            self.out.push(' ');
+        }
+        let after_qualifiers = !prefix && qualifiers != 0;
+        if after_qualifiers {
+            self.empty_placeholder = false;
+        }
+        match &*ty.node {
+            TypeNode::Builtin(kind) => {
+                self.out.push_str(kind.name(self.bool_keyword));
+                self.space_before_placeholder();
+            }
+            TypeNode::Complex(element) => {
+                self.out.push_str("_Complex ");
+                self.print_before(element);
+            }
+            TypeNode::Pointer(pointee) => {
+                let inner = self.empty_placeholder;
+                self.empty_placeholder = false;
+                self.print_before(pointee);
+                if matches!(
+                    &*pointee.node,
+                    TypeNode::ConstantArray { .. }
+                        | TypeNode::IncompleteArray { .. }
+                        | TypeNode::VariableArray { .. }
+                ) {
+                    self.out.push('(');
+                }
+                self.out.push('*');
+                self.empty_placeholder = inner;
+            }
+            TypeNode::ConstantArray { element, .. }
+            | TypeNode::IncompleteArray { element, .. }
+            | TypeNode::VariableArray { element, .. } => self.print_before(element),
+            TypeNode::FunctionPrototype { result, .. }
+            | TypeNode::FunctionNoPrototype { result, .. } => {
+                let previous = self.empty_placeholder;
+                self.empty_placeholder = false;
+                self.print_before(result);
+                self.empty_placeholder = previous;
+                if !previous {
+                    self.out.push('(');
+                }
+            }
+            TypeNode::Tag {
+                declaration,
+                kind,
+                keyword,
+            } => {
+                let information = &self.tags[*declaration].information;
+                let mut printed_kind = false;
+                if *keyword || information.typedef_for_anonymous.is_none() {
+                    self.out.push_str(kind.name());
+                    self.out.push(' ');
+                    printed_kind = true;
+                }
+                match &information.name {
+                    Some(name) => self.out.push_str(name),
+                    None => match (&information.typedef_for_anonymous, printed_kind) {
+                        (Some(name), false) => self.out.push_str(name),
+                        _ => {
+                            self.out.push('(');
+                            self.out.push_str(&information.anonymous_description);
+                            self.out.push(')');
+                        }
+                    },
+                }
+                self.space_before_placeholder();
+            }
+            TypeNode::Typedef { name, .. } => {
+                self.out.push_str(name);
+                self.space_before_placeholder();
+            }
+            TypeNode::Atomic(value) => {
+                self.out.push_str("_Atomic(");
+                let text = TypePrinter {
+                    tags: self.tags,
+                    restrict_keyword: self.restrict_keyword,
+                    bool_keyword: self.bool_keyword,
+                    empty_placeholder: true,
+                    out: String::new(),
+                }
+                .print(value, "");
+                self.out.push_str(&text);
+                self.out.push(')');
+                self.space_before_placeholder();
+            }
+            TypeNode::BitInt { unsigned, bits } => {
+                if *unsigned {
+                    self.out.push_str("unsigned ");
+                }
+                self.out.push_str(&format!("_BitInt({bits})"));
+                self.space_before_placeholder();
+            }
+            TypeNode::TypeOfExpression {
+                text, unqualified, ..
+            } => {
+                self.out.push_str(if *unqualified {
+                    "typeof_unqual "
+                } else {
+                    "typeof "
+                });
+                self.out.push_str(text);
+                self.space_before_placeholder();
+            }
+            TypeNode::TypeOfType {
+                written,
+                unqualified,
+            } => {
+                self.out.push_str(if *unqualified {
+                    "typeof_unqual("
+                } else {
+                    "typeof("
+                });
+                let text = TypePrinter {
+                    tags: self.tags,
+                    restrict_keyword: self.restrict_keyword,
+                    bool_keyword: self.bool_keyword,
+                    empty_placeholder: true,
+                    out: String::new(),
+                }
+                .print(written, "");
+                self.out.push_str(&text);
+                self.out.push(')');
+                self.space_before_placeholder();
+            }
+        }
+        if after_qualifiers {
+            if !saved {
+                self.out.push(' ');
+            }
+            let text = self.qualifier_text(qualifiers);
+            self.out.push_str(&text);
+        }
+        self.empty_placeholder = saved;
+    }
+
+    fn print_after(&mut self, ty: &QualifiedType) {
+        match &*ty.node {
+            TypeNode::Complex(element) => self.print_after(element),
+            TypeNode::Pointer(pointee) => {
+                let saved = self.empty_placeholder;
+                self.empty_placeholder = false;
+                if matches!(
+                    &*pointee.node,
+                    TypeNode::ConstantArray { .. }
+                        | TypeNode::IncompleteArray { .. }
+                        | TypeNode::VariableArray { .. }
+                ) {
+                    self.out.push(')');
+                }
+                self.print_after(pointee);
+                self.empty_placeholder = saved;
+            }
+            TypeNode::ConstantArray {
+                element,
+                size,
+                modifier,
+                index_qualifiers,
+            } => {
+                self.out.push('[');
+                if *index_qualifiers != 0 {
+                    let text = self.qualifier_text(*index_qualifiers);
+                    self.out.push_str(&text);
+                    self.out.push(' ');
+                }
+                if *modifier == ArrayModifier::Static {
+                    self.out.push_str("static ");
+                }
+                self.out.push_str(&size.to_string());
+                self.out.push(']');
+                self.print_after(element);
+            }
+            TypeNode::IncompleteArray { element, .. } => {
+                self.out.push_str("[]");
+                self.print_after(element);
+            }
+            TypeNode::VariableArray {
+                element,
+                size,
+                modifier,
+                index_qualifiers,
+                ..
+            } => {
+                self.out.push('[');
+                if *index_qualifiers != 0 {
+                    let text = self.qualifier_text(*index_qualifiers);
+                    self.out.push_str(&text);
+                    self.out.push(' ');
+                }
+                match modifier {
+                    ArrayModifier::Static => self.out.push_str("static "),
+                    ArrayModifier::Star => self.out.push('*'),
+                    ArrayModifier::Normal => {}
+                }
+                if let Some(size) = size {
+                    self.out.push_str(size);
+                }
+                self.out.push(']');
+                self.print_after(element);
+            }
+            TypeNode::FunctionPrototype {
+                result,
+                parameters,
+                variadic,
+                noreturn,
+            } => {
+                if !self.empty_placeholder {
+                    self.out.push(')');
+                }
+                let saved = self.empty_placeholder;
+                self.empty_placeholder = false;
+                self.out.push('(');
+                for (index, parameter) in parameters.iter().enumerate() {
+                    if index > 0 {
+                        self.out.push_str(", ");
+                    }
+                    let text = TypePrinter {
+                        tags: self.tags,
+                        restrict_keyword: self.restrict_keyword,
+                        bool_keyword: self.bool_keyword,
+                        empty_placeholder: true,
+                        out: String::new(),
+                    }
+                    .print(parameter, "");
+                    self.out.push_str(&text);
+                }
+                if *variadic {
+                    if !parameters.is_empty() {
+                        self.out.push_str(", ");
+                    }
+                    self.out.push_str("...");
+                } else if parameters.is_empty() {
+                    self.out.push_str("void");
+                }
+                self.out.push(')');
+                if *noreturn {
+                    self.out.push_str(" __attribute__((noreturn))");
+                }
+                self.print_after(result);
+                self.empty_placeholder = saved;
+            }
+            TypeNode::FunctionNoPrototype { result, noreturn } => {
+                if !self.empty_placeholder {
+                    self.out.push(')');
+                }
+                let saved = self.empty_placeholder;
+                self.empty_placeholder = false;
+                self.out.push_str("()");
+                if *noreturn {
+                    self.out.push_str(" __attribute__((noreturn))");
+                }
+                self.print_after(result);
+                self.empty_placeholder = saved;
+            }
+            _ => {}
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum StorageClass {
+    None,
+    Typedef,
+    Extern,
+    Static,
+    Auto,
+    Register,
+    PrivateExtern,
+}
+
+impl StorageClass {
+    pub fn name(self) -> &'static str {
+        match self {
+            StorageClass::None => "unspecified",
+            StorageClass::Typedef => "typedef",
+            StorageClass::Extern => "extern",
+            StorageClass::Static => "static",
+            StorageClass::Auto => "auto",
+            StorageClass::Register => "register",
+            StorageClass::PrivateExtern => "__private_extern__",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ThreadStorage {
+    None,
+    GnuThread,
+    ThreadLocal,
+    ThreadLocalC11,
+}
+
+impl ThreadStorage {
+    pub fn name(self) -> &'static str {
+        match self {
+            ThreadStorage::None => "unspecified",
+            ThreadStorage::GnuThread => "__thread",
+            ThreadStorage::ThreadLocal => "thread_local",
+            ThreadStorage::ThreadLocalC11 => "_Thread_local",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeclarationKind {
+    Variable,
+    Function,
+    Typedef,
+    Parameter,
+    EnumConstant,
+    Field,
+    Tag,
+}
+
+#[derive(Clone, Debug)]
+pub struct Declaration {
+    pub kind: DeclarationKind,
+    pub name: Option<Rc<[u8]>>,
+    pub place: Place,
+    pub ty: QualifiedType,
+    pub storage: StorageClass,
+    pub thread: ThreadStorage,
+    pub previous: Option<usize>,
+    pub file_scope: bool,
+    pub defined: bool,
+    pub has_initializer: bool,
+    pub inline: bool,
+    pub noreturn: bool,
+    pub implicit: bool,
+    pub invalid: bool,
+    pub used: bool,
+    pub referenced: bool,
+    pub value: i128,
+    pub tag: Option<usize>,
+    pub builtin: Option<usize>,
+    pub has_prototype_written: bool,
+    pub defined_earlier: Option<usize>,
+    pub original_type: Option<QualifiedType>,
+}
+
+impl Declaration {
+    pub fn new(
+        kind: DeclarationKind,
+        name: Option<Rc<[u8]>>,
+        place: Place,
+        ty: QualifiedType,
+    ) -> Declaration {
+        Declaration {
+            kind,
+            name,
+            place,
+            ty,
+            storage: StorageClass::None,
+            thread: ThreadStorage::None,
+            previous: None,
+            file_scope: false,
+            defined: false,
+            has_initializer: false,
+            inline: false,
+            noreturn: false,
+            implicit: false,
+            invalid: false,
+            used: false,
+            referenced: false,
+            value: 0,
+            tag: None,
+            builtin: None,
+            has_prototype_written: false,
+            defined_earlier: None,
+            original_type: None,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct Field {
+    pub name: Option<Rc<[u8]>>,
+    pub ty: QualifiedType,
+    pub place: Place,
+    pub bit_width: Option<u32>,
+    pub declaration: usize,
+}
+
+#[derive(Clone, Debug)]
+pub struct Tag {
+    pub information: TagInformation,
+    pub place: Place,
+    pub complete: bool,
+    pub being_defined: bool,
+    pub definition_place: Option<Place>,
+    pub fields: Vec<Field>,
+    pub enumerators: Vec<usize>,
+    pub integer_type: Option<QualifiedType>,
+    pub promotion_type: Option<QualifiedType>,
+    pub flexible_array: bool,
+    pub invalid: bool,
+    pub packed: bool,
+    pub layout: Option<(u64, u64)>,
+}
+
+pub const SCOPE_FILE: u32 = 1;
+pub const SCOPE_FUNCTION: u32 = 2;
+pub const SCOPE_BLOCK: u32 = 4;
+pub const SCOPE_PROTOTYPE: u32 = 8;
+pub const SCOPE_FUNCTION_DECLARATION: u32 = 16;
+pub const SCOPE_BREAK: u32 = 32;
+pub const SCOPE_CONTINUE: u32 = 64;
+pub const SCOPE_SWITCH: u32 = 128;
+pub const SCOPE_RECORD: u32 = 256;
+pub const SCOPE_CONTROL: u32 = 512;
+
+#[derive(Default)]
+pub struct Scope {
+    pub flags: u32,
+    pub ordinary: HashMap<Rc<[u8]>, usize>,
+    pub tags: HashMap<Rc<[u8]>, usize>,
+    pub declarations: Vec<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub enum Argument {
+    Text(String),
+    Name(Rc<[u8]>),
+    Type(QualifiedType),
+    Integer(i128),
+}
+
+impl Argument {
+    pub fn text(value: &str) -> Argument {
+        Argument::Text(value.to_string())
+    }
+
+    pub fn number(value: impl Into<i128>) -> Argument {
+        Argument::Integer(value.into())
+    }
+}
+
 pub struct Parser<'session, 'files> {
     preprocessor: &'session mut Preprocessor<'files>,
     token: Token,
+    token_keyword: Option<&'static str>,
+    lookahead: VecDeque<Token>,
+    previous_place: Place,
     unsupported: Option<String>,
+    keyword_cache: HashMap<Rc<[u8]>, Option<&'static str>>,
+    declarations: Vec<Declaration>,
+    tags: Vec<Tag>,
+    scopes: Vec<Scope>,
+    extension_depth: usize,
+    variable_array_counter: u32,
+    parenthesis_depth: i32,
+    bracket_depth: i32,
+    brace_depth: i32,
+    function: Option<FunctionState>,
+    tentative_definitions: Vec<usize>,
+    previous_end: Option<Place>,
+    unevaluated_depth: u32,
+    constant_context_depth: u32,
+    macro_sites: HashSet<Place>,
+    pending_empty_statement: bool,
+    group_guard: std::cell::Cell<Option<&'static str>>,
 }
 
 impl<'session, 'files> Parser<'session, 'files> {
     pub fn new(preprocessor: &'session mut Preprocessor<'files>) -> Parser<'session, 'files> {
-        let token = preprocessor.next_token();
-        Parser {
+        let token = adopt_parser_token(preprocessor.next_token());
+        let mut parser = Parser {
             preprocessor,
             token,
+            token_keyword: None,
+            lookahead: VecDeque::new(),
+            previous_place: Place::default(),
             unsupported: None,
-        }
+            keyword_cache: HashMap::new(),
+            declarations: Vec::new(),
+            tags: Vec::new(),
+            scopes: Vec::new(),
+            extension_depth: 0,
+            variable_array_counter: 0,
+            parenthesis_depth: 0,
+            bracket_depth: 0,
+            brace_depth: 0,
+            function: None,
+            tentative_definitions: Vec::new(),
+            previous_end: None,
+            unevaluated_depth: 0,
+            constant_context_depth: 0,
+            macro_sites: HashSet::new(),
+            pending_empty_statement: false,
+            group_guard: std::cell::Cell::new(None),
+        };
+        parser.token_keyword = parser.keyword_of(&parser.token.clone());
+        parser.check_parser_keyword();
+        parser
     }
 
-    fn consume(&mut self) -> Place {
-        let place = self.token.site;
-        self.token = self.preprocessor.next_token();
-        place
+    fn keyword_of(&mut self, token: &Token) -> Option<&'static str> {
+        if token.kind != TokenKind::Identifier {
+            return None;
+        }
+        if let Some(found) = self.keyword_cache.get(&token.spelling) {
+            return *found;
+        }
+        let found = keyword_kind(&self.preprocessor.language, &token.spelling);
+        self.keyword_cache.insert(token.spelling.clone(), found);
+        found
     }
 
     fn keyword(&self) -> Option<&'static str> {
-        if self.token.kind != TokenKind::Identifier {
-            return None;
-        }
-        keyword_kind(&self.preprocessor.language, &self.token.spelling)
+        self.token_keyword
     }
 
-    fn unsupported(&mut self, what: String) {
+    fn is_keyword(&self, name: &str) -> bool {
+        self.token_keyword == Some(name)
+    }
+
+    fn is_identifier(&self) -> bool {
+        self.token.kind == TokenKind::Identifier && self.token_keyword.is_none()
+    }
+
+    fn at(&self, kind: TokenKind) -> bool {
+        self.token.kind == kind
+    }
+
+    fn peek(&mut self, distance: usize) -> Token {
+        while self.lookahead.len() < distance {
+            if self.unsupported.is_some() {
+                return Token::marker(TokenKind::EndOfFile, self.token.site);
+            }
+            let next = adopt_parser_token(self.preprocessor.next_token());
+            self.lookahead.push_back(next);
+        }
+        self.lookahead[distance - 1].clone()
+    }
+
+    fn peek_keyword(&mut self, distance: usize) -> Option<&'static str> {
+        let token = self.peek(distance);
+        self.keyword_of(&token)
+    }
+
+    fn consume(&mut self) -> Place {
+        let depth = match self.token.kind {
+            TokenKind::LeftParen => Some(self.parenthesis_depth),
+            TokenKind::LeftSquare => Some(self.bracket_depth),
+            TokenKind::LeftBrace => Some(self.brace_depth),
+            _ => None,
+        };
+        if let Some(depth) = depth {
+            let limit = self.preprocessor.options.bracket_depth;
+            if depth >= 0 && depth as u32 >= limit {
+                let place = self.token.site;
+                self.diagnose(
+                    "err_bracket_depth_exceeded",
+                    place,
+                    vec![Argument::number(limit)],
+                );
+                self.diagnose("note_bracket_depth", place, Vec::new());
+                self.lookahead.clear();
+                self.token = Token::marker(TokenKind::EndOfFile, place);
+                self.token_keyword = None;
+                return place;
+            }
+        }
+        let place = self.token.site;
+        self.previous_place = place;
+        if !self.token.has(MACRO_ARGUMENT) {
+            self.previous_end = Some(Place {
+                buffer: place.buffer,
+                offset: place.offset + self.token.length,
+            });
+        } else {
+            self.previous_end = None;
+            self.macro_sites.insert(place);
+        }
+        match self.token.kind {
+            TokenKind::LeftParen => self.parenthesis_depth += 1,
+            TokenKind::RightParen if self.parenthesis_depth > 0 => self.parenthesis_depth -= 1,
+            TokenKind::LeftSquare => self.bracket_depth += 1,
+            TokenKind::RightSquare if self.bracket_depth > 0 => self.bracket_depth -= 1,
+            TokenKind::LeftBrace => self.brace_depth += 1,
+            TokenKind::RightBrace if self.brace_depth > 0 => self.brace_depth -= 1,
+            _ => {}
+        }
+        if self.token.kind == TokenKind::EndOfFile {
+            return place;
+        }
+        let next = if self.unsupported.is_some() {
+            Token::marker(TokenKind::EndOfFile, place)
+        } else if let Some(next) = self.lookahead.pop_front() {
+            next
+        } else {
+            adopt_parser_token(self.preprocessor.next_token())
+        };
+        self.token = next;
+        let token = self.token.clone();
+        self.token_keyword = self.keyword_of(&token);
+        self.check_parser_keyword();
+        place
+    }
+
+    fn check_parser_keyword(&mut self) {
+        if let Some(keyword) = self.token_keyword {
+            if PARSER_KEYWORDS.binary_search(&keyword).is_err() {
+                self.unsupported(format!("keyword {keyword}"));
+            }
+        } else if self.token.kind == TokenKind::Embed {
+            self.unsupported("#embed data in the parser");
+        } else if self.token.kind == TokenKind::Identifier && &*self.token.spelling == b"__declspec"
+        {
+            self.unsupported("__declspec without -fdeclspec");
+        }
+    }
+
+    fn try_consume(&mut self, kind: TokenKind) -> Option<Place> {
+        if self.token.kind == kind {
+            Some(self.consume())
+        } else {
+            None
+        }
+    }
+
+    fn try_consume_keyword(&mut self, name: &str) -> Option<Place> {
+        if self.is_keyword(name) {
+            Some(self.consume())
+        } else {
+            None
+        }
+    }
+
+    fn unsupported(&mut self, what: impl Into<String>) {
         if self.unsupported.is_none() {
-            self.unsupported = Some(what);
+            self.unsupported = Some(what.into());
+            self.lookahead.clear();
+            self.token = Token::marker(TokenKind::EndOfFile, self.token.site);
+            self.token_keyword = None;
         }
     }
 
     fn report(&mut self, message: Message, place: Place, arguments: Vec<String>) {
+        if self.unsupported.is_some() {
+            return;
+        }
+        if self.extension_depth > 0 && message.is_extension() {
+            return;
+        }
         self.preprocessor.report(message, place, arguments);
     }
 
+    fn diagnose(&mut self, name: &str, place: Place, arguments: Vec<Argument>) {
+        let rendered = self.render_arguments(&arguments);
+        self.report(clang_message(name), place, rendered);
+    }
+
+    fn diagnose_compatibility(
+        &mut self,
+        name: &str,
+        standard: CStandard,
+        place: Place,
+        arguments: Vec<Argument>,
+    ) {
+        let version = match standard {
+            CStandard::C99 => "c99",
+            CStandard::C11 => "c11",
+            CStandard::C17 => "c17",
+            CStandard::C23 => "c23",
+            _ => "c2y",
+        };
+        let full = if self.preprocessor.language.at_least(standard) {
+            format!("compat_{version}_{name}")
+        } else {
+            format!("compat_pre_{version}_{name}")
+        };
+        self.diagnose(&full, place, arguments);
+    }
+
+    fn message_ignored(&self, name: &str, place: Place) -> bool {
+        self.preprocessor
+            .message_ignored(clang_message(name), place)
+    }
+
+    fn render_arguments(&self, arguments: &[Argument]) -> Vec<String> {
+        let types: Vec<&QualifiedType> = arguments
+            .iter()
+            .filter_map(|argument| match argument {
+                Argument::Type(ty) => Some(ty),
+                _ => None,
+            })
+            .collect();
+        let mut out = Vec::with_capacity(arguments.len());
+        for (index, argument) in arguments.iter().enumerate() {
+            out.push(match argument {
+                Argument::Text(text) => text.clone(),
+                Argument::Name(name) => quoted(name),
+                Argument::Integer(value) => value.to_string(),
+                Argument::Type(ty) => {
+                    let repeated = arguments[..index]
+                        .iter()
+                        .any(|previous| matches!(previous, Argument::Type(other) if other == ty));
+                    self.type_diagnostic_string(ty, &types, repeated)
+                }
+            });
+        }
+        out
+    }
+
+    fn print_type(&self, ty: &QualifiedType) -> String {
+        TypePrinter::new(&self.tags, &self.preprocessor.language).print(ty, "")
+    }
+
+    fn print_type_with(&self, ty: &QualifiedType, placeholder: &str) -> String {
+        TypePrinter::new(&self.tags, &self.preprocessor.language).print(ty, placeholder)
+    }
+
+    fn typedef_names_anonymous_tag(&self, ty: &QualifiedType, underlying: &QualifiedType) -> bool {
+        let TypeNode::Typedef { name, .. } = &*ty.node else {
+            return false;
+        };
+        let Some((tag, _)) = underlying.tag() else {
+            return false;
+        };
+        self.tags[tag]
+            .information
+            .typedef_for_anonymous
+            .as_ref()
+            .is_some_and(|anonymous| anonymous == name)
+    }
+
+    fn desugar_for_diagnostic(&self, ty: &QualifiedType, should_aka: &mut bool) -> QualifiedType {
+        let mut qualifiers = 0u8;
+        let mut current = ty.clone();
+        loop {
+            qualifiers |= current.qualifiers;
+            current = current.unqualified();
+            match &*current.node {
+                TypeNode::FunctionPrototype {
+                    result,
+                    parameters,
+                    variadic,
+                    noreturn,
+                } => {
+                    let mut changed = false;
+                    let new_result = self.desugar_for_diagnostic(result, &mut changed);
+                    let mut changed_parameter = false;
+                    let new_parameters: Vec<QualifiedType> = parameters
+                        .iter()
+                        .map(|parameter| {
+                            self.desugar_for_diagnostic(parameter, &mut changed_parameter)
+                        })
+                        .collect();
+                    if changed || changed_parameter {
+                        *should_aka = true;
+                        current = QualifiedType::new(TypeNode::FunctionPrototype {
+                            result: new_result,
+                            parameters: new_parameters,
+                            variadic: *variadic,
+                            noreturn: *noreturn,
+                        });
+                        break;
+                    }
+                }
+                TypeNode::FunctionNoPrototype { result, noreturn } => {
+                    let mut changed = false;
+                    let new_result = self.desugar_for_diagnostic(result, &mut changed);
+                    if changed {
+                        *should_aka = true;
+                        current = QualifiedType::new(TypeNode::FunctionNoPrototype {
+                            result: new_result,
+                            noreturn: *noreturn,
+                        });
+                        break;
+                    }
+                }
+                TypeNode::ConstantArray {
+                    element,
+                    size,
+                    modifier,
+                    index_qualifiers,
+                } => {
+                    current = QualifiedType::new(TypeNode::ConstantArray {
+                        element: self.desugar_for_diagnostic(element, should_aka),
+                        size: *size,
+                        modifier: *modifier,
+                        index_qualifiers: *index_qualifiers,
+                    });
+                    break;
+                }
+                TypeNode::IncompleteArray {
+                    element,
+                    modifier,
+                    index_qualifiers,
+                } => {
+                    current = QualifiedType::new(TypeNode::IncompleteArray {
+                        element: self.desugar_for_diagnostic(element, should_aka),
+                        modifier: *modifier,
+                        index_qualifiers: *index_qualifiers,
+                    });
+                    break;
+                }
+                TypeNode::VariableArray {
+                    element,
+                    size,
+                    modifier,
+                    index_qualifiers,
+                    identity,
+                    folded,
+                } => {
+                    current = QualifiedType::new(TypeNode::VariableArray {
+                        element: self.desugar_for_diagnostic(element, should_aka),
+                        size: size.clone(),
+                        modifier: *modifier,
+                        index_qualifiers: *index_qualifiers,
+                        identity: *identity,
+                        folded: *folded,
+                    });
+                    break;
+                }
+                _ => {}
+            }
+            let Some(underlying) = current.single_step_desugar() else {
+                break;
+            };
+            if self.typedef_names_anonymous_tag(&current, &underlying) {
+                break;
+            }
+            *should_aka = true;
+            current = underlying;
+        }
+        if let TypeNode::Pointer(pointee) = &*current.desugared().node {
+            current = QualifiedType::pointer_to(self.desugar_for_diagnostic(pointee, should_aka));
+        }
+        current.with_qualifiers(qualifiers)
+    }
+
+    fn type_diagnostic_string(
+        &self,
+        ty: &QualifiedType,
+        all: &[&QualifiedType],
+        repeated: bool,
+    ) -> String {
+        let text = self.print_type(ty);
+        let canonical = ty.canonical();
+        let canonical_text = self.print_type(&canonical);
+        let mut force = false;
+        for other in all {
+            if *other == ty {
+                continue;
+            }
+            let other_canonical = other.canonical();
+            if other_canonical == canonical {
+                continue;
+            }
+            let other_text = self.print_type(other);
+            let mut ignored = false;
+            let other_desugared = self.desugar_for_diagnostic(other, &mut ignored);
+            if other_text != text && self.print_type(&other_desugared) != text {
+                continue;
+            }
+            if self.print_type(&other_canonical) == canonical_text {
+                continue;
+            }
+            force = true;
+            break;
+        }
+        if !repeated {
+            let mut should_aka = false;
+            let mut desugared = self.desugar_for_diagnostic(ty, &mut should_aka);
+            if should_aka || force {
+                if desugared == *ty {
+                    desugared = canonical;
+                }
+                let aka = self.print_type(&desugared);
+                if aka != text {
+                    return format!("'{text}' (aka '{aka}')");
+                }
+            }
+        }
+        format!("'{text}'")
+    }
+
+    fn push_scope(&mut self, flags: u32) {
+        self.scopes.push(Scope {
+            flags,
+            ..Scope::default()
+        });
+    }
+
+    fn pop_scope(&mut self) {
+        self.scopes.pop();
+    }
+
+    fn scope_flags(&self) -> u32 {
+        self.scopes.last().map(|scope| scope.flags).unwrap_or(0)
+    }
+
+    fn at_file_scope(&self) -> bool {
+        self.scopes.len() == 1
+    }
+
+    fn lookup_ordinary(&self, name: &[u8]) -> Option<usize> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(found) = scope.ordinary.get(name) {
+                return Some(*found);
+            }
+        }
+        None
+    }
+
+    fn lookup_ordinary_in_current_scope(&self, name: &[u8]) -> Option<usize> {
+        self.scopes
+            .last()
+            .and_then(|scope| scope.ordinary.get(name).copied())
+    }
+
+    fn lookup_tag(&self, name: &[u8]) -> Option<(usize, usize)> {
+        for (depth, scope) in self.scopes.iter().enumerate().rev() {
+            if let Some(found) = scope.tags.get(name) {
+                return Some((*found, depth));
+            }
+        }
+        None
+    }
+
+    fn typedef_named(&self, name: &[u8]) -> Option<usize> {
+        let found = self.lookup_ordinary(name)?;
+        (self.declarations[found].kind == DeclarationKind::Typedef).then_some(found)
+    }
+
+    fn add_declaration(&mut self, declaration: Declaration) -> usize {
+        let index = self.declarations.len();
+        self.declarations.push(declaration);
+        index
+    }
+
+    fn push_on_scope(&mut self, index: usize) {
+        let name = self.declarations[index].name.clone();
+        let invalid = self.declarations[index].invalid;
+        if let Some(scope) = self.scopes.last_mut() {
+            scope.declarations.push(index);
+            if let Some(name) = name {
+                if !(invalid && scope.ordinary.contains_key(&name)) {
+                    scope.ordinary.insert(name, index);
+                }
+            }
+        }
+    }
+
+    fn push_on_scope_at(&mut self, index: usize, depth: usize) {
+        let name = self.declarations[index].name.clone();
+        let scope = &mut self.scopes[depth];
+        scope.declarations.push(index);
+        if let Some(name) = name {
+            scope.ordinary.insert(name, index);
+        }
+    }
+
+    fn language(&self) -> &LanguageOptions {
+        &self.preprocessor.language
+    }
+
+    fn target(&self) -> &TargetInfo {
+        &self.preprocessor.options.target
+    }
+
+    fn int_type() -> QualifiedType {
+        QualifiedType::builtin(BuiltinType::Int)
+    }
+
+    fn char_type(&self) -> QualifiedType {
+        if self.preprocessor.language.char_is_signed {
+            QualifiedType::builtin(BuiltinType::CharSigned)
+        } else {
+            QualifiedType::builtin(BuiltinType::CharUnsigned)
+        }
+    }
+
+    fn builtin_for_integer_type(&self, ty: IntegerType) -> BuiltinType {
+        match ty {
+            IntegerType::SignedChar => BuiltinType::SignedChar,
+            IntegerType::UnsignedChar => BuiltinType::UnsignedChar,
+            IntegerType::Short => BuiltinType::Short,
+            IntegerType::UnsignedShort => BuiltinType::UnsignedShort,
+            IntegerType::Int => BuiltinType::Int,
+            IntegerType::UnsignedInt => BuiltinType::UnsignedInt,
+            IntegerType::Long => BuiltinType::Long,
+            IntegerType::UnsignedLong => BuiltinType::UnsignedLong,
+            IntegerType::LongLong => BuiltinType::LongLong,
+            IntegerType::UnsignedLongLong => BuiltinType::UnsignedLongLong,
+        }
+    }
+
+    fn size_type(&self) -> QualifiedType {
+        QualifiedType::builtin(self.builtin_for_integer_type(self.target().size_type))
+    }
+
+    fn pointer_difference_type(&self) -> QualifiedType {
+        QualifiedType::builtin(self.builtin_for_integer_type(self.target().ptrdiff_type))
+    }
+
+    fn wide_character_type(&self) -> QualifiedType {
+        QualifiedType::builtin(self.builtin_for_integer_type(self.target().wchar_type))
+    }
+
+    fn builtin_width(&self, kind: BuiltinType) -> u32 {
+        let target = self.target();
+        match kind {
+            BuiltinType::Void => 8,
+            BuiltinType::Bool => 8,
+            BuiltinType::CharSigned
+            | BuiltinType::CharUnsigned
+            | BuiltinType::SignedChar
+            | BuiltinType::UnsignedChar => 8,
+            BuiltinType::Short | BuiltinType::UnsignedShort => target.short_width,
+            BuiltinType::Int | BuiltinType::UnsignedInt => target.int_width,
+            BuiltinType::Long | BuiltinType::UnsignedLong => target.long_width,
+            BuiltinType::LongLong | BuiltinType::UnsignedLongLong => target.long_long_width,
+            BuiltinType::Int128 | BuiltinType::UnsignedInt128 => 128,
+            BuiltinType::Half | BuiltinType::Float16 | BuiltinType::BFloat16 => 16,
+            BuiltinType::Float => target.float_width,
+            BuiltinType::Double => target.double_width,
+            BuiltinType::LongDouble => target.long_double_width,
+            BuiltinType::Float128 | BuiltinType::Ibm128 => 128,
+        }
+    }
+
+    fn builtin_alignment(&self, kind: BuiltinType) -> u32 {
+        let target = self.target();
+        let x86_32 = matches!(target.family, TargetFamily::X86(_)) && target.pointer_width == 32;
+        let android = target.triple.environment.starts_with("android");
+        match kind {
+            BuiltinType::LongLong | BuiltinType::UnsignedLongLong if x86_32 => 32,
+            BuiltinType::Double if x86_32 => 32,
+            BuiltinType::LongDouble => {
+                if x86_32 {
+                    32
+                } else if !matches!(target.family, TargetFamily::X86(_))
+                    && (matches!(target.family, TargetFamily::Arm(_))
+                        || (android && target.long_double_width == 64))
+                {
+                    64
+                } else {
+                    128
+                }
+            }
+            BuiltinType::Int128
+            | BuiltinType::UnsignedInt128
+            | BuiltinType::Float128
+            | BuiltinType::Ibm128 => 128,
+            other => self.builtin_width(other),
+        }
+    }
+
+    fn enumeration_integer_type(&self, tag: usize) -> QualifiedType {
+        self.tags[tag]
+            .integer_type
+            .clone()
+            .unwrap_or_else(|| QualifiedType::builtin(BuiltinType::UnsignedInt))
+    }
+
+    fn integer_width(&self, ty: &QualifiedType) -> u32 {
+        if let Some(kind) = ty.builtin_kind() {
+            return self.builtin_width(kind);
+        }
+        if let Some((tag, TagKind::Enum)) = ty.tag() {
+            return self.integer_width(&self.enumeration_integer_type(tag));
+        }
+        if let Some((_, bits)) = ty.bit_int() {
+            return bits;
+        }
+        if ty.is_pointer() {
+            return self.target().pointer_width;
+        }
+        self.target().int_width
+    }
+
+    fn is_signed_integer(&self, ty: &QualifiedType) -> bool {
+        if let Some(kind) = ty.builtin_kind() {
+            return kind.is_signed_integer();
+        }
+        if let Some((tag, TagKind::Enum)) = ty.tag() {
+            return self.is_signed_integer(&self.enumeration_integer_type(tag));
+        }
+        if let Some((unsigned, _)) = ty.bit_int() {
+            return !unsigned;
+        }
+        false
+    }
+
+    fn is_unsigned_integer(&self, ty: &QualifiedType) -> bool {
+        ty.is_integer() && !self.is_signed_integer(ty)
+    }
+
+    fn is_complete_type(&self, ty: &QualifiedType) -> bool {
+        let top = ty.desugared();
+        match &*top.node {
+            TypeNode::Builtin(BuiltinType::Void) => false,
+            TypeNode::IncompleteArray { .. } => false,
+            TypeNode::ConstantArray { element, .. } | TypeNode::VariableArray { element, .. } => {
+                self.is_complete_type(element)
+            }
+            TypeNode::Tag { declaration, .. } => self.tags[*declaration].complete,
+            TypeNode::Atomic(value) => self.is_complete_type(value),
+            _ => true,
+        }
+    }
+
+    fn type_size_bits(&self, ty: &QualifiedType) -> Option<u64> {
+        let top = ty.desugared();
+        match &*top.node {
+            TypeNode::Builtin(BuiltinType::Void) => None,
+            TypeNode::Builtin(kind) => Some(u64::from(self.builtin_width(*kind))),
+            TypeNode::Complex(element) => self.type_size_bits(element).map(|size| size * 2),
+            TypeNode::Pointer(_) => Some(u64::from(self.target().pointer_width)),
+            TypeNode::ConstantArray { element, size, .. } => {
+                self.type_size_bits(element).map(|bits| bits * size)
+            }
+            TypeNode::IncompleteArray { .. } | TypeNode::VariableArray { .. } => None,
+            TypeNode::FunctionPrototype { .. } | TypeNode::FunctionNoPrototype { .. } => None,
+            TypeNode::Tag {
+                declaration, kind, ..
+            } => {
+                if *kind == TagKind::Enum {
+                    if !self.tags[*declaration].complete
+                        && self.tags[*declaration].integer_type.is_none()
+                    {
+                        return None;
+                    }
+                    return self.type_size_bits(&self.enumeration_integer_type(*declaration));
+                }
+                self.record_layout(*declaration).map(|(size, _)| size)
+            }
+            TypeNode::Atomic(value) => {
+                let size = self.type_size_bits(value)?;
+                let alignment = u64::from(self.type_alignment_bits(value));
+                if size.is_power_of_two()
+                    && size <= u64::from(self.target().max_atomic_promote_width)
+                {
+                    Some(size.max(alignment))
+                } else {
+                    Some(size)
+                }
+            }
+            TypeNode::BitInt { bits, .. } => {
+                let bits = u64::from(*bits);
+                let alignment = u64::from(self.bit_int_alignment(bits as u32));
+                Some(bits.div_ceil(alignment) * alignment)
+            }
+            _ => None,
+        }
+    }
+
+    fn bit_int_alignment(&self, bits: u32) -> u32 {
+        let long_long_alignment = self.builtin_alignment(BuiltinType::LongLong);
+        bits.next_power_of_two().clamp(8, long_long_alignment)
+    }
+
+    fn type_alignment_bits(&self, ty: &QualifiedType) -> u32 {
+        let top = ty.desugared();
+        match &*top.node {
+            TypeNode::Builtin(kind) => self.builtin_alignment(*kind),
+            TypeNode::Complex(element) => self.type_alignment_bits(element),
+            TypeNode::Pointer(_) => self.target().pointer_width,
+            TypeNode::ConstantArray { element, .. }
+            | TypeNode::IncompleteArray { element, .. }
+            | TypeNode::VariableArray { element, .. } => self.type_alignment_bits(element),
+            TypeNode::Tag {
+                declaration, kind, ..
+            } => {
+                if *kind == TagKind::Enum {
+                    return self.type_alignment_bits(&self.enumeration_integer_type(*declaration));
+                }
+                self.record_layout(*declaration)
+                    .map(|(_, alignment)| alignment as u32)
+                    .unwrap_or(8)
+            }
+            TypeNode::Atomic(value) => {
+                let size = self.type_size_bits(value).unwrap_or(8);
+                let alignment = self.type_alignment_bits(value);
+                if size.is_power_of_two()
+                    && size <= u64::from(self.target().max_atomic_promote_width)
+                {
+                    (size as u32).max(alignment)
+                } else {
+                    alignment
+                }
+            }
+            TypeNode::BitInt { bits, .. } => self.bit_int_alignment(*bits),
+            _ => 8,
+        }
+    }
+
+    fn record_layout(&self, tag: usize) -> Option<(u64, u64)> {
+        let information = &self.tags[tag];
+        if !information.complete {
+            return None;
+        }
+        if let Some(layout) = information.layout {
+            return Some(layout);
+        }
+        let union = information.information.kind == TagKind::Union;
+        let mut size = 0u64;
+        let mut alignment = 8u64;
+        let mut bit_offset = 0u64;
+        for field in &information.fields {
+            let field_alignment = if information.packed {
+                8
+            } else {
+                u64::from(self.type_alignment_bits(&field.ty))
+            };
+            let field_size = self.type_size_bits(&field.ty).unwrap_or(0);
+            match field.bit_width {
+                Some(width) => {
+                    let width = u64::from(width);
+                    let storage = field_size.max(8);
+                    if width == 0 {
+                        if field.name.is_none() {
+                            bit_offset = bit_offset.div_ceil(field_alignment) * field_alignment;
+                        }
+                        continue;
+                    }
+                    if union {
+                        size = size.max(width.div_ceil(8) * 8);
+                    } else {
+                        if !information.packed && (bit_offset % storage) + width > storage {
+                            bit_offset = bit_offset.div_ceil(field_alignment) * field_alignment;
+                        }
+                        bit_offset += width;
+                    }
+                    if field.name.is_some() && !information.packed {
+                        alignment = alignment.max(field_alignment);
+                    }
+                }
+                None => {
+                    if union {
+                        size = size.max(field_size);
+                    } else {
+                        bit_offset = bit_offset.div_ceil(field_alignment) * field_alignment;
+                        bit_offset += field_size;
+                    }
+                    alignment = alignment.max(field_alignment);
+                }
+            }
+        }
+        if !union {
+            size = bit_offset;
+        }
+        size = size.div_ceil(alignment) * alignment;
+        Some((size, alignment))
+    }
+
+    fn is_promotable_integer(&self, ty: &QualifiedType) -> bool {
+        if let Some(kind) = ty.builtin_kind() {
+            return matches!(
+                kind,
+                BuiltinType::Bool
+                    | BuiltinType::CharSigned
+                    | BuiltinType::CharUnsigned
+                    | BuiltinType::SignedChar
+                    | BuiltinType::UnsignedChar
+                    | BuiltinType::Short
+                    | BuiltinType::UnsignedShort
+            );
+        }
+        if let Some((tag, TagKind::Enum)) = ty.tag() {
+            if !self.tags[tag].complete {
+                return false;
+            }
+            let integer = self.enumeration_integer_type(tag);
+            return self.is_promotable_integer(&integer)
+                || self.tags[tag]
+                    .promotion_type
+                    .as_ref()
+                    .is_some_and(|promotion| promotion.canonical() != integer.canonical());
+        }
+        false
+    }
+
+    fn promoted_integer_type(&self, ty: &QualifiedType) -> QualifiedType {
+        if let Some((tag, TagKind::Enum)) = ty.tag() {
+            if let Some(promotion) = &self.tags[tag].promotion_type {
+                return promotion.clone();
+            }
+        }
+        if ty.is_bool() {
+            return Parser::int_type();
+        }
+        let width = self.integer_width(ty);
+        let int_width = self.target().int_width;
+        if width < int_width || (width == int_width && self.is_signed_integer(ty)) {
+            return Parser::int_type();
+        }
+        QualifiedType::builtin(BuiltinType::UnsignedInt)
+    }
+
+    fn integer_rank(&self, ty: &QualifiedType) -> u32 {
+        if let Some(kind) = ty.builtin_kind() {
+            return kind.integer_rank() * 1000;
+        }
+        if let Some((tag, TagKind::Enum)) = ty.tag() {
+            return self.integer_rank(&self.enumeration_integer_type(tag));
+        }
+        if let Some((_, bits)) = ty.bit_int() {
+            return bits * 10 + 1;
+        }
+        0
+    }
+
+    fn corresponding_unsigned(&self, ty: &QualifiedType) -> QualifiedType {
+        if let Some(kind) = ty.builtin_kind() {
+            return QualifiedType::builtin(kind.unsigned_counterpart());
+        }
+        if let Some((tag, TagKind::Enum)) = ty.tag() {
+            return self.corresponding_unsigned(&self.enumeration_integer_type(tag));
+        }
+        if let Some((_, bits)) = ty.bit_int() {
+            return QualifiedType::new(TypeNode::BitInt {
+                unsigned: true,
+                bits,
+            });
+        }
+        ty.clone()
+    }
+
+    fn merge_types(
+        &self,
+        left: &QualifiedType,
+        right: &QualifiedType,
+        parameter: bool,
+        unqualified: bool,
+    ) -> Option<QualifiedType> {
+        let mut left_canonical = left.canonical();
+        let mut right_canonical = right.canonical();
+        if unqualified {
+            left_canonical = left_canonical.unqualified();
+            right_canonical = right_canonical.unqualified();
+        }
+        if left_canonical == right_canonical {
+            return Some(left.clone());
+        }
+        if left_canonical.qualifiers != right_canonical.qualifiers {
+            return None;
+        }
+        let qualifiers = left_canonical.qualifiers;
+        let left_node = left_canonical.unqualified();
+        let right_node = right_canonical.unqualified();
+        match (&*left_node.node, &*right_node.node) {
+            (
+                TypeNode::Tag {
+                    kind: TagKind::Enum,
+                    declaration,
+                    ..
+                },
+                _,
+            ) if right_node.is_integer() && right_node.tag().is_none() => {
+                let integer = self.enumeration_integer_type(*declaration).canonical();
+                if integer.unqualified() == right_node {
+                    return Some(right.clone());
+                }
+                None
+            }
+            (
+                _,
+                TypeNode::Tag {
+                    kind: TagKind::Enum,
+                    declaration,
+                    ..
+                },
+            ) if left_node.is_integer() && left_node.tag().is_none() => {
+                let integer = self.enumeration_integer_type(*declaration).canonical();
+                if integer.unqualified() == left_node {
+                    return Some(left.clone());
+                }
+                None
+            }
+            (TypeNode::Pointer(left_pointee), TypeNode::Pointer(right_pointee)) => {
+                let merged = self.merge_types(left_pointee, right_pointee, false, false)?;
+                Some(QualifiedType::pointer_to(merged).with_qualifiers(qualifiers))
+            }
+            (TypeNode::Atomic(left_value), TypeNode::Atomic(right_value)) => {
+                let merged = self.merge_types(left_value, right_value, false, false)?;
+                Some(QualifiedType::new(TypeNode::Atomic(merged)).with_qualifiers(qualifiers))
+            }
+            (
+                TypeNode::ConstantArray { .. }
+                | TypeNode::IncompleteArray { .. }
+                | TypeNode::VariableArray { .. },
+                TypeNode::ConstantArray { .. }
+                | TypeNode::IncompleteArray { .. }
+                | TypeNode::VariableArray { .. },
+            ) => {
+                let left_element = left_canonical.array_element()?;
+                let right_element = right_canonical.array_element()?;
+                let merged_element =
+                    self.merge_types(&left_element, &right_element, false, false)?;
+                let left_size = match &*left_node.node {
+                    TypeNode::ConstantArray { size, .. } => Some(*size),
+                    _ => None,
+                };
+                let right_size = match &*right_node.node {
+                    TypeNode::ConstantArray { size, .. } => Some(*size),
+                    _ => None,
+                };
+                if let (Some(a), Some(b)) = (left_size, right_size) {
+                    if a != b {
+                        return None;
+                    }
+                }
+                if left_size.is_some() {
+                    return Some(left.clone());
+                }
+                if right_size.is_some() {
+                    return Some(right.clone());
+                }
+                if left_node.is_variable_array() {
+                    return Some(left.clone());
+                }
+                if right_node.is_variable_array() {
+                    return Some(right.clone());
+                }
+                let _ = merged_element;
+                Some(left.clone())
+            }
+            (
+                TypeNode::FunctionPrototype { .. } | TypeNode::FunctionNoPrototype { .. },
+                TypeNode::FunctionPrototype { .. } | TypeNode::FunctionNoPrototype { .. },
+            ) => self.merge_function_types(left, right),
+            _ => {
+                let _ = parameter;
+                None
+            }
+        }
+    }
+
+    fn merge_function_types(
+        &self,
+        left: &QualifiedType,
+        right: &QualifiedType,
+    ) -> Option<QualifiedType> {
+        let left_canonical = left.canonical();
+        let right_canonical = right.canonical();
+        let left_result = left_canonical.function_result()?;
+        let right_result = right_canonical.function_result()?;
+        let merged_result = self.merge_types(&left_result, &right_result, false, true)?;
+        let _ = merged_result;
+        let left_parts = match &*left_canonical.node {
+            TypeNode::FunctionPrototype {
+                parameters,
+                variadic,
+                noreturn,
+                ..
+            } => Some((parameters.clone(), *variadic, *noreturn)),
+            _ => None,
+        };
+        let right_parts = match &*right_canonical.node {
+            TypeNode::FunctionPrototype {
+                parameters,
+                variadic,
+                noreturn,
+                ..
+            } => Some((parameters.clone(), *variadic, *noreturn)),
+            _ => None,
+        };
+        match (left_parts, right_parts) {
+            (
+                Some((left_parameters, left_variadic, _)),
+                Some((right_parameters, right_variadic, _)),
+            ) => {
+                if left_parameters.len() != right_parameters.len()
+                    || left_variadic != right_variadic
+                {
+                    return None;
+                }
+                for (a, b) in left_parameters.iter().zip(right_parameters.iter()) {
+                    self.merge_types(a, b, true, true)?;
+                }
+                Some(left.clone())
+            }
+            (Some((parameters, variadic, _)), None) | (None, Some((parameters, variadic, _))) => {
+                if variadic {
+                    return None;
+                }
+                for parameter in &parameters {
+                    let unqualified = parameter.canonical().unqualified();
+                    if self.is_promotable_integer(&unqualified)
+                        || unqualified.builtin_kind() == Some(BuiltinType::Float)
+                    {
+                        return None;
+                    }
+                }
+                if left_canonical.is_function()
+                    && matches!(&*left_canonical.node, TypeNode::FunctionPrototype { .. })
+                {
+                    Some(left.clone())
+                } else {
+                    Some(right.clone())
+                }
+            }
+            (None, None) => Some(left.clone()),
+        }
+    }
+
+    fn types_compatible(&self, left: &QualifiedType, right: &QualifiedType) -> bool {
+        self.merge_types(left, right, false, false).is_some()
+    }
+
+    fn adjusted_parameter_type(&self, ty: &QualifiedType) -> QualifiedType {
+        let top = ty.desugared();
+        if let Some(element) = top.array_element() {
+            let index_qualifiers = match &*top.node {
+                TypeNode::ConstantArray {
+                    index_qualifiers, ..
+                }
+                | TypeNode::IncompleteArray {
+                    index_qualifiers, ..
+                }
+                | TypeNode::VariableArray {
+                    index_qualifiers, ..
+                } => *index_qualifiers,
+                _ => 0,
+            };
+            let element_in_array = match &*ty.node {
+                TypeNode::ConstantArray { element, .. }
+                | TypeNode::IncompleteArray { element, .. }
+                | TypeNode::VariableArray { element, .. } => element.clone(),
+                _ => element,
+            };
+            return QualifiedType::pointer_to(element_in_array).with_qualifiers(index_qualifiers);
+        }
+        if ty.is_function() {
+            return QualifiedType::pointer_to(ty.clone());
+        }
+        ty.clone()
+    }
+
+    fn tag_description(&self, place: Place, kind: TagKind) -> String {
+        let presumed = self.preprocessor.sources.presumed(place);
+        format!(
+            "unnamed {} at {}:{}:{}",
+            kind.name(),
+            presumed.name,
+            presumed.line,
+            presumed.column
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TypeSpecifier {
+    Unspecified,
+    Void,
+    Char,
+    Int,
+    Int128,
+    BitInt,
+    Half,
+    BFloat16,
+    Float,
+    Double,
+    Float16,
+    Float128,
+    Ibm128,
+    Bool,
+    Decimal32,
+    Decimal64,
+    Decimal128,
+    Struct,
+    Union,
+    Enum,
+    Typename,
+    TypeOfType,
+    TypeOfExpression,
+    TypeOfUnqualifiedType,
+    TypeOfUnqualifiedExpression,
+    AutoType,
+    Auto,
+    Atomic,
+    Error,
+}
+
+impl TypeSpecifier {
+    pub fn name(self, bool_keyword: bool) -> &'static str {
+        match self {
+            TypeSpecifier::Unspecified => "unspecified",
+            TypeSpecifier::Void => "void",
+            TypeSpecifier::Char => "char",
+            TypeSpecifier::Int => "int",
+            TypeSpecifier::Int128 => "__int128",
+            TypeSpecifier::BitInt => "_BitInt",
+            TypeSpecifier::Half => "half",
+            TypeSpecifier::BFloat16 => "__bf16",
+            TypeSpecifier::Float => "float",
+            TypeSpecifier::Double => "double",
+            TypeSpecifier::Float16 => "_Float16",
+            TypeSpecifier::Float128 => "__float128",
+            TypeSpecifier::Ibm128 => "__ibm128",
+            TypeSpecifier::Bool => {
+                if bool_keyword {
+                    "bool"
+                } else {
+                    "_Bool"
+                }
+            }
+            TypeSpecifier::Decimal32 => "_Decimal32",
+            TypeSpecifier::Decimal64 => "_Decimal64",
+            TypeSpecifier::Decimal128 => "_Decimal128",
+            TypeSpecifier::Struct => "struct",
+            TypeSpecifier::Union => "union",
+            TypeSpecifier::Enum => "enum",
+            TypeSpecifier::Typename => "type-name",
+            TypeSpecifier::TypeOfType | TypeSpecifier::TypeOfExpression => "typeof",
+            TypeSpecifier::TypeOfUnqualifiedType | TypeSpecifier::TypeOfUnqualifiedExpression => {
+                "typeof_unqual"
+            }
+            TypeSpecifier::AutoType => "__auto_type",
+            TypeSpecifier::Auto => "auto",
+            TypeSpecifier::Atomic => "_Atomic",
+            TypeSpecifier::Error => "(error)",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Width {
+    Unspecified,
+    Short,
+    Long,
+    LongLong,
+}
+
+impl Width {
+    fn name(self) -> &'static str {
+        match self {
+            Width::Unspecified => "unspecified",
+            Width::Short => "short",
+            Width::Long => "long",
+            Width::LongLong => "long long",
+        }
+    }
+
+    fn index(self) -> i128 {
+        match self {
+            Width::Unspecified => 0,
+            Width::Short => 1,
+            Width::Long => 2,
+            Width::LongLong => 3,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Sign {
+    Unspecified,
+    Signed,
+    Unsigned,
+}
+
+impl Sign {
+    fn name(self) -> &'static str {
+        match self {
+            Sign::Unspecified => "unspecified",
+            Sign::Signed => "signed",
+            Sign::Unsigned => "unsigned",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ComplexSpecifier {
+    Unspecified,
+    Imaginary,
+    Complex,
+}
+
+impl ComplexSpecifier {
+    fn name(self) -> &'static str {
+        match self {
+            ComplexSpecifier::Unspecified => "unspecified",
+            ComplexSpecifier::Imaginary => "imaginary",
+            ComplexSpecifier::Complex => "complex",
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum SpecifierContext {
+    TopLevel,
+    Normal,
+    TypeSpecifier,
+    Class,
+}
+
+#[derive(Clone, Debug)]
+pub struct DeclarationSpecifiers {
+    pub start: Place,
+    pub end: Place,
+    pub parsed_anything: bool,
+    pub storage: StorageClass,
+    pub storage_place: Place,
+    pub thread: ThreadStorage,
+    pub thread_place: Place,
+    pub width: Width,
+    pub width_place: Place,
+    pub sign: Sign,
+    pub sign_place: Place,
+    pub complex: ComplexSpecifier,
+    pub complex_place: Place,
+    pub specifier: TypeSpecifier,
+    pub specifier_place: Place,
+    pub specifier_owned: bool,
+    pub representation: Option<QualifiedType>,
+    pub tag: Option<usize>,
+    pub tag_defined: bool,
+    pub expression_text: String,
+    pub qualifiers: u8,
+    pub atomic_qualifier: bool,
+    pub const_place: Place,
+    pub volatile_place: Place,
+    pub restrict_place: Place,
+    pub atomic_place: Place,
+    pub inline: bool,
+    pub inline_place: Place,
+    pub noreturn: bool,
+    pub noreturn_place: Place,
+    pub constexpr: bool,
+    pub constexpr_place: Place,
+    pub bit_int_bits: Option<u32>,
+}
+
+impl DeclarationSpecifiers {
+    pub fn new(start: Place) -> DeclarationSpecifiers {
+        DeclarationSpecifiers {
+            start,
+            end: start,
+            parsed_anything: false,
+            storage: StorageClass::None,
+            storage_place: start,
+            thread: ThreadStorage::None,
+            thread_place: start,
+            width: Width::Unspecified,
+            width_place: start,
+            sign: Sign::Unspecified,
+            sign_place: start,
+            complex: ComplexSpecifier::Unspecified,
+            complex_place: start,
+            specifier: TypeSpecifier::Unspecified,
+            specifier_place: start,
+            specifier_owned: false,
+            representation: None,
+            tag: None,
+            tag_defined: false,
+            expression_text: String::new(),
+            qualifiers: 0,
+            atomic_qualifier: false,
+            const_place: start,
+            volatile_place: start,
+            restrict_place: start,
+            atomic_place: start,
+            inline: false,
+            inline_place: start,
+            noreturn: false,
+            noreturn_place: start,
+            constexpr: false,
+            constexpr_place: start,
+            bit_int_bits: None,
+        }
+    }
+
+    pub fn has_type_specifier(&self) -> bool {
+        self.specifier != TypeSpecifier::Unspecified
+            || self.width != Width::Unspecified
+            || self.complex != ComplexSpecifier::Unspecified
+            || self.sign != Sign::Unspecified
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum DeclaratorContext {
+    File,
+    Block,
+    Prototype,
+    KnrTypeList,
+    TypeName,
+    Member,
+    ForInit,
+    Association,
+}
+
+#[derive(Clone, Debug)]
+pub struct ParameterInformation {
+    pub name: Option<Rc<[u8]>>,
+    pub place: Place,
+    pub declaration: Option<usize>,
+}
+
+#[derive(Clone, Debug)]
+pub enum DeclaratorChunk {
+    Pointer {
+        qualifiers: u8,
+        atomic: bool,
+        place: Place,
+        restrict_place: Place,
+        atomic_place: Place,
+    },
+    Array {
+        size: Option<Expression>,
+        is_static: bool,
+        star: bool,
+        qualifiers: u8,
+        place: Place,
+        end: Place,
+    },
+    Function {
+        parameters: Vec<ParameterInformation>,
+        variadic: bool,
+        ellipsis_place: Option<Place>,
+        has_prototype: bool,
+        place: Place,
+        end: Place,
+    },
+    Paren,
+}
+
+#[derive(Clone, Debug)]
+pub struct Declarator {
+    pub context: DeclaratorContext,
+    pub name: Option<Rc<[u8]>>,
+    pub name_place: Place,
+    pub chunks: Vec<DeclaratorChunk>,
+    pub invalid: bool,
+    pub grouping_parentheses: bool,
+    pub first: bool,
+    pub start: Place,
+    pub function_definition: bool,
+    pub has_initializer: bool,
+}
+
+impl Declarator {
+    pub fn new(context: DeclaratorContext, start: Place) -> Declarator {
+        Declarator {
+            context,
+            name: None,
+            name_place: start,
+            chunks: Vec::new(),
+            invalid: false,
+            grouping_parentheses: false,
+            first: true,
+            start,
+            function_definition: false,
+            has_initializer: false,
+        }
+    }
+
+    pub fn may_omit_identifier(&self) -> bool {
+        matches!(
+            self.context,
+            DeclaratorContext::Prototype
+                | DeclaratorContext::TypeName
+                | DeclaratorContext::Member
+                | DeclaratorContext::Association
+        )
+    }
+
+    pub fn may_have_identifier(&self) -> bool {
+        !matches!(
+            self.context,
+            DeclaratorContext::TypeName | DeclaratorContext::Association
+        )
+    }
+
+    pub fn is_prototype_context(&self) -> bool {
+        self.context == DeclaratorContext::Prototype
+    }
+
+    pub fn is_function_declarator(&self) -> bool {
+        for chunk in &self.chunks {
+            match chunk {
+                DeclaratorChunk::Paren => continue,
+                DeclaratorChunk::Function { .. } => return true,
+                _ => return false,
+            }
+        }
+        false
+    }
+
+    pub fn function_chunk(&self) -> Option<&DeclaratorChunk> {
+        for chunk in &self.chunks {
+            match chunk {
+                DeclaratorChunk::Paren => continue,
+                DeclaratorChunk::Function { .. } => return Some(chunk),
+                _ => return None,
+            }
+        }
+        None
+    }
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    fn is_declaration_specifier(&mut self) -> bool {
+        if let Some(keyword) = self.keyword() {
+            return matches!(
+                keyword,
+                "typedef"
+                    | "extern"
+                    | "static"
+                    | "auto"
+                    | "register"
+                    | "__thread"
+                    | "thread_local"
+                    | "_Thread_local"
+                    | "__private_extern__"
+                    | "short"
+                    | "long"
+                    | "__int64"
+                    | "__int128"
+                    | "signed"
+                    | "unsigned"
+                    | "_Complex"
+                    | "_Imaginary"
+                    | "void"
+                    | "char"
+                    | "int"
+                    | "_BitInt"
+                    | "_ExtInt"
+                    | "half"
+                    | "__bf16"
+                    | "float"
+                    | "double"
+                    | "_Float16"
+                    | "__float128"
+                    | "__ibm128"
+                    | "bool"
+                    | "_Bool"
+                    | "_Decimal32"
+                    | "_Decimal64"
+                    | "_Decimal128"
+                    | "struct"
+                    | "union"
+                    | "enum"
+                    | "const"
+                    | "volatile"
+                    | "restrict"
+                    | "_Atomic"
+                    | "inline"
+                    | "_Noreturn"
+                    | "typeof"
+                    | "typeof_unqual"
+                    | "__auto_type"
+                    | "__attribute"
+                    | "__declspec"
+                    | "_Alignas"
+                    | "alignas"
+                    | "constexpr"
+                    | "_Nonnull"
+                    | "_Nullable"
+                    | "_Nullable_result"
+                    | "_Null_unspecified"
+                    | "__forceinline"
+                    | "__cdecl"
+                    | "__stdcall"
+                    | "__fastcall"
+                    | "__vectorcall"
+                    | "__ptr32"
+                    | "__ptr64"
+                    | "__unaligned"
+            );
+        }
+        if self.is_identifier() {
+            return self.typedef_named(&self.token.spelling.clone()).is_some();
+        }
+        false
+    }
+
+    fn is_type_name_start(&mut self) -> bool {
+        if let Some(keyword) = self.keyword() {
+            return matches!(
+                keyword,
+                "short"
+                    | "long"
+                    | "__int64"
+                    | "__int128"
+                    | "signed"
+                    | "unsigned"
+                    | "_Complex"
+                    | "_Imaginary"
+                    | "void"
+                    | "char"
+                    | "int"
+                    | "_BitInt"
+                    | "_ExtInt"
+                    | "half"
+                    | "__bf16"
+                    | "float"
+                    | "double"
+                    | "_Float16"
+                    | "__float128"
+                    | "__ibm128"
+                    | "bool"
+                    | "_Bool"
+                    | "_Decimal32"
+                    | "_Decimal64"
+                    | "_Decimal128"
+                    | "struct"
+                    | "union"
+                    | "enum"
+                    | "const"
+                    | "volatile"
+                    | "restrict"
+                    | "_Atomic"
+                    | "typeof"
+                    | "typeof_unqual"
+                    | "__attribute"
+                    | "_Alignas"
+                    | "alignas"
+                    | "_Nonnull"
+                    | "_Nullable"
+                    | "_Nullable_result"
+                    | "_Null_unspecified"
+                    | "__unaligned"
+            );
+        }
+        if self.is_identifier() {
+            return self.typedef_named(&self.token.spelling.clone()).is_some();
+        }
+        false
+    }
+
+    fn diagnose_c11_keyword(&mut self, keyword: &str, place: Place) {
+        if !self.language().at_least(CStandard::C11) {
+            self.diagnose("ext_c11_feature", place, vec![Argument::text(keyword)]);
+        }
+    }
+
+    fn report_bad_specifier(&mut self, place: Place, previous: &str, same: bool, extension: bool) {
+        if same {
+            let name = if extension {
+                "ext_warn_duplicate_declspec"
+            } else {
+                "warn_duplicate_declspec"
+            };
+            self.diagnose(name, place, vec![Argument::text(previous)]);
+        } else {
+            self.diagnose(
+                "err_invalid_decl_spec_combination",
+                place,
+                vec![Argument::text(previous)],
+            );
+        }
+    }
+
+    fn set_storage_class(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        storage: StorageClass,
+        place: Place,
+    ) {
+        if specifiers.storage != StorageClass::None {
+            let previous = specifiers.storage.name();
+            self.report_bad_specifier(place, previous, previous == storage.name(), true);
+            return;
+        }
+        specifiers.storage = storage;
+        specifiers.storage_place = place;
+    }
+
+    fn set_thread_storage(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        thread: ThreadStorage,
+        place: Place,
+    ) {
+        if specifiers.thread != ThreadStorage::None {
+            let previous = specifiers.thread.name();
+            self.report_bad_specifier(place, previous, specifiers.thread == thread, true);
+            return;
+        }
+        specifiers.thread = thread;
+        specifiers.thread_place = place;
+    }
+
+    fn set_type_specifier(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        specifier: TypeSpecifier,
+        place: Place,
+    ) -> bool {
+        if specifiers.specifier == TypeSpecifier::Error {
+            return true;
+        }
+        if specifiers.specifier != TypeSpecifier::Unspecified {
+            let bool_keyword = self.language().at_least(CStandard::C23);
+            let previous = specifiers.specifier.name(bool_keyword);
+            self.diagnose(
+                "err_invalid_decl_spec_combination",
+                place,
+                vec![Argument::text(previous)],
+            );
+            return false;
+        }
+        specifiers.specifier = specifier;
+        specifiers.specifier_place = place;
+        true
+    }
+
+    fn set_type_qualifier(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        qualifier: u8,
+        place: Place,
+    ) {
+        let present = if qualifier == 0 {
+            specifiers.atomic_qualifier
+        } else {
+            specifiers.qualifiers & qualifier != 0
+        };
+        if present {
+            let name = match qualifier {
+                QUALIFIER_CONST => "const",
+                QUALIFIER_VOLATILE => "volatile",
+                QUALIFIER_RESTRICT => "restrict",
+                _ => "_Atomic",
+            };
+            let extension = !self.language().at_least(CStandard::C99);
+            self.report_bad_specifier(place, name, true, extension);
+            return;
+        }
+        match qualifier {
+            QUALIFIER_CONST => specifiers.const_place = place,
+            QUALIFIER_VOLATILE => specifiers.volatile_place = place,
+            QUALIFIER_RESTRICT => specifiers.restrict_place = place,
+            _ => {
+                specifiers.atomic_qualifier = true;
+                specifiers.atomic_place = place;
+                return;
+            }
+        }
+        specifiers.qualifiers |= qualifier;
+    }
+
+    fn parse_declaration_specifiers(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        context: SpecifierContext,
+    ) {
+        loop {
+            let place = self.token.site;
+            let Some(keyword) = self.keyword() else {
+                if self.is_identifier() {
+                    if specifiers.has_type_specifier() {
+                        break;
+                    }
+                    let name = self.token.spelling.clone();
+                    if let Some(typedef) = self.typedef_named(&name) {
+                        let underlying = self.declarations[typedef].ty.clone();
+                        let ty = QualifiedType::new(TypeNode::Typedef {
+                            declaration: typedef,
+                            name: Rc::from(String::from_utf8_lossy(&name).as_ref()),
+                            underlying,
+                        });
+                        self.set_type_specifier(specifiers, TypeSpecifier::Typename, place);
+                        specifiers.representation = Some(ty);
+                        self.declarations[typedef].referenced = true;
+                        specifiers.parsed_anything = true;
+                        specifiers.end = place;
+                        self.consume();
+                        continue;
+                    }
+                    if self.parse_implicit_int(specifiers, context) {
+                        specifiers.parsed_anything = true;
+                        continue;
+                    }
+                }
+                break;
+            };
+            match keyword {
+                "typedef" => self.set_storage_class(specifiers, StorageClass::Typedef, place),
+                "extern" => {
+                    if specifiers.thread == ThreadStorage::GnuThread {
+                        self.diagnose("ext_thread_before", place, vec![Argument::text("extern")]);
+                    }
+                    self.set_storage_class(specifiers, StorageClass::Extern, place)
+                }
+                "__private_extern__" => {
+                    self.set_storage_class(specifiers, StorageClass::PrivateExtern, place)
+                }
+                "static" => {
+                    if specifiers.thread == ThreadStorage::GnuThread {
+                        self.diagnose("ext_thread_before", place, vec![Argument::text("static")]);
+                    }
+                    self.set_storage_class(specifiers, StorageClass::Static, place)
+                }
+                "auto" => {
+                    if self.language().at_least(CStandard::C23) {
+                        self.unsupported("C23 auto");
+                        return;
+                    }
+                    self.set_storage_class(specifiers, StorageClass::Auto, place)
+                }
+                "register" => self.set_storage_class(specifiers, StorageClass::Register, place),
+                "__thread" => self.set_thread_storage(specifiers, ThreadStorage::GnuThread, place),
+                "thread_local" => {
+                    if self.language().at_least(CStandard::C23) {
+                        self.diagnose(
+                            "warn_c23_compat_keyword",
+                            place,
+                            vec![Argument::text("thread_local")],
+                        );
+                        self.set_thread_storage(specifiers, ThreadStorage::ThreadLocalC11, place)
+                    } else {
+                        self.set_thread_storage(specifiers, ThreadStorage::ThreadLocal, place)
+                    }
+                }
+                "_Thread_local" => {
+                    self.diagnose_c11_keyword("_Thread_local", place);
+                    self.set_thread_storage(specifiers, ThreadStorage::ThreadLocalC11, place)
+                }
+                "inline" => {
+                    if specifiers.inline {
+                        self.diagnose(
+                            "warn_duplicate_declspec",
+                            place,
+                            vec![Argument::text("inline")],
+                        );
+                    } else {
+                        specifiers.inline = true;
+                        specifiers.inline_place = place;
+                    }
+                }
+                "_Noreturn" => {
+                    self.diagnose_c11_keyword("_Noreturn", place);
+                    if specifiers.noreturn {
+                        self.diagnose(
+                            "warn_duplicate_declspec",
+                            place,
+                            vec![Argument::text("_Noreturn")],
+                        );
+                    } else {
+                        specifiers.noreturn = true;
+                        specifiers.noreturn_place = place;
+                    }
+                }
+                "constexpr" => {
+                    self.unsupported("C23 constexpr");
+                    return;
+                }
+                "short" => {
+                    if specifiers.width != Width::Unspecified {
+                        let previous = specifiers.width.name();
+                        self.report_bad_specifier(
+                            place,
+                            previous,
+                            specifiers.width == Width::Short,
+                            true,
+                        );
+                    } else {
+                        specifiers.width = Width::Short;
+                        specifiers.width_place = place;
+                    }
+                }
+                "long" => match specifiers.width {
+                    Width::Unspecified => {
+                        specifiers.width = Width::Long;
+                        specifiers.width_place = place;
+                    }
+                    Width::Long => specifiers.width = Width::LongLong,
+                    other => {
+                        let previous = other.name();
+                        self.report_bad_specifier(place, previous, false, true);
+                    }
+                },
+                "__int64" => {
+                    self.unsupported("__int64");
+                    return;
+                }
+                "signed" | "unsigned" => {
+                    let sign = if keyword == "signed" {
+                        Sign::Signed
+                    } else {
+                        Sign::Unsigned
+                    };
+                    if specifiers.sign != Sign::Unspecified {
+                        let previous = specifiers.sign.name();
+                        self.report_bad_specifier(place, previous, specifiers.sign == sign, true);
+                    } else {
+                        specifiers.sign = sign;
+                        specifiers.sign_place = place;
+                    }
+                }
+                "_Complex" | "_Imaginary" => {
+                    if !self.language().at_least(CStandard::C99) {
+                        self.diagnose("ext_c99_feature", place, vec![Argument::text(keyword)]);
+                    }
+                    let complex = if keyword == "_Complex" {
+                        ComplexSpecifier::Complex
+                    } else {
+                        ComplexSpecifier::Imaginary
+                    };
+                    if specifiers.complex != ComplexSpecifier::Unspecified {
+                        let previous = specifiers.complex.name();
+                        self.report_bad_specifier(
+                            place,
+                            previous,
+                            specifiers.complex == complex,
+                            true,
+                        );
+                    } else {
+                        specifiers.complex = complex;
+                        specifiers.complex_place = place;
+                    }
+                }
+                "void" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Void, place);
+                }
+                "char" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Char, place);
+                }
+                "int" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Int, place);
+                }
+                "__int128" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Int128, place);
+                }
+                "half" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Half, place);
+                }
+                "__bf16" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::BFloat16, place);
+                }
+                "float" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Float, place);
+                }
+                "double" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Double, place);
+                }
+                "_Float16" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Float16, place);
+                }
+                "__float128" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Float128, place);
+                }
+                "__ibm128" => {
+                    self.set_type_specifier(specifiers, TypeSpecifier::Ibm128, place);
+                }
+                "bool" | "_Bool" => {
+                    if keyword == "bool" && self.language().at_least(CStandard::C23) {
+                        self.diagnose(
+                            "warn_c23_compat_keyword",
+                            place,
+                            vec![Argument::text("bool")],
+                        );
+                    }
+                    if keyword == "_Bool" && !self.language().at_least(CStandard::C99) {
+                        self.diagnose("ext_c99_feature", place, vec![Argument::text("_Bool")]);
+                    }
+                    self.set_type_specifier(specifiers, TypeSpecifier::Bool, place);
+                }
+                "_Decimal32" | "_Decimal64" | "_Decimal128" => {
+                    let specifier = match keyword {
+                        "_Decimal32" => TypeSpecifier::Decimal32,
+                        "_Decimal64" => TypeSpecifier::Decimal64,
+                        _ => TypeSpecifier::Decimal128,
+                    };
+                    self.set_type_specifier(specifiers, specifier, place);
+                }
+                "const" => self.set_type_qualifier(specifiers, QUALIFIER_CONST, place),
+                "volatile" => self.set_type_qualifier(specifiers, QUALIFIER_VOLATILE, place),
+                "restrict" => self.set_type_qualifier(specifiers, QUALIFIER_RESTRICT, place),
+                "_Atomic" => {
+                    self.diagnose_c11_keyword("_Atomic", place);
+                    if self.peek(1).kind == TokenKind::LeftParen {
+                        self.parse_atomic_specifier(specifiers);
+                        specifiers.parsed_anything = true;
+                        continue;
+                    }
+                    self.set_type_qualifier(specifiers, 0, place);
+                }
+                "struct" | "union" => {
+                    self.consume();
+                    let kind = if keyword == "struct" {
+                        TagKind::Struct
+                    } else {
+                        TagKind::Union
+                    };
+                    self.parse_record_specifier(specifiers, kind, place, context);
+                    specifiers.parsed_anything = true;
+                    continue;
+                }
+                "enum" => {
+                    self.consume();
+                    self.parse_enum_specifier(specifiers, place, context);
+                    specifiers.parsed_anything = true;
+                    continue;
+                }
+                "typeof" | "typeof_unqual" => {
+                    self.parse_typeof_specifier(specifiers, keyword == "typeof_unqual");
+                    specifiers.parsed_anything = true;
+                    continue;
+                }
+                "_BitInt" | "_ExtInt" => {
+                    self.unsupported("_BitInt");
+                    return;
+                }
+                "__auto_type" => {
+                    self.unsupported("__auto_type");
+                    return;
+                }
+                "__attribute" => {
+                    self.unsupported("GNU attributes");
+                    return;
+                }
+                "__declspec" => {
+                    self.unsupported("__declspec");
+                    return;
+                }
+                "_Alignas" | "alignas" => {
+                    self.unsupported("alignment specifier");
+                    return;
+                }
+                "_Nonnull" | "_Nullable" | "_Nullable_result" | "_Null_unspecified" => {
+                    self.unsupported("nullability specifier");
+                    return;
+                }
+                "__forceinline" | "__cdecl" | "__stdcall" | "__fastcall" | "__vectorcall"
+                | "__ptr32" | "__ptr64" | "__unaligned" | "__sptr" | "__uptr" | "__w64"
+                | "__regcall" | "__thiscall" | "__pascal" | "__kernel" | "__noinline__"
+                | "__funcref" | "__ptrauth" | "__kindof" => {
+                    self.unsupported(format!("keyword {keyword}"));
+                    return;
+                }
+                _ => break,
+            }
+            specifiers.parsed_anything = true;
+            specifiers.end = place;
+            self.consume();
+        }
+        self.finish_declaration_specifiers(specifiers);
+    }
+
+    fn is_valid_after_identifier_in_declarator(token: &Token, keyword: Option<&str>) -> bool {
+        matches!(
+            token.kind,
+            TokenKind::LeftSquare
+                | TokenKind::LeftParen
+                | TokenKind::RightParen
+                | TokenKind::Semi
+                | TokenKind::Comma
+                | TokenKind::Equal
+                | TokenKind::LeftBrace
+                | TokenKind::Colon
+        ) || keyword == Some("asm")
+    }
+
+    fn parse_implicit_int(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        context: SpecifierContext,
+    ) -> bool {
+        let place = self.token.site;
+        let next = self.peek(1);
+        let next_keyword = self.keyword_of(&next);
+        let implicit_int_allowed = !self.language().at_least(CStandard::C23);
+        let type_specifier_context = context == SpecifierContext::TypeSpecifier;
+        if !type_specifier_context
+            && implicit_int_allowed
+            && Parser::is_valid_after_identifier_in_declarator(&next, next_keyword)
+        {
+            return false;
+        }
+        let name = self.token.spelling.clone();
+        if let Some((tag, _)) = self.lookup_tag(&name) {
+            let _ = tag;
+            self.unsupported("tag name used without tag keyword");
+            return true;
+        }
+        if !type_specifier_context {
+            match next.kind {
+                TokenKind::LeftParen => {
+                    self.unsupported("implicit int with parenthesized declarator");
+                    return true;
+                }
+                TokenKind::Comma
+                | TokenKind::Equal
+                | TokenKind::LeftBrace
+                | TokenKind::LeftSquare
+                | TokenKind::Semi => {
+                    if self.scope_flags() & SCOPE_PROTOTYPE == 0 {
+                        return false;
+                    }
+                }
+                _ if next_keyword == Some("asm") && self.scope_flags() & SCOPE_PROTOTYPE == 0 => {
+                    return false;
+                }
+                _ => {}
+            }
+        }
+        if self.has_typo_candidates(&name) {
+            self.unsupported("typo correction for unknown type name");
+            return true;
+        }
+        self.diagnose("err_unknown_typename", place, vec![Argument::Name(name)]);
+        specifiers.specifier = TypeSpecifier::Error;
+        specifiers.specifier_place = place;
+        specifiers.end = place;
+        self.consume();
+        true
+    }
+
+    fn has_typo_candidates(&self, name: &[u8]) -> bool {
+        if !self.preprocessor.options.spell_checking {
+            return false;
+        }
+        let typed = String::from_utf8_lossy(name).to_string();
+        let limit = typed.len().div_ceil(3);
+        for scope in &self.scopes {
+            for candidate in scope.ordinary.keys() {
+                let candidate = String::from_utf8_lossy(candidate);
+                if edit_distance(&typed, &candidate) <= limit {
+                    return true;
+                }
+            }
+            for candidate in scope.tags.keys() {
+                let candidate = String::from_utf8_lossy(candidate);
+                if edit_distance(&typed, &candidate) <= limit {
+                    return true;
+                }
+            }
+        }
+        for (spelling, _, _) in KEYWORD_TABLE.iter() {
+            if edit_distance(&typed, spelling) <= limit
+                && keyword_kind(self.language(), spelling.as_bytes()).is_some()
+            {
+                return true;
+            }
+        }
+        false
+    }
+
+    fn finish_declaration_specifiers(&mut self, specifiers: &mut DeclarationSpecifiers) {
+        if specifiers.specifier == TypeSpecifier::Error {
+            return;
+        }
+        let bool_keyword = self.language().at_least(CStandard::C23);
+        if specifiers.sign != Sign::Unspecified {
+            if specifiers.specifier == TypeSpecifier::Unspecified {
+                specifiers.specifier = TypeSpecifier::Int;
+            } else if !matches!(
+                specifiers.specifier,
+                TypeSpecifier::Int
+                    | TypeSpecifier::Int128
+                    | TypeSpecifier::Char
+                    | TypeSpecifier::BitInt
+            ) {
+                let name = specifiers.specifier.name(bool_keyword);
+                self.diagnose(
+                    "err_invalid_sign_spec",
+                    specifiers.sign_place,
+                    vec![Argument::text(name)],
+                );
+                specifiers.sign = Sign::Unspecified;
+            }
+        }
+        match specifiers.width {
+            Width::Unspecified => {}
+            Width::Short | Width::LongLong => {
+                if specifiers.specifier == TypeSpecifier::Unspecified {
+                    specifiers.specifier = TypeSpecifier::Int;
+                } else if specifiers.specifier != TypeSpecifier::Int {
+                    let name = specifiers.specifier.name(bool_keyword);
+                    self.diagnose(
+                        "err_invalid_width_spec",
+                        specifiers.width_place,
+                        vec![
+                            Argument::number(specifiers.width.index()),
+                            Argument::text(name),
+                        ],
+                    );
+                    specifiers.specifier = TypeSpecifier::Int;
+                    specifiers.specifier_owned = false;
+                }
+            }
+            Width::Long => {
+                if specifiers.specifier == TypeSpecifier::Unspecified {
+                    specifiers.specifier = TypeSpecifier::Int;
+                } else if specifiers.specifier != TypeSpecifier::Int
+                    && specifiers.specifier != TypeSpecifier::Double
+                {
+                    let name = specifiers.specifier.name(bool_keyword);
+                    self.diagnose(
+                        "err_invalid_width_spec",
+                        specifiers.width_place,
+                        vec![
+                            Argument::number(specifiers.width.index()),
+                            Argument::text(name),
+                        ],
+                    );
+                    specifiers.specifier = TypeSpecifier::Int;
+                    specifiers.specifier_owned = false;
+                }
+            }
+        }
+        if specifiers.complex != ComplexSpecifier::Unspecified {
+            if specifiers.specifier == TypeSpecifier::Unspecified {
+                self.diagnose("ext_plain_complex", specifiers.complex_place, Vec::new());
+                specifiers.specifier = TypeSpecifier::Double;
+            } else if specifiers.specifier == TypeSpecifier::Int
+                || specifiers.specifier == TypeSpecifier::Char
+            {
+                self.diagnose(
+                    "ext_integer_complex",
+                    specifiers.specifier_place,
+                    Vec::new(),
+                );
+            } else if !matches!(
+                specifiers.specifier,
+                TypeSpecifier::Float
+                    | TypeSpecifier::Double
+                    | TypeSpecifier::Float128
+                    | TypeSpecifier::Float16
+                    | TypeSpecifier::Ibm128
+            ) {
+                let name = specifiers.specifier.name(bool_keyword);
+                self.diagnose(
+                    "err_invalid_complex_spec",
+                    specifiers.complex_place,
+                    vec![Argument::text(name)],
+                );
+                specifiers.complex = ComplexSpecifier::Unspecified;
+            }
+        }
+        if specifiers.thread != ThreadStorage::None {
+            match specifiers.storage {
+                StorageClass::None
+                | StorageClass::Extern
+                | StorageClass::PrivateExtern
+                | StorageClass::Static => {}
+                _ => {
+                    if specifiers.thread_place.buffer == specifiers.storage_place.buffer
+                        && specifiers.thread_place.offset < specifiers.storage_place.offset
+                    {
+                        let name = specifiers.thread.name();
+                        self.diagnose(
+                            "err_invalid_decl_spec_combination",
+                            specifiers.storage_place,
+                            vec![Argument::text(name)],
+                        );
+                    } else {
+                        let name = specifiers.storage.name();
+                        self.diagnose(
+                            "err_invalid_decl_spec_combination",
+                            specifiers.thread_place,
+                            vec![Argument::text(name)],
+                        );
+                    }
+                    specifiers.thread = ThreadStorage::None;
+                }
+            }
+        }
+    }
+
+    fn parse_atomic_specifier(&mut self, specifiers: &mut DeclarationSpecifiers) {
+        let place = self.consume();
+        self.consume();
+        let Some(ty) = self.parse_type_name() else {
+            self.skip_until(&[TokenKind::RightParen], true, false);
+            specifiers.specifier = TypeSpecifier::Error;
+            return;
+        };
+        if !self.expect_closing(TokenKind::RightParen, place) {
+            return;
+        }
+        if self.set_type_specifier(specifiers, TypeSpecifier::Atomic, place) {
+            specifiers.representation = Some(ty);
+        }
+        specifiers.end = self.previous_place;
+    }
+
+    fn parse_typeof_specifier(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        unqualified: bool,
+    ) {
+        let spelling = String::from_utf8_lossy(&self.token.spelling).into_owned();
+        let keyword_place = self.consume();
+        if self.language().at_least(CStandard::C23) && !spelling.starts_with("__") {
+            let name = if unqualified {
+                "typeof_unqual"
+            } else {
+                "typeof"
+            };
+            self.diagnose(
+                "warn_c23_compat_keyword",
+                keyword_place,
+                vec![Argument::text(name)],
+            );
+        }
+        let Some(open) = self.try_consume(TokenKind::LeftParen) else {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_after",
+                place,
+                vec![Argument::Text(spelling), Argument::text("'('")],
+            );
+            specifiers.specifier = TypeSpecifier::Error;
+            return;
+        };
+        if self.is_type_name_start() {
+            let Some(ty) = self.parse_type_name() else {
+                self.skip_until(&[TokenKind::RightParen], true, false);
+                specifiers.specifier = TypeSpecifier::Error;
+                return;
+            };
+            self.expect_closing(TokenKind::RightParen, open);
+            let specifier = if unqualified {
+                TypeSpecifier::TypeOfUnqualifiedType
+            } else {
+                TypeSpecifier::TypeOfType
+            };
+            if self.set_type_specifier(specifiers, specifier, keyword_place) {
+                specifiers.representation = Some(QualifiedType::new(TypeNode::TypeOfType {
+                    written: ty,
+                    unqualified,
+                }));
+            }
+        } else {
+            let Some(expression) = self.parse_expression_in_unevaluated_context() else {
+                self.skip_until(&[TokenKind::RightParen], true, false);
+                specifiers.specifier = TypeSpecifier::Error;
+                return;
+            };
+            self.expect_closing(TokenKind::RightParen, open);
+            if expression.is_bit_field(self) {
+                self.diagnose(
+                    "err_sizeof_alignof_typeof_bitfield",
+                    expression.start,
+                    vec![Argument::number(2)],
+                );
+            }
+            let specifier = if unqualified {
+                TypeSpecifier::TypeOfUnqualifiedExpression
+            } else {
+                TypeSpecifier::TypeOfExpression
+            };
+            if self.set_type_specifier(specifiers, specifier, keyword_place) {
+                let text = format!("({})", self.print_expression(&expression));
+                specifiers.representation = Some(QualifiedType::new(TypeNode::TypeOfExpression {
+                    text,
+                    underlying: expression.ty.clone(),
+                    unqualified,
+                }));
+            }
+        }
+        specifiers.end = self.previous_place;
+    }
+
+    fn parse_type_qualifier_list(
+        &mut self,
+        qualifiers: &mut u8,
+        atomic: &mut bool,
+        restrict_place: &mut Place,
+        atomic_place: &mut Place,
+        allow_static_atomic_paren: bool,
+    ) {
+        let _ = allow_static_atomic_paren;
+        loop {
+            let place = self.token.site;
+            let qualifier = match self.keyword() {
+                Some("const") => QUALIFIER_CONST,
+                Some("volatile") => QUALIFIER_VOLATILE,
+                Some("restrict") => QUALIFIER_RESTRICT,
+                Some("_Atomic") => {
+                    self.diagnose_c11_keyword("_Atomic", place);
+                    if *atomic {
+                        let extension = !self.language().at_least(CStandard::C99);
+                        self.report_bad_specifier(place, "_Atomic", true, extension);
+                    }
+                    *atomic = true;
+                    *atomic_place = place;
+                    self.consume();
+                    continue;
+                }
+                Some("__attribute") => {
+                    self.unsupported("GNU attributes");
+                    return;
+                }
+                Some(
+                    "_Nonnull" | "_Nullable" | "_Nullable_result" | "_Null_unspecified"
+                    | "__unaligned" | "__ptr32" | "__ptr64" | "__sptr" | "__uptr" | "__w64"
+                    | "__cdecl" | "__stdcall" | "__fastcall" | "__vectorcall" | "__regcall"
+                    | "__thiscall",
+                ) => {
+                    self.unsupported("type qualifier extension");
+                    return;
+                }
+                _ => return,
+            };
+            if *qualifiers & qualifier != 0 {
+                let name = match qualifier {
+                    QUALIFIER_CONST => "const",
+                    QUALIFIER_VOLATILE => "volatile",
+                    _ => "restrict",
+                };
+                let extension = !self.language().at_least(CStandard::C99);
+                self.report_bad_specifier(place, name, true, extension);
+            }
+            if qualifier == QUALIFIER_RESTRICT {
+                *restrict_place = place;
+            }
+            *qualifiers |= qualifier;
+            self.consume();
+        }
+    }
+
+    fn parse_declarator(&mut self, declarator: &mut Declarator) {
+        if self.at(TokenKind::Star) {
+            let place = self.consume();
+            let mut qualifiers = 0u8;
+            let mut atomic = false;
+            let mut restrict_place = place;
+            let mut atomic_place = place;
+            self.parse_type_qualifier_list(
+                &mut qualifiers,
+                &mut atomic,
+                &mut restrict_place,
+                &mut atomic_place,
+                false,
+            );
+            self.parse_declarator(declarator);
+            declarator.chunks.push(DeclaratorChunk::Pointer {
+                qualifiers,
+                atomic,
+                place,
+                restrict_place,
+                atomic_place,
+            });
+            return;
+        }
+        if self.at(TokenKind::Caret) {
+            self.unsupported("block pointer");
+            return;
+        }
+        self.parse_direct_declarator(declarator);
+    }
+
+    fn parse_direct_declarator(&mut self, declarator: &mut Declarator) {
+        if self.is_identifier() && declarator.may_have_identifier() {
+            declarator.name = Some(self.token.spelling.clone());
+            declarator.name_place = self.token.site;
+            self.consume();
+        } else if self.at(TokenKind::LeftParen) {
+            self.parse_parenthesized_declarator(declarator);
+        } else if declarator.may_omit_identifier() {
+            declarator.name_place = self.token.site;
+        } else {
+            let place = self.token.site;
+            if self.at(TokenKind::LeftSquare) {
+                self.unsupported("misplaced bracket declarator");
+                return;
+            }
+            if declarator.context == DeclaratorContext::Member {
+                self.diagnose("err_expected_member_name_or_semi", place, Vec::new());
+            } else if self.is_keyword("while") {
+                self.diagnose("err_while_loop_outside_of_a_function", place, Vec::new());
+            } else {
+                self.diagnose(
+                    "err_expected_either",
+                    place,
+                    vec![Argument::text("identifier"), Argument::text("'('")],
+                );
+            }
+            declarator.name_place = place;
+            declarator.invalid = true;
+        }
+        loop {
+            if self.unsupported.is_some() {
+                return;
+            }
+            if self.at(TokenKind::LeftParen) {
+                let open = self.consume();
+                let function_declaration = declarator.chunks.is_empty()
+                    && declarator.name.is_some()
+                    || declarator
+                        .chunks
+                        .iter()
+                        .all(|chunk| matches!(chunk, DeclaratorChunk::Paren));
+                let mut flags = SCOPE_PROTOTYPE;
+                if function_declaration {
+                    flags |= SCOPE_FUNCTION_DECLARATION;
+                }
+                self.push_scope(flags);
+                self.parse_function_declarator(declarator, open);
+                self.pop_scope();
+            } else if self.at(TokenKind::LeftSquare) {
+                self.parse_bracket_declarator(declarator);
+            } else {
+                break;
+            }
+        }
+    }
+
+    fn parse_parenthesized_declarator(&mut self, declarator: &mut Declarator) {
+        let open_token_is_paren = self.at(TokenKind::LeftParen);
+        debug_assert!(open_token_is_paren);
+        let next = self.peek(1);
+        let next_keyword = self.keyword_of(&next);
+        if next_keyword == Some("__attribute") {
+            self.unsupported("GNU attributes in parenthesized declarator");
+            return;
+        }
+        let grouping = if !declarator.may_omit_identifier() {
+            true
+        } else if next.kind == TokenKind::RightParen
+            || (self.language().at_least(CStandard::C23)
+                && next.kind == TokenKind::Ellipsis
+                && self.peek(2).kind == TokenKind::RightParen)
+        {
+            false
+        } else {
+            !self.token_starts_declaration_specifier(&next, next_keyword)
+        };
+        let open = self.consume();
+        if grouping {
+            let had = declarator.grouping_parentheses;
+            declarator.grouping_parentheses = true;
+            self.parse_declarator(declarator);
+            if !self.expect_closing(TokenKind::RightParen, open) {
+                declarator.invalid = true;
+            }
+            declarator.chunks.push(DeclaratorChunk::Paren);
+            declarator.grouping_parentheses = had;
+            return;
+        }
+        declarator.name_place = self.token.site;
+        let function_declaration = false;
+        let mut flags = SCOPE_PROTOTYPE;
+        if function_declaration {
+            flags |= SCOPE_FUNCTION_DECLARATION;
+        }
+        self.push_scope(flags);
+        self.parse_function_declarator(declarator, open);
+        self.pop_scope();
+    }
+
+    fn token_starts_declaration_specifier(
+        &mut self,
+        token: &Token,
+        keyword: Option<&'static str>,
+    ) -> bool {
+        if let Some(keyword) = keyword {
+            return matches!(
+                keyword,
+                "typedef"
+                    | "extern"
+                    | "static"
+                    | "auto"
+                    | "register"
+                    | "__thread"
+                    | "thread_local"
+                    | "_Thread_local"
+                    | "__private_extern__"
+                    | "short"
+                    | "long"
+                    | "__int64"
+                    | "__int128"
+                    | "signed"
+                    | "unsigned"
+                    | "_Complex"
+                    | "_Imaginary"
+                    | "void"
+                    | "char"
+                    | "int"
+                    | "_BitInt"
+                    | "_ExtInt"
+                    | "half"
+                    | "__bf16"
+                    | "float"
+                    | "double"
+                    | "_Float16"
+                    | "__float128"
+                    | "__ibm128"
+                    | "bool"
+                    | "_Bool"
+                    | "_Decimal32"
+                    | "_Decimal64"
+                    | "_Decimal128"
+                    | "struct"
+                    | "union"
+                    | "enum"
+                    | "const"
+                    | "volatile"
+                    | "restrict"
+                    | "_Atomic"
+                    | "inline"
+                    | "_Noreturn"
+                    | "typeof"
+                    | "typeof_unqual"
+                    | "__auto_type"
+                    | "__attribute"
+                    | "__declspec"
+                    | "_Alignas"
+                    | "alignas"
+                    | "constexpr"
+            );
+        }
+        if token.kind == TokenKind::Identifier {
+            return self.typedef_named(&token.spelling).is_some();
+        }
+        false
+    }
+
+    fn parse_function_declarator(&mut self, declarator: &mut Declarator, open: Place) {
+        let mut parameters = Vec::new();
+        let mut ellipsis_place = None;
+        let requires_strict = self.language().at_least(CStandard::C23);
+        let has_prototype = if !requires_strict && self.is_function_declarator_identifier_list() {
+            if declarator.name.is_none()
+                && declarator
+                    .chunks
+                    .iter()
+                    .all(|chunk| matches!(chunk, DeclaratorChunk::Paren))
+            {
+                let place = self.token.site;
+                self.diagnose("ext_ident_list_in_param", place, Vec::new());
+            }
+            let mut seen: Vec<Rc<[u8]>> = Vec::new();
+            loop {
+                if !self.is_identifier() {
+                    let place = self.token.site;
+                    self.diagnose("err_expected", place, vec![Argument::text("identifier")]);
+                    self.skip_until(&[TokenKind::RightParen], true, true);
+                    parameters.clear();
+                    break;
+                }
+                let name = self.token.spelling.clone();
+                let place = self.token.site;
+                if self.typedef_named(&name).is_some() {
+                    self.diagnose(
+                        "err_unexpected_typedef_ident",
+                        place,
+                        vec![Argument::Name(name.clone())],
+                    );
+                }
+                if seen.contains(&name) {
+                    self.diagnose(
+                        "err_param_redefinition",
+                        place,
+                        vec![Argument::Name(name.clone())],
+                    );
+                } else {
+                    seen.push(name.clone());
+                    parameters.push(ParameterInformation {
+                        name: Some(name),
+                        place,
+                        declaration: None,
+                    });
+                }
+                self.consume();
+                if self.try_consume(TokenKind::Comma).is_none() {
+                    break;
+                }
+            }
+            false
+        } else {
+            if !self.at(TokenKind::RightParen) {
+                self.parse_parameter_declaration_clause(&mut parameters, &mut ellipsis_place);
+            }
+            !parameters.is_empty() || requires_strict || ellipsis_place.is_some()
+        };
+        let end = self.token.site;
+        if !self.expect_closing(TokenKind::RightParen, open) {
+            declarator.invalid = true;
+        }
+        declarator.chunks.push(DeclaratorChunk::Function {
+            parameters,
+            variadic: ellipsis_place.is_some(),
+            ellipsis_place,
+            has_prototype,
+            place: open,
+            end,
+        });
+    }
+
+    fn is_function_declarator_identifier_list(&mut self) -> bool {
+        if !self.is_identifier() {
+            return false;
+        }
+        if self.typedef_named(&self.token.spelling.clone()).is_some() {
+            return false;
+        }
+        let next = self.peek(1);
+        matches!(next.kind, TokenKind::Comma | TokenKind::RightParen)
+    }
+
+    fn parse_parameter_declaration_clause(
+        &mut self,
+        parameters: &mut Vec<ParameterInformation>,
+        ellipsis_place: &mut Option<Place>,
+    ) {
+        loop {
+            if let Some(place) = self.try_consume(TokenKind::Ellipsis) {
+                *ellipsis_place = Some(place);
+                break;
+            }
+            let start = self.token.site;
+            let mut specifiers = DeclarationSpecifiers::new(start);
+            self.parse_declaration_specifiers(&mut specifiers, SpecifierContext::Normal);
+            if self.unsupported.is_some() {
+                return;
+            }
+            let mut declarator = Declarator::new(DeclaratorContext::Prototype, start);
+            self.parse_declarator(&mut declarator);
+            if self.is_keyword("__attribute") {
+                self.unsupported("GNU attributes on parameter");
+                return;
+            }
+            if !specifiers.parsed_anything
+                && declarator.name.is_none()
+                && declarator.chunks.is_empty()
+            {
+                self.diagnose("err_missing_param", start, Vec::new());
+            } else {
+                if !declarator.invalid && declarator.name.is_none() && self.keyword().is_some() {
+                    let place = self.token.site;
+                    let spelling = String::from_utf8_lossy(&self.token.spelling).into_owned();
+                    self.diagnose(
+                        "err_keyword_as_parameter",
+                        place,
+                        vec![Argument::Text(spelling)],
+                    );
+                    self.consume();
+                }
+                let declaration =
+                    self.act_on_parameter_declarator(&mut specifiers, &mut declarator);
+                if self.at(TokenKind::Equal) {
+                    let equal = self.consume();
+                    self.diagnose("err_param_default_argument", equal, Vec::new());
+                    let _ = self.parse_assignment_expression();
+                    self.declarations[declaration].invalid = true;
+                }
+                parameters.push(ParameterInformation {
+                    name: declarator.name.clone(),
+                    place: declarator.name_place,
+                    declaration: Some(declaration),
+                });
+            }
+            if let Some(place) = self.try_consume(TokenKind::Ellipsis) {
+                self.diagnose("err_missing_comma_before_ellipsis", place, Vec::new());
+                *ellipsis_place = Some(place);
+                break;
+            }
+            if self.try_consume(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+    }
+
+    fn parse_bracket_declarator(&mut self, declarator: &mut Declarator) {
+        let open = self.consume();
+        if self.at(TokenKind::RightSquare) {
+            let end = self.consume();
+            declarator.chunks.push(DeclaratorChunk::Array {
+                size: None,
+                is_static: false,
+                star: false,
+                qualifiers: 0,
+                place: open,
+                end,
+            });
+            return;
+        }
+        let mut static_place = self.try_consume_keyword("static");
+        let mut qualifiers = 0u8;
+        let mut atomic = false;
+        let mut restrict_place = open;
+        let mut atomic_place = open;
+        self.parse_type_qualifier_list(
+            &mut qualifiers,
+            &mut atomic,
+            &mut restrict_place,
+            &mut atomic_place,
+            true,
+        );
+        if atomic {
+            self.unsupported("_Atomic in array declarator");
+            return;
+        }
+        if static_place.is_none() {
+            static_place = self.try_consume_keyword("static");
+        }
+        let mut star = false;
+        let mut size = None;
+        if self.at(TokenKind::Star) && self.peek(1).kind == TokenKind::RightSquare {
+            self.consume();
+            if let Some(place) = static_place {
+                self.diagnose("err_unspecified_vla_size_with_static", place, Vec::new());
+                static_place = None;
+            }
+            star = true;
+        } else if !self.at(TokenKind::RightSquare) {
+            self.constant_context_depth += 1;
+            let parsed = self.parse_assignment_expression();
+            self.constant_context_depth -= 1;
+            match parsed {
+                Some(expression) => size = Some(expression),
+                None => {
+                    declarator.invalid = true;
+                    self.skip_until(&[TokenKind::RightSquare], false, false);
+                    return;
+                }
+            }
+        } else if let Some(place) = static_place {
+            self.diagnose("err_unspecified_size_with_static", place, Vec::new());
+            static_place = None;
+        }
+        let end = self.token.site;
+        if !self.expect_closing(TokenKind::RightSquare, open) {
+            declarator.invalid = true;
+        }
+        declarator.chunks.push(DeclaratorChunk::Array {
+            size,
+            is_static: static_place.is_some(),
+            star,
+            qualifiers,
+            place: open,
+            end,
+        });
+    }
+
+    fn expect_closing(&mut self, kind: TokenKind, open: Place) -> bool {
+        if self.try_consume(kind).is_some() {
+            return true;
+        }
+        if self.unsupported.is_some() {
+            return false;
+        }
+        let (text, open_text) = match kind {
+            TokenKind::RightParen => ("')'", "'('"),
+            TokenKind::RightSquare => ("']'", "'['"),
+            _ => ("'}'", "'{'"),
+        };
+        let place = self.token.site;
+        self.diagnose("err_expected", place, vec![Argument::text(text)]);
+        self.diagnose("note_matching", open, vec![Argument::text(open_text)]);
+        self.skip_until(&[kind], true, false);
+        false
+    }
+
+    fn skip_until(
+        &mut self,
+        kinds: &[TokenKind],
+        stop_at_semicolon: bool,
+        stop_before_match: bool,
+    ) -> bool {
+        let mut first = true;
+        loop {
+            if kinds.contains(&self.token.kind) {
+                if !stop_before_match {
+                    self.consume();
+                }
+                return true;
+            }
+            if kinds.len() == 1 && kinds[0] == TokenKind::EndOfFile && !stop_at_semicolon {
+                while !self.at(TokenKind::EndOfFile) {
+                    self.consume();
+                }
+                return true;
+            }
+            match self.token.kind {
+                TokenKind::EndOfFile => return false,
+                TokenKind::LeftParen => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::RightParen], false, false);
+                }
+                TokenKind::LeftSquare => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::RightSquare], false, false);
+                }
+                TokenKind::LeftBrace => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::RightBrace], false, false);
+                }
+                TokenKind::Question => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::Colon], stop_at_semicolon, false);
+                }
+                TokenKind::RightParen => {
+                    if self.parenthesis_depth > 0 && !first {
+                        return false;
+                    }
+                    self.consume();
+                }
+                TokenKind::RightSquare => {
+                    if self.bracket_depth > 0 && !first {
+                        return false;
+                    }
+                    self.consume();
+                }
+                TokenKind::RightBrace => {
+                    if self.brace_depth > 0 && !first {
+                        return false;
+                    }
+                    self.consume();
+                }
+                TokenKind::Semi if stop_at_semicolon => return false,
+                _ => {
+                    self.consume();
+                }
+            }
+            first = false;
+        }
+    }
+
+    fn save_balance(&mut self) -> (i32, i32, i32) {
+        (self.parenthesis_depth, self.bracket_depth, self.brace_depth)
+    }
+
+    fn restore_balance(&mut self, saved: (i32, i32, i32)) {
+        self.parenthesis_depth = saved.0;
+        self.bracket_depth = saved.1;
+        self.brace_depth = saved.2;
+    }
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    fn convert_declaration_specifiers_to_type(
+        &mut self,
+        specifiers: &DeclarationSpecifiers,
+        declarator: &mut Declarator,
+    ) -> QualifiedType {
+        let declaration_place = if declarator.name.is_some() {
+            declarator.name_place
+        } else {
+            specifiers.start
+        };
+        let language = self.language().clone();
+        let mut result = match specifiers.specifier {
+            TypeSpecifier::Void => QualifiedType::builtin(BuiltinType::Void),
+            TypeSpecifier::Char => match specifiers.sign {
+                Sign::Unspecified => self.char_type(),
+                Sign::Signed => QualifiedType::builtin(BuiltinType::SignedChar),
+                Sign::Unsigned => QualifiedType::builtin(BuiltinType::UnsignedChar),
+            },
+            TypeSpecifier::Unspecified | TypeSpecifier::Int => {
+                if specifiers.specifier == TypeSpecifier::Unspecified
+                    && !specifiers.has_type_specifier()
+                {
+                    if !language.at_least(CStandard::C99) {
+                        if declarator.first {
+                            self.diagnose(
+                                "warn_missing_type_specifier",
+                                declaration_place,
+                                Vec::new(),
+                            );
+                        }
+                    } else if language.at_least(CStandard::C23) {
+                        if declarator.first {
+                            self.diagnose(
+                                "err_missing_type_specifier",
+                                declaration_place,
+                                Vec::new(),
+                            );
+                        }
+                        declarator.invalid = true;
+                    } else if declarator.first {
+                        self.diagnose("ext_missing_type_specifier", declaration_place, Vec::new());
+                    }
+                }
+                let unsigned = specifiers.sign == Sign::Unsigned;
+                let kind = match (specifiers.width, unsigned) {
+                    (Width::Unspecified, false) => BuiltinType::Int,
+                    (Width::Short, false) => BuiltinType::Short,
+                    (Width::Long, false) => BuiltinType::Long,
+                    (Width::LongLong, false) => BuiltinType::LongLong,
+                    (Width::Unspecified, true) => BuiltinType::UnsignedInt,
+                    (Width::Short, true) => BuiltinType::UnsignedShort,
+                    (Width::Long, true) => BuiltinType::UnsignedLong,
+                    (Width::LongLong, true) => BuiltinType::UnsignedLongLong,
+                };
+                if specifiers.width == Width::LongLong && !language.at_least(CStandard::C99) {
+                    self.diagnose("ext_c99_longlong", specifiers.width_place, Vec::new());
+                }
+                QualifiedType::builtin(kind)
+            }
+            TypeSpecifier::Int128 => {
+                if self.target().pointer_width != 64 {
+                    self.diagnose(
+                        "err_type_unsupported",
+                        specifiers.specifier_place,
+                        vec![Argument::text("__int128")],
+                    );
+                }
+                if specifiers.sign == Sign::Unsigned {
+                    QualifiedType::builtin(BuiltinType::UnsignedInt128)
+                } else {
+                    QualifiedType::builtin(BuiltinType::Int128)
+                }
+            }
+            TypeSpecifier::Float16 => {
+                if !self.target().has_float16 {
+                    self.diagnose(
+                        "err_type_unsupported",
+                        specifiers.specifier_place,
+                        vec![Argument::text("_Float16")],
+                    );
+                }
+                QualifiedType::builtin(BuiltinType::Float16)
+            }
+            TypeSpecifier::Half => QualifiedType::builtin(BuiltinType::Half),
+            TypeSpecifier::BFloat16 => QualifiedType::builtin(BuiltinType::BFloat16),
+            TypeSpecifier::Float => QualifiedType::builtin(BuiltinType::Float),
+            TypeSpecifier::Double => {
+                if specifiers.width == Width::Long {
+                    QualifiedType::builtin(BuiltinType::LongDouble)
+                } else {
+                    QualifiedType::builtin(BuiltinType::Double)
+                }
+            }
+            TypeSpecifier::Float128 => {
+                if !self.target().has_float128 {
+                    self.diagnose(
+                        "err_type_unsupported",
+                        specifiers.specifier_place,
+                        vec![Argument::text("__float128")],
+                    );
+                }
+                QualifiedType::builtin(BuiltinType::Float128)
+            }
+            TypeSpecifier::Ibm128 => {
+                self.diagnose(
+                    "err_type_unsupported",
+                    specifiers.specifier_place,
+                    vec![Argument::text("__ibm128")],
+                );
+                QualifiedType::builtin(BuiltinType::Ibm128)
+            }
+            TypeSpecifier::Bool => QualifiedType::builtin(BuiltinType::Bool),
+            TypeSpecifier::Decimal32 | TypeSpecifier::Decimal64 | TypeSpecifier::Decimal128 => {
+                self.diagnose(
+                    "err_decimal_unsupported",
+                    specifiers.specifier_place,
+                    Vec::new(),
+                );
+                declarator.invalid = true;
+                Parser::int_type()
+            }
+            TypeSpecifier::Struct | TypeSpecifier::Union | TypeSpecifier::Enum => {
+                match specifiers.tag {
+                    Some(tag) => {
+                        let kind = self.tags[tag].information.kind;
+                        QualifiedType::new(TypeNode::Tag {
+                            declaration: tag,
+                            kind,
+                            keyword: true,
+                        })
+                    }
+                    None => {
+                        declarator.invalid = true;
+                        Parser::int_type()
+                    }
+                }
+            }
+            TypeSpecifier::Typename
+            | TypeSpecifier::TypeOfType
+            | TypeSpecifier::TypeOfUnqualifiedType
+            | TypeSpecifier::TypeOfExpression
+            | TypeSpecifier::TypeOfUnqualifiedExpression => match &specifiers.representation {
+                Some(ty) => ty.clone(),
+                None => {
+                    declarator.invalid = true;
+                    Parser::int_type()
+                }
+            },
+            TypeSpecifier::Atomic => match &specifiers.representation {
+                Some(ty) => match self.build_atomic_type(ty.clone(), specifiers.specifier_place) {
+                    Some(atomic) => atomic,
+                    None => {
+                        declarator.invalid = true;
+                        Parser::int_type()
+                    }
+                },
+                None => {
+                    declarator.invalid = true;
+                    Parser::int_type()
+                }
+            },
+            TypeSpecifier::BitInt | TypeSpecifier::AutoType | TypeSpecifier::Auto => {
+                self.unsupported("type specifier");
+                Parser::int_type()
+            }
+            TypeSpecifier::Error => {
+                declarator.invalid = true;
+                Parser::int_type()
+            }
+        };
+        if specifiers.complex == ComplexSpecifier::Complex {
+            result = QualifiedType::new(TypeNode::Complex(result));
+        }
+        if specifiers.complex == ComplexSpecifier::Imaginary {
+            self.diagnose(
+                "err_imaginary_not_supported",
+                specifiers.complex_place,
+                Vec::new(),
+            );
+        }
+        let mut qualifiers = specifiers.qualifiers;
+        if qualifiers != 0 || specifiers.atomic_qualifier {
+            if result.is_function() {
+                let name = if language.at_least(CStandard::C2y) {
+                    "warn_typecheck_function_qualifiers_ignored"
+                } else {
+                    "ext_typecheck_function_qualifiers_unspecified"
+                };
+                for (bit, text, place) in [
+                    (QUALIFIER_CONST, "const", specifiers.const_place),
+                    (QUALIFIER_VOLATILE, "volatile", specifiers.volatile_place),
+                ] {
+                    if qualifiers & bit != 0 {
+                        self.diagnose(
+                            name,
+                            place,
+                            vec![Argument::text(text), Argument::Type(result.clone())],
+                        );
+                        qualifiers &= !bit;
+                    }
+                }
+            }
+            if !language.at_least(CStandard::C99) {
+                let existing = result.canonical_qualifiers();
+                if qualifiers & QUALIFIER_CONST != 0 && existing & QUALIFIER_CONST != 0 {
+                    self.diagnose(
+                        "ext_duplicate_declspec",
+                        specifiers.const_place,
+                        vec![Argument::text("const")],
+                    );
+                }
+                if qualifiers & QUALIFIER_VOLATILE != 0 && existing & QUALIFIER_VOLATILE != 0 {
+                    self.diagnose(
+                        "ext_duplicate_declspec",
+                        specifiers.volatile_place,
+                        vec![Argument::text("volatile")],
+                    );
+                }
+            }
+            match self.build_qualified_type(
+                result.clone(),
+                qualifiers,
+                specifiers.atomic_qualifier,
+                specifiers.restrict_place,
+                specifiers.atomic_place,
+                declaration_place,
+            ) {
+                Some(qualified) => result = qualified,
+                None => declarator.invalid = true,
+            }
+        }
+        result
+    }
+
+    fn build_qualified_type(
+        &mut self,
+        ty: QualifiedType,
+        qualifiers: u8,
+        atomic: bool,
+        restrict_place: Place,
+        atomic_place: Place,
+        place: Place,
+    ) -> Option<QualifiedType> {
+        let _ = place;
+        let mut ty = ty;
+        let mut qualifiers = qualifiers;
+        if atomic && !ty.is_atomic() {
+            let local = ty.qualifiers;
+            ty = self.build_atomic_type(ty.unqualified(), atomic_place)?;
+            qualifiers |= local;
+        }
+        if qualifiers & QUALIFIER_RESTRICT != 0 {
+            let element = ty.base_element();
+            let invalid = match element.pointee() {
+                Some(pointee) => {
+                    if pointee.is_function() {
+                        Some(("err_typecheck_invalid_restrict_invalid_pointee", pointee))
+                    } else {
+                        None
+                    }
+                }
+                None => Some(("err_typecheck_invalid_restrict_not_pointer", ty.clone())),
+            };
+            match invalid {
+                Some((name, shown)) => {
+                    self.diagnose(name, restrict_place, vec![Argument::Type(shown)]);
+                    qualifiers &= !QUALIFIER_RESTRICT;
+                }
+                None => {
+                    if ty.is_array() {
+                        self.diagnose_compatibility(
+                            "restrict_on_array_of_pointers",
+                            CStandard::C23,
+                            restrict_place,
+                            Vec::new(),
+                        );
+                    }
+                }
+            }
+        }
+        Some(ty.with_qualifiers(qualifiers))
+    }
+
+    fn build_atomic_type(&mut self, ty: QualifiedType, place: Place) -> Option<QualifiedType> {
+        if !self.require_complete_type(
+            place,
+            &ty,
+            "err_atomic_specifier_bad_type",
+            vec![Argument::number(0)],
+        ) {
+            return None;
+        }
+        let disallowed = if ty.is_array() {
+            Some(1)
+        } else if ty.is_function() {
+            Some(2)
+        } else if ty.is_atomic() {
+            Some(4)
+        } else if ty.qualifiers != 0 {
+            Some(5)
+        } else if ty.bit_int().is_some() {
+            Some(8)
+        } else {
+            None
+        };
+        if let Some(kind) = disallowed {
+            self.diagnose(
+                "err_atomic_specifier_bad_type",
+                place,
+                vec![Argument::number(kind), Argument::Type(ty)],
+            );
+            return None;
+        }
+        Some(QualifiedType::new(TypeNode::Atomic(ty)))
+    }
+
+    fn require_complete_type(
+        &mut self,
+        place: Place,
+        ty: &QualifiedType,
+        message: &str,
+        mut arguments: Vec<Argument>,
+    ) -> bool {
+        if self.is_complete_type(ty) {
+            return true;
+        }
+        arguments.push(Argument::Type(ty.clone()));
+        self.diagnose(message, place, arguments);
+        self.note_incomplete_type(ty);
+        false
+    }
+
+    fn note_incomplete_type(&mut self, ty: &QualifiedType) {
+        let base = ty.base_element();
+        if let Some((tag, _)) = base.tag() {
+            if !self.tags[tag].complete {
+                let tag_place = self.tags[tag].place;
+                let shown = QualifiedType::new(TypeNode::Tag {
+                    declaration: tag,
+                    kind: self.tags[tag].information.kind,
+                    keyword: false,
+                });
+                let name = if self.tags[tag].being_defined {
+                    "note_type_being_defined"
+                } else {
+                    "note_forward_declaration"
+                };
+                self.diagnose(name, tag_place, vec![Argument::Type(shown)]);
+            }
+        }
+    }
+
+    fn type_for_declarator(
+        &mut self,
+        specifiers: &DeclarationSpecifiers,
+        declarator: &mut Declarator,
+    ) -> QualifiedType {
+        let mut ty = self.convert_declaration_specifiers_to_type(specifiers, declarator);
+        let name_text = declarator
+            .name
+            .as_ref()
+            .map(|name| String::from_utf8_lossy(name).into_owned())
+            .unwrap_or_else(|| "type name".to_string());
+        let chunk_count = declarator.chunks.len();
+        for position in (0..chunk_count).rev() {
+            if self.unsupported.is_some() {
+                return Parser::int_type();
+            }
+            let chunk = declarator.chunks[position].clone();
+            match chunk {
+                DeclaratorChunk::Paren => {}
+                DeclaratorChunk::Pointer {
+                    qualifiers,
+                    atomic,
+                    place,
+                    restrict_place,
+                    atomic_place,
+                } => {
+                    ty = QualifiedType::pointer_to(ty);
+                    if qualifiers != 0 || atomic {
+                        match self.build_qualified_type(
+                            ty.clone(),
+                            qualifiers,
+                            atomic,
+                            restrict_place,
+                            atomic_place,
+                            place,
+                        ) {
+                            Some(qualified) => ty = qualified,
+                            None => declarator.invalid = true,
+                        }
+                    }
+                }
+                DeclaratorChunk::Array {
+                    size,
+                    is_static,
+                    star,
+                    qualifiers,
+                    place,
+                    end,
+                } => {
+                    let mut modifier = if star {
+                        ArrayModifier::Star
+                    } else if is_static {
+                        ArrayModifier::Static
+                    } else {
+                        ArrayModifier::Normal
+                    };
+                    let mut qualifiers = qualifiers;
+                    if modifier == ArrayModifier::Star && !declarator.is_prototype_context() {
+                        self.diagnose("err_array_star_outside_prototype", place, Vec::new());
+                        modifier = ArrayModifier::Normal;
+                        declarator.invalid = true;
+                    }
+                    if modifier == ArrayModifier::Static || qualifiers != 0 {
+                        let what = if modifier == ArrayModifier::Static {
+                            "'static'"
+                        } else {
+                            "type qualifier"
+                        };
+                        if !(declarator.is_prototype_context()
+                            || declarator.context == DeclaratorContext::KnrTypeList)
+                        {
+                            self.diagnose(
+                                "err_array_static_outside_prototype",
+                                place,
+                                vec![Argument::text(what)],
+                            );
+                            if modifier == ArrayModifier::Static {
+                                modifier = ArrayModifier::Normal;
+                            }
+                            qualifiers = 0;
+                            declarator.invalid = true;
+                        } else if declarator.chunks[..position].iter().any(|outer| {
+                            matches!(
+                                outer,
+                                DeclaratorChunk::Pointer { .. }
+                                    | DeclaratorChunk::Array { .. }
+                                    | DeclaratorChunk::Function { .. }
+                            )
+                        }) && Parser::has_outer_pointer_like_chunk(
+                            &declarator.chunks,
+                            position,
+                        ) {
+                            self.diagnose(
+                                "err_array_static_not_outermost",
+                                place,
+                                vec![Argument::text(what)],
+                            );
+                            if modifier == ArrayModifier::Static {
+                                modifier = ArrayModifier::Normal;
+                            }
+                            qualifiers = 0;
+                            declarator.invalid = true;
+                        }
+                    }
+                    let _ = end;
+                    match self.build_array_type(
+                        ty.clone(),
+                        modifier,
+                        size.as_ref(),
+                        qualifiers,
+                        place,
+                        Some(&name_text),
+                    ) {
+                        Some(array) => ty = array,
+                        None => {
+                            declarator.invalid = true;
+                            ty = Parser::int_type();
+                        }
+                    }
+                }
+                DeclaratorChunk::Function {
+                    parameters,
+                    variadic,
+                    ellipsis_place,
+                    has_prototype,
+                    place,
+                    ..
+                } => {
+                    if !declarator.invalid && (ty.is_array() || ty.is_function()) {
+                        self.diagnose(
+                            "err_func_returning_array_function",
+                            place,
+                            vec![
+                                Argument::number(i128::from(ty.is_function())),
+                                Argument::Type(ty.clone()),
+                            ],
+                        );
+                        ty = Parser::int_type();
+                        declarator.invalid = true;
+                    }
+                    if ty.qualifiers != 0 || ty.is_atomic() {
+                        if ty.is_void() && declarator.function_definition {
+                            self.diagnose(
+                                "err_func_returning_qualified_void",
+                                place,
+                                vec![Argument::Type(ty.clone())],
+                            );
+                        } else {
+                            self.diagnose_redundant_return_qualifiers(&ty, declarator, position);
+                        }
+                    }
+                    if parameters.is_empty()
+                        && !variadic
+                        && !self.language().at_least(CStandard::C23)
+                        && !has_prototype
+                    {
+                        ty = QualifiedType::new(TypeNode::FunctionNoPrototype {
+                            result: ty,
+                            noreturn: false,
+                        });
+                        continue;
+                    }
+                    if parameters.is_empty() && variadic {
+                        if self.language().at_least(CStandard::C23) {
+                            if let Some(ellipsis) = ellipsis_place {
+                                self.diagnose(
+                                    "warn_c17_compat_ellipsis_only_parameter",
+                                    ellipsis,
+                                    Vec::new(),
+                                );
+                            }
+                        } else if let Some(ellipsis) = ellipsis_place {
+                            self.diagnose("err_ellipsis_first_param", ellipsis, Vec::new());
+                        }
+                    }
+                    if !parameters.is_empty() && parameters[0].declaration.is_none() {
+                        self.diagnose(
+                            "err_ident_list_in_fn_declaration",
+                            parameters[0].place,
+                            Vec::new(),
+                        );
+                        declarator.invalid = true;
+                        let knr_definition = declarator.function_definition
+                            && position == Parser::innermost_function_chunk(&declarator.chunks);
+                        if knr_definition {
+                            ty = QualifiedType::new(TypeNode::FunctionNoPrototype {
+                                result: ty,
+                                noreturn: false,
+                            });
+                        } else {
+                            ty = Parser::int_type();
+                        }
+                        continue;
+                    }
+                    let mut parameter_types = Vec::new();
+                    let count = parameters.len();
+                    for parameter in &parameters {
+                        let Some(declaration) = parameter.declaration else {
+                            continue;
+                        };
+                        let parameter_type = self.declarations[declaration].ty.clone();
+                        if parameter_type.is_void() {
+                            if count != 1 || variadic {
+                                self.diagnose("err_void_only_param", parameter.place, Vec::new());
+                                self.declarations[declaration].ty = Parser::int_type();
+                                parameter_types.push(Parser::int_type());
+                                continue;
+                            } else if parameter.name.is_some() {
+                                self.diagnose(
+                                    "err_param_with_void_type",
+                                    parameter.place,
+                                    Vec::new(),
+                                );
+                                self.declarations[declaration].ty = Parser::int_type();
+                                parameter_types.push(Parser::int_type());
+                                continue;
+                            } else {
+                                if parameter_type.qualifiers != 0 {
+                                    self.diagnose("err_void_param_qualified", place, Vec::new());
+                                }
+                                break;
+                            }
+                        }
+                        if parameter_type.builtin_kind() == Some(BuiltinType::Half) {
+                            let target_allows =
+                                !matches!(self.target().family, TargetFamily::X86(_));
+                            if !target_allows {
+                                self.diagnose(
+                                    "err_parameters_retval_cannot_have_fp16_type",
+                                    self.declarations[declaration].place,
+                                    vec![Argument::number(0)],
+                                );
+                                declarator.invalid = true;
+                            }
+                        }
+                        parameter_types.push(parameter_type);
+                    }
+                    if ty.builtin_kind() == Some(BuiltinType::Half)
+                        && matches!(self.target().family, TargetFamily::X86(_))
+                    {
+                        self.diagnose(
+                            "err_parameters_retval_cannot_have_fp16_type",
+                            declarator.name_place,
+                            vec![Argument::number(1)],
+                        );
+                        declarator.invalid = true;
+                    }
+                    ty = QualifiedType::new(TypeNode::FunctionPrototype {
+                        result: ty,
+                        parameters: parameter_types,
+                        variadic,
+                        noreturn: false,
+                    });
+                }
+            }
+        }
+        ty
+    }
+
+    fn innermost_function_chunk(chunks: &[DeclaratorChunk]) -> usize {
+        for (position, chunk) in chunks.iter().enumerate() {
+            match chunk {
+                DeclaratorChunk::Paren => continue,
+                _ => return position,
+            }
+        }
+        0
+    }
+
+    fn has_outer_pointer_like_chunk(chunks: &[DeclaratorChunk], position: usize) -> bool {
+        for chunk in &chunks[..position] {
+            match chunk {
+                DeclaratorChunk::Pointer { .. } => return true,
+                DeclaratorChunk::Function { .. } => return false,
+                _ => {}
+            }
+        }
+        false
+    }
+
+    fn diagnose_redundant_return_qualifiers(
+        &mut self,
+        ty: &QualifiedType,
+        declarator: &Declarator,
+        position: usize,
+    ) {
+        if position + 1 < declarator.chunks.len() {
+            let mut outer = position + 1;
+            while outer < declarator.chunks.len()
+                && matches!(declarator.chunks[outer], DeclaratorChunk::Paren)
+            {
+                outer += 1;
+            }
+            if outer < declarator.chunks.len() {
+                if let DeclaratorChunk::Pointer {
+                    place,
+                    qualifiers,
+                    atomic,
+                    atomic_place,
+                    ..
+                } = &declarator.chunks[outer]
+                {
+                    let mut qualifier_text = Vec::new();
+                    if qualifiers & QUALIFIER_CONST != 0 {
+                        qualifier_text.push("const");
+                    }
+                    if qualifiers & QUALIFIER_VOLATILE != 0 {
+                        qualifier_text.push("volatile");
+                    }
+                    if qualifiers & QUALIFIER_RESTRICT != 0 {
+                        qualifier_text.push("restrict");
+                    }
+                    if *atomic {
+                        qualifier_text.push("_Atomic");
+                    }
+                    let count = qualifier_text.len();
+                    let text = qualifier_text.join(" ");
+                    let _ = atomic_place;
+                    self.diagnose(
+                        "warn_qual_return_type",
+                        *place,
+                        vec![Argument::Text(text), Argument::number(count as i128)],
+                    );
+                    return;
+                }
+                return;
+            }
+        }
+        let _ = ty;
+        self.unsupported("qualified function return type from declaration specifiers");
+    }
+
+    fn build_array_type(
+        &mut self,
+        element: QualifiedType,
+        modifier: ArrayModifier,
+        size: Option<&Expression>,
+        qualifiers: u8,
+        place: Place,
+        entity: Option<&str>,
+    ) -> Option<QualifiedType> {
+        if !self.is_complete_type(&element) {
+            self.diagnose(
+                "err_array_incomplete_or_sizeless_type",
+                place,
+                vec![Argument::number(0), Argument::Type(element.clone())],
+            );
+            return None;
+        }
+        if element.is_function() {
+            let name = entity.unwrap_or("type name").to_string();
+            self.diagnose(
+                "err_illegal_decl_array_of_functions",
+                place,
+                vec![Argument::Text(name), Argument::Type(element.clone())],
+            );
+            return None;
+        }
+        if let Some((tag, TagKind::Struct | TagKind::Union)) = element.tag() {
+            if self.tags[tag].flexible_array {
+                self.diagnose(
+                    "ext_flexible_array_in_array",
+                    place,
+                    vec![Argument::Type(element.clone())],
+                );
+            }
+        }
+        let base = element.base_element();
+        if self.is_complete_type(&base) {
+            if let Some(size_bits) = self.type_size_bits(&base) {
+                let alignment = u64::from(self.type_alignment_bits(&base));
+                if size_bits % alignment != 0 {
+                    self.diagnose(
+                        "err_array_element_alignment",
+                        place,
+                        vec![
+                            Argument::Type(base.clone()),
+                            Argument::number(i128::from(size_bits / 8)),
+                            Argument::number(i128::from(alignment / 8)),
+                        ],
+                    );
+                    return None;
+                }
+            }
+        }
+        let c99 = self.language().at_least(CStandard::C99);
+        let vla_message = if c99 { "warn_vla_used" } else { "ext_vla" };
+        let result;
+        match size {
+            None => {
+                if modifier == ArrayModifier::Star {
+                    self.diagnose(vla_message, place, Vec::new());
+                    self.variable_array_counter += 1;
+                    result = QualifiedType::new(TypeNode::VariableArray {
+                        element,
+                        size: None,
+                        modifier,
+                        index_qualifiers: qualifiers,
+                        identity: self.variable_array_counter,
+                        folded: None,
+                    });
+                } else {
+                    result = QualifiedType::new(TypeNode::IncompleteArray {
+                        element,
+                        modifier,
+                        index_qualifiers: qualifiers,
+                    });
+                }
+            }
+            Some(expression) => {
+                let expression = self.default_lvalue_conversion(expression.clone());
+                if !expression.ty.is_integer() || expression.ty.is_floating() {
+                    self.diagnose(
+                        "err_array_size_non_int",
+                        expression.start,
+                        vec![Argument::Type(expression.ty.clone())],
+                    );
+                    return None;
+                }
+                match self.verify_integer_constant_expression(&expression) {
+                    ConstantCheck::Constant(value, notes_folded) => {
+                        if notes_folded {
+                            self.diagnose(
+                                "ext_vla_folded_to_constant",
+                                expression.start,
+                                Vec::new(),
+                            );
+                        }
+                        if !self.is_complete_type(&element) || element.is_variably_modified() {
+                            self.diagnose(vla_message, place, Vec::new());
+                            self.variable_array_counter += 1;
+                            result = QualifiedType::new(TypeNode::VariableArray {
+                                element,
+                                size: Some(self.print_expression(&expression)),
+                                modifier,
+                                index_qualifiers: qualifiers,
+                                identity: self.variable_array_counter,
+                                folded: u64::try_from(value).ok(),
+                            });
+                        } else {
+                            let signed = self.is_signed_integer(&expression.ty);
+                            if signed && value < 0 {
+                                match entity {
+                                    Some(name) if name != "type name" => self.diagnose(
+                                        "err_decl_negative_array_size",
+                                        expression.start,
+                                        vec![Argument::Text(name.to_string())],
+                                    ),
+                                    _ => self.diagnose(
+                                        "err_typecheck_negative_array_size",
+                                        expression.start,
+                                        Vec::new(),
+                                    ),
+                                }
+                                return None;
+                            }
+                            if value == 0 {
+                                self.diagnose(
+                                    "ext_typecheck_zero_array_size",
+                                    expression.start,
+                                    vec![Argument::number(0)],
+                                );
+                            }
+                            let count = value as u128;
+                            let element_bits =
+                                u128::from(self.type_size_bits(&element).unwrap_or(8).max(8));
+                            let total_bytes = count.saturating_mul(element_bits / 8);
+                            let maximum_bits = if self.target().pointer_width == 64 {
+                                61
+                            } else {
+                                32
+                            };
+                            let active = 128 - total_bytes.leading_zeros();
+                            if active > maximum_bits {
+                                let text = if signed {
+                                    value.to_string()
+                                } else {
+                                    count.to_string()
+                                };
+                                self.diagnose(
+                                    "err_array_too_large",
+                                    expression.start,
+                                    vec![Argument::Text(text)],
+                                );
+                                return None;
+                            }
+                            result = QualifiedType::new(TypeNode::ConstantArray {
+                                element,
+                                size: count as u64,
+                                modifier,
+                                index_qualifiers: qualifiers,
+                            });
+                        }
+                    }
+                    ConstantCheck::NotConstant(diagnostic_place) => {
+                        self.diagnose(vla_message, diagnostic_place, Vec::new());
+                        self.variable_array_counter += 1;
+                        let mut state = EvaluationState::default();
+                        let folded = match self.evaluate(&expression, &mut state) {
+                            Some(ConstantValue::Integer(value)) => u64::try_from(value).ok(),
+                            _ => None,
+                        };
+                        result = QualifiedType::new(TypeNode::VariableArray {
+                            element,
+                            size: Some(self.print_expression(&expression)),
+                            modifier,
+                            index_qualifiers: qualifiers,
+                            identity: self.variable_array_counter,
+                            folded,
+                        });
+                    }
+                }
+            }
+        }
+        if result.is_variable_array() {
+            if let Some(function) = self.function.as_mut() {
+                function.has_vla = true;
+            }
+        }
+        if !c99
+            && !result.is_variable_array()
+            && (modifier != ArrayModifier::Normal || qualifiers != 0)
+        {
+            let index = match modifier {
+                ArrayModifier::Normal => 0,
+                ArrayModifier::Static => 1,
+                ArrayModifier::Star => 2,
+            };
+            self.diagnose("ext_c99_array_usage", place, vec![Argument::number(index)]);
+        }
+        Some(result)
+    }
+
+    fn parse_type_name(&mut self) -> Option<QualifiedType> {
+        let start = self.token.site;
+        let mut specifiers = DeclarationSpecifiers::new(start);
+        self.parse_specifier_qualifier_list(&mut specifiers, SpecifierContext::TypeSpecifier);
+        let mut declarator = Declarator::new(DeclaratorContext::TypeName, start);
+        self.parse_declarator(&mut declarator);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        let ty = self.type_for_declarator(&specifiers, &mut declarator);
+        if declarator.invalid {
+            return None;
+        }
+        Some(ty)
+    }
+
+    fn parse_specifier_qualifier_list(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        context: SpecifierContext,
+    ) {
+        self.parse_declaration_specifiers(specifiers, context);
+        if context == SpecifierContext::TypeSpecifier && !specifiers.has_type_specifier() {
+            let place = self.token.site;
+            self.diagnose("err_expected_type", place, Vec::new());
+            specifiers.specifier = TypeSpecifier::Error;
+        } else if !specifiers.parsed_anything {
+            let place = self.token.site;
+            self.diagnose("err_typename_requires_specqual", place, Vec::new());
+            if !specifiers.has_type_specifier() {
+                specifiers.specifier = TypeSpecifier::Error;
+            }
+        }
+        if specifiers.storage != StorageClass::None || specifiers.thread != ThreadStorage::None {
+            let place = if specifiers.storage != StorageClass::None {
+                specifiers.storage_place
+            } else {
+                specifiers.thread_place
+            };
+            self.diagnose("err_typename_invalid_storageclass", place, Vec::new());
+            specifiers.storage = StorageClass::None;
+            specifiers.thread = ThreadStorage::None;
+        }
+        if specifiers.inline {
+            self.diagnose(
+                "err_typename_invalid_functionspec",
+                specifiers.inline_place,
+                Vec::new(),
+            );
+            specifiers.inline = false;
+        }
+        if specifiers.noreturn {
+            self.diagnose(
+                "err_typename_invalid_functionspec",
+                specifiers.noreturn_place,
+                Vec::new(),
+            );
+            specifiers.noreturn = false;
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum ConstantCheck {
+    Constant(i128, bool),
+    NotConstant(Place),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum ValueCategory {
+    RValue,
+    LValue,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum UnaryOperator {
+    PostIncrement,
+    PostDecrement,
+    PreIncrement,
+    PreDecrement,
+    AddressOf,
+    Dereference,
+    Plus,
+    Minus,
+    Not,
+    LogicalNot,
+    Real,
+    Imaginary,
+    Extension,
+}
+
+impl UnaryOperator {
+    pub fn spelling(self) -> &'static str {
+        match self {
+            UnaryOperator::PostIncrement | UnaryOperator::PreIncrement => "++",
+            UnaryOperator::PostDecrement | UnaryOperator::PreDecrement => "--",
+            UnaryOperator::AddressOf => "&",
+            UnaryOperator::Dereference => "*",
+            UnaryOperator::Plus => "+",
+            UnaryOperator::Minus => "-",
+            UnaryOperator::Not => "~",
+            UnaryOperator::LogicalNot => "!",
+            UnaryOperator::Real => "__real",
+            UnaryOperator::Imaginary => "__imag",
+            UnaryOperator::Extension => "__extension__",
+        }
+    }
+
+    pub fn is_postfix(self) -> bool {
+        matches!(
+            self,
+            UnaryOperator::PostIncrement | UnaryOperator::PostDecrement
+        )
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum BinaryOperator {
+    Multiply,
+    Divide,
+    Remainder,
+    Add,
+    Subtract,
+    ShiftLeft,
+    ShiftRight,
+    Less,
+    Greater,
+    LessEqual,
+    GreaterEqual,
+    Equal,
+    NotEqual,
+    BitAnd,
+    BitXor,
+    BitOr,
+    LogicalAnd,
+    LogicalOr,
+    Assign,
+    MultiplyAssign,
+    DivideAssign,
+    RemainderAssign,
+    AddAssign,
+    SubtractAssign,
+    ShiftLeftAssign,
+    ShiftRightAssign,
+    BitAndAssign,
+    BitXorAssign,
+    BitOrAssign,
+    Comma,
+}
+
+impl BinaryOperator {
+    pub fn spelling(self) -> &'static str {
+        match self {
+            BinaryOperator::Multiply => "*",
+            BinaryOperator::Divide => "/",
+            BinaryOperator::Remainder => "%",
+            BinaryOperator::Add => "+",
+            BinaryOperator::Subtract => "-",
+            BinaryOperator::ShiftLeft => "<<",
+            BinaryOperator::ShiftRight => ">>",
+            BinaryOperator::Less => "<",
+            BinaryOperator::Greater => ">",
+            BinaryOperator::LessEqual => "<=",
+            BinaryOperator::GreaterEqual => ">=",
+            BinaryOperator::Equal => "==",
+            BinaryOperator::NotEqual => "!=",
+            BinaryOperator::BitAnd => "&",
+            BinaryOperator::BitXor => "^",
+            BinaryOperator::BitOr => "|",
+            BinaryOperator::LogicalAnd => "&&",
+            BinaryOperator::LogicalOr => "||",
+            BinaryOperator::Assign => "=",
+            BinaryOperator::MultiplyAssign => "*=",
+            BinaryOperator::DivideAssign => "/=",
+            BinaryOperator::RemainderAssign => "%=",
+            BinaryOperator::AddAssign => "+=",
+            BinaryOperator::SubtractAssign => "-=",
+            BinaryOperator::ShiftLeftAssign => "<<=",
+            BinaryOperator::ShiftRightAssign => ">>=",
+            BinaryOperator::BitAndAssign => "&=",
+            BinaryOperator::BitXorAssign => "^=",
+            BinaryOperator::BitOrAssign => "|=",
+            BinaryOperator::Comma => ",",
+        }
+    }
+
+    pub fn is_assignment(self) -> bool {
+        matches!(
+            self,
+            BinaryOperator::Assign
+                | BinaryOperator::MultiplyAssign
+                | BinaryOperator::DivideAssign
+                | BinaryOperator::RemainderAssign
+                | BinaryOperator::AddAssign
+                | BinaryOperator::SubtractAssign
+                | BinaryOperator::ShiftLeftAssign
+                | BinaryOperator::ShiftRightAssign
+                | BinaryOperator::BitAndAssign
+                | BinaryOperator::BitXorAssign
+                | BinaryOperator::BitOrAssign
+        )
+    }
+
+    pub fn is_compound_assignment(self) -> bool {
+        self.is_assignment() && self != BinaryOperator::Assign
+    }
+
+    pub fn compound_base(self) -> BinaryOperator {
+        match self {
+            BinaryOperator::MultiplyAssign => BinaryOperator::Multiply,
+            BinaryOperator::DivideAssign => BinaryOperator::Divide,
+            BinaryOperator::RemainderAssign => BinaryOperator::Remainder,
+            BinaryOperator::AddAssign => BinaryOperator::Add,
+            BinaryOperator::SubtractAssign => BinaryOperator::Subtract,
+            BinaryOperator::ShiftLeftAssign => BinaryOperator::ShiftLeft,
+            BinaryOperator::ShiftRightAssign => BinaryOperator::ShiftRight,
+            BinaryOperator::BitAndAssign => BinaryOperator::BitAnd,
+            BinaryOperator::BitXorAssign => BinaryOperator::BitXor,
+            BinaryOperator::BitOrAssign => BinaryOperator::BitOr,
+            other => other,
+        }
+    }
+
+    pub fn is_comparison(self) -> bool {
+        matches!(
+            self,
+            BinaryOperator::Less
+                | BinaryOperator::Greater
+                | BinaryOperator::LessEqual
+                | BinaryOperator::GreaterEqual
+                | BinaryOperator::Equal
+                | BinaryOperator::NotEqual
+        )
+    }
+
+    pub fn is_relational(self) -> bool {
+        matches!(
+            self,
+            BinaryOperator::Less
+                | BinaryOperator::Greater
+                | BinaryOperator::LessEqual
+                | BinaryOperator::GreaterEqual
+        )
+    }
+
+    pub fn is_equality(self) -> bool {
+        matches!(self, BinaryOperator::Equal | BinaryOperator::NotEqual)
+    }
+
+    pub fn is_shift(self) -> bool {
+        matches!(self, BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight)
+    }
+
+    pub fn is_bitwise(self) -> bool {
+        matches!(
+            self,
+            BinaryOperator::BitAnd | BinaryOperator::BitXor | BinaryOperator::BitOr
+        )
+    }
+
+    pub fn is_logical(self) -> bool {
+        matches!(self, BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr)
+    }
+
+    pub fn is_additive(self) -> bool {
+        matches!(self, BinaryOperator::Add | BinaryOperator::Subtract)
+    }
+
+    pub fn is_multiplicative(self) -> bool {
+        matches!(
+            self,
+            BinaryOperator::Multiply | BinaryOperator::Divide | BinaryOperator::Remainder
+        )
+    }
+
+    pub fn precedence(self) -> u32 {
+        match self {
+            BinaryOperator::Comma => 1,
+            _ if self.is_assignment() => 2,
+            BinaryOperator::LogicalOr => 4,
+            BinaryOperator::LogicalAnd => 5,
+            BinaryOperator::BitOr => 6,
+            BinaryOperator::BitXor => 7,
+            BinaryOperator::BitAnd => 8,
+            BinaryOperator::Equal | BinaryOperator::NotEqual => 9,
+            BinaryOperator::Less
+            | BinaryOperator::Greater
+            | BinaryOperator::LessEqual
+            | BinaryOperator::GreaterEqual => 10,
+            BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => 12,
+            BinaryOperator::Add | BinaryOperator::Subtract => 13,
+            _ => 14,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum CastKind {
+    LValueToRValue,
+    ArrayToPointerDecay,
+    FunctionToPointerDecay,
+    NoOp,
+    BitCast,
+    IntegralCast,
+    IntegralToBoolean,
+    IntegralToFloating,
+    FloatingToIntegral,
+    FloatingToBoolean,
+    FloatingCast,
+    PointerToBoolean,
+    PointerToIntegral,
+    IntegralToPointer,
+    NullToPointer,
+    ToVoid,
+    ToUnion,
+    FloatingRealToComplex,
+    IntegralRealToComplex,
+    ComplexCast,
+    ComplexToReal,
+    ComplexToBoolean,
+    AtomicToNonAtomic,
+    NonAtomicToAtomic,
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum TraitKind {
+    SizeOf,
+    AlignOf,
+    PreferredAlignOf,
+    CountOf,
+}
+
+#[derive(Clone, Debug)]
+pub enum ExpressionKind {
+    Integer {
+        value: u128,
+        spelling_radix: u32,
+    },
+    Floating {
+        value: f64,
+    },
+    Character {
+        value: u32,
+        prefix: LiteralPrefix,
+    },
+    String {
+        units: Vec<u32>,
+        prefix: LiteralPrefix,
+    },
+    Reference {
+        declaration: usize,
+    },
+    Predefined {
+        name: &'static str,
+        units: Vec<u32>,
+    },
+    Parenthesized(Box<Expression>),
+    Unary {
+        operator: UnaryOperator,
+        operand: Box<Expression>,
+    },
+    Binary {
+        operator: BinaryOperator,
+        left: Box<Expression>,
+        right: Box<Expression>,
+    },
+    Conditional {
+        condition: Box<Expression>,
+        then: Option<Box<Expression>>,
+        otherwise: Box<Expression>,
+    },
+    Call {
+        callee: Box<Expression>,
+        arguments: Vec<Expression>,
+    },
+    Member {
+        base: Box<Expression>,
+        tag: usize,
+        field: usize,
+        arrow: bool,
+    },
+    Subscript {
+        base: Box<Expression>,
+        index: Box<Expression>,
+    },
+    Cast {
+        kind: CastKind,
+        operand: Box<Expression>,
+        explicit: bool,
+        written: Option<QualifiedType>,
+    },
+    Trait {
+        kind: TraitKind,
+        argument: QualifiedType,
+        operand: Option<Box<Expression>>,
+        spelling: &'static str,
+    },
+    CompoundLiteral {
+        initializer: Box<Expression>,
+        file_scope: bool,
+    },
+    InitializerList {
+        elements: Vec<Expression>,
+        filler: bool,
+    },
+    ImplicitValue,
+    Generic {
+        selected: Box<Expression>,
+    },
+    Designated {
+        parts: Vec<DesignatorPart>,
+        value: Box<Expression>,
+    },
+    Error,
+}
+
+#[derive(Clone, Debug)]
+pub struct Expression {
+    pub kind: ExpressionKind,
+    pub ty: QualifiedType,
+    pub category: ValueCategory,
+    pub start: Place,
+    pub place: Place,
+    pub end: Place,
+}
+
+impl Expression {
+    pub fn new(
+        kind: ExpressionKind,
+        ty: QualifiedType,
+        category: ValueCategory,
+        start: Place,
+        place: Place,
+        end: Place,
+    ) -> Expression {
+        Expression {
+            kind,
+            ty,
+            category,
+            start,
+            place,
+            end,
+        }
+    }
+
+    pub fn error(place: Place) -> Expression {
+        Expression::new(
+            ExpressionKind::Error,
+            Parser::int_type(),
+            ValueCategory::RValue,
+            place,
+            place,
+            place,
+        )
+    }
+
+    pub fn is_error(&self) -> bool {
+        matches!(self.kind, ExpressionKind::Error)
+    }
+
+    pub fn contains_error(&self) -> bool {
+        match &self.kind {
+            ExpressionKind::Error => true,
+            ExpressionKind::Parenthesized(inner) => inner.contains_error(),
+            ExpressionKind::Unary { operand, .. } => operand.contains_error(),
+            ExpressionKind::Binary { left, right, .. } => {
+                left.contains_error() || right.contains_error()
+            }
+            ExpressionKind::Cast { operand, .. } => operand.contains_error(),
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                condition.contains_error()
+                    || then.as_ref().is_some_and(|then| then.contains_error())
+                    || otherwise.contains_error()
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                callee.contains_error() || arguments.iter().any(Expression::contains_error)
+            }
+            ExpressionKind::Member { base, .. } => base.contains_error(),
+            ExpressionKind::Subscript { base, index } => {
+                base.contains_error() || index.contains_error()
+            }
+            _ => false,
+        }
+    }
+
+    pub fn is_lvalue(&self) -> bool {
+        self.category == ValueCategory::LValue
+    }
+
+    pub fn mentions_declaration(&self, declaration: usize) -> bool {
+        match &self.kind {
+            ExpressionKind::Reference {
+                declaration: referenced,
+            } => *referenced == declaration,
+            ExpressionKind::Parenthesized(inner) | ExpressionKind::Generic { selected: inner } => {
+                inner.mentions_declaration(declaration)
+            }
+            ExpressionKind::Unary { operand, .. } | ExpressionKind::Cast { operand, .. } => {
+                operand.mentions_declaration(declaration)
+            }
+            ExpressionKind::Binary { left, right, .. } => {
+                left.mentions_declaration(declaration) || right.mentions_declaration(declaration)
+            }
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                condition.mentions_declaration(declaration)
+                    || then
+                        .as_ref()
+                        .is_some_and(|then| then.mentions_declaration(declaration))
+                    || otherwise.mentions_declaration(declaration)
+            }
+            ExpressionKind::Call { callee, arguments } => {
+                callee.mentions_declaration(declaration)
+                    || arguments
+                        .iter()
+                        .any(|argument| argument.mentions_declaration(declaration))
+            }
+            ExpressionKind::Member { base, .. } => base.mentions_declaration(declaration),
+            ExpressionKind::Subscript { base, index } => {
+                base.mentions_declaration(declaration) || index.mentions_declaration(declaration)
+            }
+            ExpressionKind::CompoundLiteral { initializer, .. } => {
+                initializer.mentions_declaration(declaration)
+            }
+            ExpressionKind::InitializerList { elements, .. } => elements
+                .iter()
+                .any(|element| element.mentions_declaration(declaration)),
+            ExpressionKind::Designated { value, .. } => value.mentions_declaration(declaration),
+            _ => false,
+        }
+    }
+
+    pub fn ignore_parentheses(&self) -> &Expression {
+        let mut current = self;
+        loop {
+            match &current.kind {
+                ExpressionKind::Parenthesized(inner) => current = inner,
+                ExpressionKind::Unary {
+                    operator: UnaryOperator::Extension,
+                    operand,
+                } => current = operand,
+                ExpressionKind::Generic { selected } => current = selected,
+                _ => return current,
+            }
+        }
+    }
+
+    pub fn ignore_implicit_casts(&self) -> &Expression {
+        let mut current = self;
+        while let ExpressionKind::Cast {
+            explicit: false,
+            operand,
+            ..
+        } = &current.kind
+        {
+            current = operand;
+        }
+        current
+    }
+
+    pub fn ignore_parentheses_and_implicit_casts(&self) -> &Expression {
+        let mut current = self;
+        loop {
+            match &current.kind {
+                ExpressionKind::Parenthesized(inner) => current = inner,
+                ExpressionKind::Unary {
+                    operator: UnaryOperator::Extension,
+                    operand,
+                } => current = operand,
+                ExpressionKind::Generic { selected } => current = selected,
+                ExpressionKind::Cast {
+                    explicit: false,
+                    operand,
+                    ..
+                } => current = operand,
+                _ => return current,
+            }
+        }
+    }
+
+    pub fn ignore_parentheses_and_casts(&self) -> &Expression {
+        let mut current = self;
+        loop {
+            match &current.kind {
+                ExpressionKind::Parenthesized(inner) => current = inner,
+                ExpressionKind::Unary {
+                    operator: UnaryOperator::Extension,
+                    operand,
+                } => current = operand,
+                ExpressionKind::Generic { selected } => current = selected,
+                ExpressionKind::Cast { operand, .. } => current = operand,
+                _ => return current,
+            }
+        }
+    }
+
+    pub fn is_bit_field(&self, parser: &Parser) -> bool {
+        match &self.ignore_parentheses().kind {
+            ExpressionKind::Member { tag, field, .. } => {
+                parser.tags[*tag].fields[*field].bit_width.is_some()
+            }
+            ExpressionKind::Binary {
+                operator: BinaryOperator::Comma,
+                right,
+                ..
+            } => right.is_bit_field(parser),
+            _ => false,
+        }
+    }
+
+    pub fn referenced_declaration(&self) -> Option<usize> {
+        match &self.ignore_parentheses_and_implicit_casts().kind {
+            ExpressionKind::Reference { declaration } => Some(*declaration),
+            _ => None,
+        }
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug, PartialOrd, Ord)]
+pub enum IceKind {
+    Ice,
+    IceIfUnevaluated,
+    NotIce,
+}
+
+#[derive(Clone, Copy, Debug)]
+pub struct IceResult {
+    pub kind: IceKind,
+    pub place: Place,
+}
+
+impl IceResult {
+    fn ice() -> IceResult {
+        IceResult {
+            kind: IceKind::Ice,
+            place: Place::default(),
+        }
+    }
+
+    fn not_ice(place: Place) -> IceResult {
+        IceResult {
+            kind: IceKind::NotIce,
+            place,
+        }
+    }
+
+    fn worst(left: IceResult, right: IceResult) -> IceResult {
+        if left.kind >= right.kind {
+            left
+        } else {
+            right
+        }
+    }
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum ConstantValue {
+    Integer(i128),
+    Floating(f64),
+    Address { base: AddressBase, offset: i128 },
+}
+
+#[derive(Clone, Debug, PartialEq)]
+pub enum AddressBase {
+    Null,
+    Declaration(usize),
+    String,
+    CompoundLiteral,
+    Function(usize),
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct EvaluationState {
+    pub overflow: Option<(Place, String, QualifiedType)>,
+    pub side_effects: bool,
+    pub undefined: bool,
+    pub note: Option<Place>,
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    pub fn print_expression(&self, expression: &Expression) -> String {
+        match &expression.kind {
+            ExpressionKind::Designated { value, .. } => self.print_expression(value),
+            ExpressionKind::Integer { value, .. } => {
+                let suffix = match expression.ty.builtin_kind() {
+                    Some(BuiltinType::UnsignedInt) => "U",
+                    Some(BuiltinType::Long) => "L",
+                    Some(BuiltinType::UnsignedLong) => "UL",
+                    Some(BuiltinType::LongLong) => "LL",
+                    Some(BuiltinType::UnsignedLongLong) => "ULL",
+                    _ => "",
+                };
+                format!("{value}{suffix}")
+            }
+            ExpressionKind::Floating { value } => {
+                let mut text = format_floating(*value);
+                match expression.ty.builtin_kind() {
+                    Some(BuiltinType::Float) => text.push('F'),
+                    Some(BuiltinType::LongDouble) => text.push('L'),
+                    _ => {}
+                }
+                text
+            }
+            ExpressionKind::Character { value, prefix } => {
+                let head = match prefix {
+                    LiteralPrefix::Plain => "",
+                    LiteralPrefix::Wide => "L",
+                    LiteralPrefix::Utf8 => "u8",
+                    LiteralPrefix::Utf16 => "u",
+                    LiteralPrefix::Utf32 => "U",
+                };
+                format!("{head}'{}'", escape_character(*value, b'\''))
+            }
+            ExpressionKind::String { units, prefix } => {
+                let head = match prefix {
+                    LiteralPrefix::Plain => "",
+                    LiteralPrefix::Wide => "L",
+                    LiteralPrefix::Utf8 => "u8",
+                    LiteralPrefix::Utf16 => "u",
+                    LiteralPrefix::Utf32 => "U",
+                };
+                let mut text = format!("{head}\"");
+                let body = if units.last() == Some(&0) {
+                    &units[..units.len() - 1]
+                } else {
+                    &units[..]
+                };
+                for unit in body {
+                    text.push_str(&escape_character(*unit, b'"'));
+                }
+                text.push('"');
+                text
+            }
+            ExpressionKind::Reference { declaration } => self.declarations[*declaration]
+                .name
+                .as_ref()
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .unwrap_or_default(),
+            ExpressionKind::Predefined { name, .. } => name.to_string(),
+            ExpressionKind::Parenthesized(inner) => format!("({})", self.print_expression(inner)),
+            ExpressionKind::Unary { operator, operand } => {
+                if operator.is_postfix() {
+                    format!("{}{}", self.print_expression(operand), operator.spelling())
+                } else if matches!(
+                    operator,
+                    UnaryOperator::Real | UnaryOperator::Imaginary | UnaryOperator::Extension
+                ) {
+                    format!("{} {}", operator.spelling(), self.print_expression(operand))
+                } else {
+                    format!("{}{}", operator.spelling(), self.print_expression(operand))
+                }
+            }
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                if *operator == BinaryOperator::Comma {
+                    format!(
+                        "{}, {}",
+                        self.print_expression(left),
+                        self.print_expression(right)
+                    )
+                } else {
+                    format!(
+                        "{} {} {}",
+                        self.print_expression(left),
+                        operator.spelling(),
+                        self.print_expression(right)
+                    )
+                }
+            }
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => match then {
+                Some(then) => format!(
+                    "{} ? {} : {}",
+                    self.print_expression(condition),
+                    self.print_expression(then),
+                    self.print_expression(otherwise)
+                ),
+                None => format!(
+                    "{} ?: {}",
+                    self.print_expression(condition),
+                    self.print_expression(otherwise)
+                ),
+            },
+            ExpressionKind::Call { callee, arguments } => {
+                let arguments: Vec<String> = arguments
+                    .iter()
+                    .map(|argument| self.print_expression(argument))
+                    .collect();
+                format!(
+                    "{}({})",
+                    self.print_expression(callee),
+                    arguments.join(", ")
+                )
+            }
+            ExpressionKind::Member {
+                base,
+                tag,
+                field,
+                arrow,
+            } => {
+                let name = self.tags[*tag].fields[*field]
+                    .name
+                    .as_ref()
+                    .map(|name| String::from_utf8_lossy(name).into_owned())
+                    .unwrap_or_default();
+                format!(
+                    "{}{}{}",
+                    self.print_expression(base),
+                    if *arrow { "->" } else { "." },
+                    name
+                )
+            }
+            ExpressionKind::Subscript { base, index } => {
+                format!(
+                    "{}[{}]",
+                    self.print_expression(base),
+                    self.print_expression(index)
+                )
+            }
+            ExpressionKind::Cast {
+                operand,
+                explicit,
+                written,
+                ..
+            } => {
+                if *explicit {
+                    let ty = written.clone().unwrap_or_else(|| expression.ty.clone());
+                    format!(
+                        "({}){}",
+                        self.print_type(&ty),
+                        self.print_expression(operand)
+                    )
+                } else {
+                    self.print_expression(operand)
+                }
+            }
+            ExpressionKind::Trait {
+                argument,
+                operand,
+                spelling,
+                ..
+            } => match operand {
+                Some(operand) => {
+                    let inner = self.print_expression(operand);
+                    if matches!(operand.kind, ExpressionKind::Parenthesized(_)) {
+                        format!("{spelling}{inner}")
+                    } else {
+                        format!("{spelling} {inner}")
+                    }
+                }
+                None => format!("{spelling}({})", self.print_type(argument)),
+            },
+            ExpressionKind::CompoundLiteral { initializer, .. } => {
+                format!(
+                    "({}){}",
+                    self.print_type(&expression.ty),
+                    self.print_expression(initializer)
+                )
+            }
+            ExpressionKind::InitializerList { elements, .. } => {
+                let parts: Vec<String> = elements
+                    .iter()
+                    .filter(|element| !matches!(element.kind, ExpressionKind::ImplicitValue))
+                    .map(|element| self.print_expression(element))
+                    .collect();
+                format!("{{{}}}", parts.join(", "))
+            }
+            ExpressionKind::ImplicitValue => String::new(),
+            ExpressionKind::Generic { selected } => self.print_expression(selected),
+            ExpressionKind::Error => "<recovery-expr>()".to_string(),
+        }
+    }
+
+    fn check_integer_constant(&self, expression: &Expression) -> IceResult {
+        if !expression.ty.is_integer() {
+            return IceResult::not_ice(expression.start);
+        }
+        match &expression.kind {
+            ExpressionKind::Integer { .. } | ExpressionKind::Character { .. } => IceResult::ice(),
+            ExpressionKind::Parenthesized(inner) => self.check_integer_constant(inner),
+            ExpressionKind::Generic { selected } => self.check_integer_constant(selected),
+            ExpressionKind::Reference { declaration } => {
+                if self.declarations[*declaration].kind == DeclarationKind::EnumConstant {
+                    IceResult::ice()
+                } else {
+                    IceResult::not_ice(expression.start)
+                }
+            }
+            ExpressionKind::Unary {
+                operator:
+                    UnaryOperator::Extension
+                    | UnaryOperator::LogicalNot
+                    | UnaryOperator::Plus
+                    | UnaryOperator::Minus
+                    | UnaryOperator::Not
+                    | UnaryOperator::Real
+                    | UnaryOperator::Imaginary,
+                operand,
+            } => self.check_integer_constant(operand),
+            ExpressionKind::Unary { .. } => IceResult::not_ice(expression.start),
+            ExpressionKind::Trait { kind, argument, .. } => {
+                if *kind == TraitKind::SizeOf && argument.is_variable_array() {
+                    IceResult::not_ice(expression.start)
+                } else {
+                    IceResult::ice()
+                }
+            }
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                if operator.is_assignment() {
+                    return IceResult::not_ice(expression.start);
+                }
+                let left_result = self.check_integer_constant(left);
+                let right_result = self.check_integer_constant(right);
+                if operator.is_logical() {
+                    if left_result.kind == IceKind::Ice
+                        && right_result.kind == IceKind::IceIfUnevaluated
+                    {
+                        let left_value = self.evaluate_integer(left).unwrap_or(0);
+                        if (*operator == BinaryOperator::LogicalAnd) != (left_value == 0) {
+                            return right_result;
+                        }
+                        return IceResult::ice();
+                    }
+                    return IceResult::worst(left_result, right_result);
+                }
+                if matches!(operator, BinaryOperator::Divide | BinaryOperator::Remainder)
+                    && left_result.kind == IceKind::Ice
+                    && right_result.kind == IceKind::Ice
+                {
+                    let divisor = self.evaluate_integer(right).unwrap_or(1);
+                    if divisor == 0 {
+                        return IceResult {
+                            kind: IceKind::IceIfUnevaluated,
+                            place: expression.start,
+                        };
+                    }
+                    if divisor == -1 && self.is_signed_integer(&right.ty) {
+                        let dividend = self.evaluate_integer(left).unwrap_or(0);
+                        let width = self.integer_width(&left.ty);
+                        if width <= 127 && dividend == -(1i128 << (width - 1)) {
+                            return IceResult {
+                                kind: IceKind::IceIfUnevaluated,
+                                place: expression.start,
+                            };
+                        }
+                    }
+                }
+                if *operator == BinaryOperator::Comma {
+                    if self.language().at_least(CStandard::C99) {
+                        if left_result.kind == IceKind::Ice && right_result.kind == IceKind::Ice {
+                            return IceResult {
+                                kind: IceKind::IceIfUnevaluated,
+                                place: expression.start,
+                            };
+                        }
+                    } else {
+                        return IceResult::not_ice(expression.start);
+                    }
+                }
+                IceResult::worst(left_result, right_result)
+            }
+            ExpressionKind::Cast {
+                kind,
+                operand,
+                explicit,
+                ..
+            } => {
+                if *explicit {
+                    if let ExpressionKind::Floating { value } =
+                        operand.ignore_parentheses_and_implicit_casts().kind
+                    {
+                        let width = self.integer_width(&expression.ty);
+                        let signed = self.is_signed_integer(&expression.ty);
+                        if !floating_fits_integer(value, width, signed) {
+                            return IceResult::not_ice(expression.start);
+                        }
+                        return IceResult::ice();
+                    }
+                }
+                match kind {
+                    CastKind::LValueToRValue
+                    | CastKind::AtomicToNonAtomic
+                    | CastKind::NonAtomicToAtomic
+                    | CastKind::NoOp
+                    | CastKind::IntegralToBoolean
+                    | CastKind::IntegralCast => self.check_integer_constant(operand),
+                    _ => IceResult::not_ice(expression.start),
+                }
+            }
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let Some(then) = then else {
+                    let common = self.check_integer_constant(condition);
+                    if common.kind == IceKind::NotIce {
+                        return common;
+                    }
+                    let other = self.check_integer_constant(otherwise);
+                    if other.kind == IceKind::NotIce {
+                        return other;
+                    }
+                    if common.kind == IceKind::IceIfUnevaluated {
+                        return common;
+                    }
+                    if other.kind == IceKind::IceIfUnevaluated
+                        && self.evaluate_integer(condition).unwrap_or(0) != 0
+                    {
+                        return IceResult::ice();
+                    }
+                    return other;
+                };
+                let condition_result = self.check_integer_constant(condition);
+                if condition_result.kind == IceKind::NotIce {
+                    return condition_result;
+                }
+                let true_result = self.check_integer_constant(then);
+                let false_result = self.check_integer_constant(otherwise);
+                if true_result.kind == IceKind::NotIce {
+                    return true_result;
+                }
+                if false_result.kind == IceKind::NotIce {
+                    return false_result;
+                }
+                if condition_result.kind == IceKind::IceIfUnevaluated {
+                    return condition_result;
+                }
+                if true_result.kind == IceKind::Ice && false_result.kind == IceKind::Ice {
+                    return IceResult::ice();
+                }
+                if self.evaluate_integer(condition).unwrap_or(0) == 0 {
+                    false_result
+                } else {
+                    true_result
+                }
+            }
+            ExpressionKind::InitializerList { elements, .. } => {
+                if expression.category == ValueCategory::RValue && elements.len() == 1 {
+                    self.check_integer_constant(&elements[0])
+                } else {
+                    IceResult::not_ice(expression.start)
+                }
+            }
+            _ => IceResult::not_ice(expression.start),
+        }
+    }
+
+    pub fn is_integer_constant_expression(&self, expression: &Expression) -> bool {
+        self.check_integer_constant(expression).kind == IceKind::Ice
+    }
+
+    pub fn evaluate_integer(&self, expression: &Expression) -> Option<i128> {
+        let mut state = EvaluationState::default();
+        match self.evaluate(expression, &mut state)? {
+            ConstantValue::Integer(value) => Some(value),
+            _ => None,
+        }
+    }
+
+    pub fn normalize_integer(&self, value: i128, ty: &QualifiedType) -> i128 {
+        if ty.is_bool() {
+            return i128::from(value != 0);
+        }
+        let width = self.integer_width(ty);
+        if width >= 128 {
+            return value;
+        }
+        let mask = (1i128 << width) - 1;
+        let truncated = value & mask;
+        if self.is_signed_integer(ty) && truncated & (1i128 << (width - 1)) != 0 {
+            truncated - (1i128 << width)
+        } else {
+            truncated
+        }
+    }
+
+    fn integer_fits(&self, value: i128, ty: &QualifiedType) -> bool {
+        self.normalize_integer(value, ty) == value
+    }
+
+    pub fn evaluate(
+        &self,
+        expression: &Expression,
+        state: &mut EvaluationState,
+    ) -> Option<ConstantValue> {
+        match &expression.kind {
+            ExpressionKind::Integer { value, .. } => Some(ConstantValue::Integer(
+                self.normalize_integer(*value as i128, &expression.ty),
+            )),
+            ExpressionKind::Character { value, .. } => Some(ConstantValue::Integer(
+                self.normalize_integer(i128::from(*value), &expression.ty),
+            )),
+            ExpressionKind::Floating { value } => Some(ConstantValue::Floating(*value)),
+            ExpressionKind::Parenthesized(inner) => self.evaluate(inner, state),
+            ExpressionKind::Generic { selected } => self.evaluate(selected, state),
+            ExpressionKind::Reference { declaration } => {
+                let declaration_information = &self.declarations[*declaration];
+                match declaration_information.kind {
+                    DeclarationKind::EnumConstant => {
+                        Some(ConstantValue::Integer(declaration_information.value))
+                    }
+                    _ => {
+                        if state.note.is_none() {
+                            state.note = Some(expression.start);
+                        }
+                        None
+                    }
+                }
+            }
+            ExpressionKind::Trait { kind, argument, .. } => self
+                .evaluate_trait(*kind, argument)
+                .map(ConstantValue::Integer),
+            ExpressionKind::Unary { operator, operand } => {
+                let value = match operator {
+                    UnaryOperator::Extension | UnaryOperator::Plus => {
+                        return self.evaluate(operand, state)
+                    }
+                    UnaryOperator::AddressOf => return self.evaluate_address(operand, state),
+                    UnaryOperator::Real => {
+                        if operand.ty.is_complex() {
+                            return None;
+                        }
+                        return self.evaluate(operand, state);
+                    }
+                    UnaryOperator::Imaginary => {
+                        if operand.ty.is_complex() {
+                            return None;
+                        }
+                        self.evaluate(operand, state)?;
+                        return Some(ConstantValue::Integer(0));
+                    }
+                    _ => self.evaluate(operand, state)?,
+                };
+                match (operator, value) {
+                    (UnaryOperator::Minus, ConstantValue::Integer(value)) => {
+                        let result = value.checked_neg().unwrap_or(value);
+                        let normalized = self.normalize_integer(result, &expression.ty);
+                        if self.is_signed_integer(&expression.ty)
+                            && normalized != result
+                            && state.overflow.is_none()
+                        {
+                            state.overflow =
+                                Some((expression.place, result.to_string(), expression.ty.clone()));
+                        }
+                        Some(ConstantValue::Integer(normalized))
+                    }
+                    (UnaryOperator::Minus, ConstantValue::Floating(value)) => {
+                        Some(ConstantValue::Floating(-value))
+                    }
+                    (UnaryOperator::Not, ConstantValue::Integer(value)) => Some(
+                        ConstantValue::Integer(self.normalize_integer(!value, &expression.ty)),
+                    ),
+                    (UnaryOperator::LogicalNot, ConstantValue::Integer(value)) => {
+                        Some(ConstantValue::Integer(i128::from(value == 0)))
+                    }
+                    (UnaryOperator::LogicalNot, ConstantValue::Floating(value)) => {
+                        Some(ConstantValue::Integer(i128::from(value == 0.0)))
+                    }
+                    (UnaryOperator::LogicalNot, ConstantValue::Address { base, offset }) => {
+                        Some(ConstantValue::Integer(i128::from(
+                            base == AddressBase::Null && offset == 0,
+                        )))
+                    }
+                    _ => {
+                        state.side_effects = matches!(
+                            operator,
+                            UnaryOperator::PreIncrement
+                                | UnaryOperator::PreDecrement
+                                | UnaryOperator::PostIncrement
+                                | UnaryOperator::PostDecrement
+                        );
+                        None
+                    }
+                }
+            }
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => self.evaluate_binary(expression, *operator, left, right, state),
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                let truth = self.evaluate_condition(condition, state)?;
+                if truth {
+                    match then {
+                        Some(then) => self.evaluate(then, state),
+                        None => self.evaluate(condition, state),
+                    }
+                } else {
+                    self.evaluate(otherwise, state)
+                }
+            }
+            ExpressionKind::Cast { kind, operand, .. } => {
+                self.evaluate_cast(expression, *kind, operand, state)
+            }
+            ExpressionKind::InitializerList { elements, .. }
+                if elements.len() == 1 && expression.ty.is_scalar() =>
+            {
+                self.evaluate(&elements[0], state)
+            }
+            ExpressionKind::String { .. } => Some(ConstantValue::Address {
+                base: AddressBase::String,
+                offset: 0,
+            }),
+            _ => {
+                if state.note.is_none() {
+                    state.note = Some(expression.start);
+                }
+                None
+            }
+        }
+    }
+
+    fn evaluate_condition(
+        &self,
+        expression: &Expression,
+        state: &mut EvaluationState,
+    ) -> Option<bool> {
+        match self.evaluate(expression, state)? {
+            ConstantValue::Integer(value) => Some(value != 0),
+            ConstantValue::Floating(value) => Some(value != 0.0),
+            ConstantValue::Address { base, offset } => match base {
+                AddressBase::Null => Some(offset != 0),
+                _ => Some(true),
+            },
+        }
+    }
+
+    fn evaluate_address(
+        &self,
+        operand: &Expression,
+        state: &mut EvaluationState,
+    ) -> Option<ConstantValue> {
+        match &operand.ignore_parentheses().kind {
+            ExpressionKind::Reference { declaration } => {
+                let information = &self.declarations[*declaration];
+                match information.kind {
+                    DeclarationKind::Function => Some(ConstantValue::Address {
+                        base: AddressBase::Function(*declaration),
+                        offset: 0,
+                    }),
+                    DeclarationKind::Variable
+                        if information.file_scope
+                            || matches!(
+                                information.storage,
+                                StorageClass::Static | StorageClass::Extern
+                            ) =>
+                    {
+                        Some(ConstantValue::Address {
+                            base: AddressBase::Declaration(*declaration),
+                            offset: 0,
+                        })
+                    }
+                    _ => None,
+                }
+            }
+            ExpressionKind::String { .. } => Some(ConstantValue::Address {
+                base: AddressBase::String,
+                offset: 0,
+            }),
+            ExpressionKind::CompoundLiteral {
+                file_scope: true, ..
+            } => Some(ConstantValue::Address {
+                base: AddressBase::CompoundLiteral,
+                offset: 0,
+            }),
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Dereference,
+                operand,
+            } => self.evaluate(operand, state),
+            _ => None,
+        }
+    }
+
+    fn evaluate_trait(&self, kind: TraitKind, argument: &QualifiedType) -> Option<i128> {
+        match kind {
+            TraitKind::SizeOf => {
+                if argument.is_void() || argument.is_function() {
+                    return Some(1);
+                }
+                self.type_size_bits(argument)
+                    .map(|bits| i128::from(bits / 8))
+            }
+            TraitKind::AlignOf => {
+                let mut ty = argument.clone();
+                while let Some(element) = ty.array_element() {
+                    ty = element;
+                }
+                if ty.is_void() || ty.is_function() {
+                    return Some(1);
+                }
+                Some(i128::from(self.type_alignment_bits(&ty) / 8))
+            }
+            TraitKind::PreferredAlignOf => {
+                let mut ty = argument.clone();
+                while let Some(element) = ty.array_element() {
+                    ty = element;
+                }
+                if ty.is_void() || ty.is_function() {
+                    return Some(1);
+                }
+                Some(i128::from(self.preferred_alignment_bits(&ty) / 8))
+            }
+            TraitKind::CountOf => match &*argument.desugared().node {
+                TypeNode::ConstantArray { size, .. } => Some(i128::from(*size)),
+                _ => None,
+            },
+        }
+    }
+
+    fn preferred_alignment_bits(&self, ty: &QualifiedType) -> u32 {
+        let alignment = self.type_alignment_bits(ty);
+        let target = self.target();
+        let x86_32 = matches!(target.family, TargetFamily::X86(_)) && target.pointer_width == 32;
+        if x86_32 {
+            if let Some(kind) = ty.canonical().builtin_kind() {
+                if matches!(
+                    kind,
+                    BuiltinType::Double | BuiltinType::LongLong | BuiltinType::UnsignedLongLong
+                ) {
+                    return 64;
+                }
+            }
+            if let Some(element) = ty.complex_element() {
+                if element.builtin_kind() == Some(BuiltinType::Double) {
+                    return 64;
+                }
+            }
+        }
+        alignment
+    }
+
+    fn evaluate_binary(
+        &self,
+        expression: &Expression,
+        operator: BinaryOperator,
+        left: &Expression,
+        right: &Expression,
+        state: &mut EvaluationState,
+    ) -> Option<ConstantValue> {
+        if operator.is_assignment() {
+            state.side_effects = true;
+            return None;
+        }
+        if operator == BinaryOperator::Comma {
+            let mut inner = EvaluationState::default();
+            let left_value = self.evaluate(left, &mut inner);
+            if left_value.is_none() {
+                state.side_effects = true;
+            }
+            return self.evaluate(right, state);
+        }
+        if operator.is_logical() {
+            let left_truth = self.evaluate_condition(left, state)?;
+            if operator == BinaryOperator::LogicalAnd && !left_truth {
+                return Some(ConstantValue::Integer(0));
+            }
+            if operator == BinaryOperator::LogicalOr && left_truth {
+                return Some(ConstantValue::Integer(1));
+            }
+            let right_truth = self.evaluate_condition(right, state)?;
+            return Some(ConstantValue::Integer(i128::from(right_truth)));
+        }
+        let left_value = self.evaluate(left, state)?;
+        let right_value = self.evaluate(right, state)?;
+        match (left_value, right_value) {
+            (ConstantValue::Integer(a), ConstantValue::Integer(b)) => {
+                if operator.is_comparison() {
+                    let operand_unsigned = self.is_unsigned_integer(&left.ty);
+                    let ordering = if operand_unsigned {
+                        let width = self.integer_width(&left.ty);
+                        let mask = if width >= 128 {
+                            u128::MAX
+                        } else {
+                            (1u128 << width) - 1
+                        };
+                        ((a as u128) & mask).cmp(&((b as u128) & mask))
+                    } else {
+                        a.cmp(&b)
+                    };
+                    let result = match operator {
+                        BinaryOperator::Less => ordering.is_lt(),
+                        BinaryOperator::Greater => ordering.is_gt(),
+                        BinaryOperator::LessEqual => ordering.is_le(),
+                        BinaryOperator::GreaterEqual => ordering.is_ge(),
+                        BinaryOperator::Equal => ordering.is_eq(),
+                        _ => ordering.is_ne(),
+                    };
+                    return Some(ConstantValue::Integer(i128::from(result)));
+                }
+                let ty = &expression.ty;
+                let width = self.integer_width(ty);
+                let signed = self.is_signed_integer(ty);
+                let unsigned_value = |value: i128| -> u128 {
+                    let mask = if width >= 128 {
+                        u128::MAX
+                    } else {
+                        (1u128 << width) - 1
+                    };
+                    (value as u128) & mask
+                };
+                let exact: Option<i128> = match operator {
+                    BinaryOperator::Add => a.checked_add(b),
+                    BinaryOperator::Subtract => a.checked_sub(b),
+                    BinaryOperator::Multiply => a.checked_mul(b),
+                    BinaryOperator::Divide | BinaryOperator::Remainder => {
+                        if b == 0 {
+                            state.undefined = true;
+                            if state.note.is_none() {
+                                state.note = Some(expression.place);
+                            }
+                            return None;
+                        }
+                        if signed {
+                            let minimum = if width >= 128 {
+                                i128::MIN
+                            } else {
+                                -(1i128 << (width - 1))
+                            };
+                            if a == minimum && b == -1 {
+                                state.undefined = true;
+                                if operator == BinaryOperator::Divide {
+                                    if state.overflow.is_none() {
+                                        let text = if width >= 128 {
+                                            "overflow".to_string()
+                                        } else {
+                                            (1i128 << (width - 1)).to_string()
+                                        };
+                                        state.overflow = Some((expression.place, text, ty.clone()));
+                                    }
+                                    return Some(ConstantValue::Integer(minimum));
+                                }
+                                return Some(ConstantValue::Integer(0));
+                            }
+                            if operator == BinaryOperator::Divide {
+                                Some(a / b)
+                            } else {
+                                Some(a % b)
+                            }
+                        } else {
+                            let x = unsigned_value(a);
+                            let y = unsigned_value(b);
+                            let value = if operator == BinaryOperator::Divide {
+                                x / y
+                            } else {
+                                x % y
+                            };
+                            Some(value as i128)
+                        }
+                    }
+                    BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => {
+                        let left_width = self.integer_width(&left.ty);
+                        if b < 0 || b >= i128::from(left_width) {
+                            state.undefined = true;
+                            return None;
+                        }
+                        let amount = b as u32;
+                        if operator == BinaryOperator::ShiftLeft {
+                            if signed && a < 0 {
+                                state.undefined = true;
+                            }
+                            let shifted = if signed {
+                                (a as u128).wrapping_shl(amount) as i128
+                            } else {
+                                (unsigned_value(a).wrapping_shl(amount)) as i128
+                            };
+                            Some(shifted)
+                        } else if signed {
+                            Some(a >> amount)
+                        } else {
+                            Some((unsigned_value(a) >> amount) as i128)
+                        }
+                    }
+                    BinaryOperator::BitAnd => Some(a & b),
+                    BinaryOperator::BitXor => Some(a ^ b),
+                    BinaryOperator::BitOr => Some(a | b),
+                    _ => None,
+                };
+                let exact = exact?;
+                let normalized = self.normalize_integer(exact, ty);
+                if signed
+                    && normalized != exact
+                    && matches!(
+                        operator,
+                        BinaryOperator::Add | BinaryOperator::Subtract | BinaryOperator::Multiply
+                    )
+                    && state.overflow.is_none()
+                {
+                    state.overflow = Some((expression.place, exact.to_string(), ty.clone()));
+                }
+                if signed
+                    && operator == BinaryOperator::ShiftLeft
+                    && normalized != exact
+                    && b < i128::from(width)
+                {
+                    let fits_unsigned = exact >= 0 && (exact as u128) < (1u128 << width.min(127));
+                    if !fits_unsigned {
+                        state.undefined = true;
+                    }
+                }
+                Some(ConstantValue::Integer(normalized))
+            }
+            (ConstantValue::Floating(a), ConstantValue::Floating(b)) => {
+                let result = match operator {
+                    BinaryOperator::Add => a + b,
+                    BinaryOperator::Subtract => a - b,
+                    BinaryOperator::Multiply => a * b,
+                    BinaryOperator::Divide => a / b,
+                    BinaryOperator::Less => return Some(ConstantValue::Integer(i128::from(a < b))),
+                    BinaryOperator::Greater => {
+                        return Some(ConstantValue::Integer(i128::from(a > b)))
+                    }
+                    BinaryOperator::LessEqual => {
+                        return Some(ConstantValue::Integer(i128::from(a <= b)))
+                    }
+                    BinaryOperator::GreaterEqual => {
+                        return Some(ConstantValue::Integer(i128::from(a >= b)))
+                    }
+                    BinaryOperator::Equal => {
+                        return Some(ConstantValue::Integer(i128::from(a == b)))
+                    }
+                    BinaryOperator::NotEqual => {
+                        return Some(ConstantValue::Integer(i128::from(a != b)))
+                    }
+                    _ => return None,
+                };
+                let result = if expression.ty.builtin_kind() == Some(BuiltinType::Float) {
+                    f64::from(result as f32)
+                } else {
+                    result
+                };
+                Some(ConstantValue::Floating(result))
+            }
+            (ConstantValue::Address { base, offset }, ConstantValue::Integer(amount))
+                if matches!(operator, BinaryOperator::Add | BinaryOperator::Subtract) =>
+            {
+                let pointee_size = left
+                    .ty
+                    .pointee()
+                    .and_then(|pointee| self.type_size_bits(&pointee))
+                    .map(|bits| i128::from(bits / 8))
+                    .unwrap_or(1);
+                let delta = amount * pointee_size;
+                let offset = if operator == BinaryOperator::Add {
+                    offset + delta
+                } else {
+                    offset - delta
+                };
+                Some(ConstantValue::Address { base, offset })
+            }
+            (ConstantValue::Integer(amount), ConstantValue::Address { base, offset })
+                if operator == BinaryOperator::Add =>
+            {
+                let pointee_size = right
+                    .ty
+                    .pointee()
+                    .and_then(|pointee| self.type_size_bits(&pointee))
+                    .map(|bits| i128::from(bits / 8))
+                    .unwrap_or(1);
+                Some(ConstantValue::Address {
+                    base,
+                    offset: offset + amount * pointee_size,
+                })
+            }
+            (
+                ConstantValue::Address {
+                    base: left_base,
+                    offset: left_offset,
+                },
+                ConstantValue::Address {
+                    base: right_base,
+                    offset: right_offset,
+                },
+            ) => {
+                if operator.is_equality()
+                    && (left_base == AddressBase::Null || right_base == AddressBase::Null)
+                {
+                    let equal = left_base == right_base && left_offset == right_offset;
+                    let result = if operator == BinaryOperator::Equal {
+                        equal
+                    } else {
+                        !equal
+                    };
+                    return Some(ConstantValue::Integer(i128::from(result)));
+                }
+                if left_base == right_base && left_base != AddressBase::String {
+                    if operator == BinaryOperator::Subtract {
+                        let pointee_size = left
+                            .ty
+                            .pointee()
+                            .and_then(|pointee| self.type_size_bits(&pointee))
+                            .map(|bits| i128::from(bits / 8))
+                            .unwrap_or(1)
+                            .max(1);
+                        return Some(ConstantValue::Integer(
+                            (left_offset - right_offset) / pointee_size,
+                        ));
+                    }
+                    let ordering = left_offset.cmp(&right_offset);
+                    let result = match operator {
+                        BinaryOperator::Less => ordering.is_lt(),
+                        BinaryOperator::Greater => ordering.is_gt(),
+                        BinaryOperator::LessEqual => ordering.is_le(),
+                        BinaryOperator::GreaterEqual => ordering.is_ge(),
+                        BinaryOperator::Equal => ordering.is_eq(),
+                        BinaryOperator::NotEqual => ordering.is_ne(),
+                        _ => return None,
+                    };
+                    return Some(ConstantValue::Integer(i128::from(result)));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn evaluate_cast(
+        &self,
+        expression: &Expression,
+        kind: CastKind,
+        operand: &Expression,
+        state: &mut EvaluationState,
+    ) -> Option<ConstantValue> {
+        match kind {
+            CastKind::LValueToRValue => {
+                if let ExpressionKind::Reference { declaration } =
+                    &operand.ignore_parentheses().kind
+                {
+                    let information = &self.declarations[*declaration];
+                    if information.kind == DeclarationKind::EnumConstant {
+                        return Some(ConstantValue::Integer(information.value));
+                    }
+                }
+                if state.note.is_none() {
+                    state.note = Some(operand.start);
+                }
+                None
+            }
+            CastKind::ArrayToPointerDecay | CastKind::FunctionToPointerDecay => {
+                self.evaluate_address(operand, state)
+            }
+            CastKind::NoOp
+            | CastKind::AtomicToNonAtomic
+            | CastKind::NonAtomicToAtomic
+            | CastKind::BitCast => self.evaluate(operand, state),
+            CastKind::ToVoid => {
+                self.evaluate(operand, state);
+                None
+            }
+            CastKind::IntegralCast => match self.evaluate(operand, state)? {
+                ConstantValue::Integer(value) => Some(ConstantValue::Integer(
+                    self.normalize_integer(value, &expression.ty),
+                )),
+                other => Some(other),
+            },
+            CastKind::IntegralToBoolean
+            | CastKind::FloatingToBoolean
+            | CastKind::PointerToBoolean => {
+                let truth = self.evaluate_condition(operand, state)?;
+                Some(ConstantValue::Integer(i128::from(truth)))
+            }
+            CastKind::IntegralToFloating => match self.evaluate(operand, state)? {
+                ConstantValue::Integer(value) => {
+                    let floating = if self.is_unsigned_integer(&operand.ty) {
+                        let width = self.integer_width(&operand.ty);
+                        let mask = if width >= 128 {
+                            u128::MAX
+                        } else {
+                            (1u128 << width) - 1
+                        };
+                        ((value as u128) & mask) as f64
+                    } else {
+                        value as f64
+                    };
+                    let floating = if expression.ty.builtin_kind() == Some(BuiltinType::Float) {
+                        f64::from(floating as f32)
+                    } else {
+                        floating
+                    };
+                    Some(ConstantValue::Floating(floating))
+                }
+                _ => None,
+            },
+            CastKind::FloatingToIntegral => match self.evaluate(operand, state)? {
+                ConstantValue::Floating(value) => {
+                    let width = self.integer_width(&expression.ty);
+                    let signed = self.is_signed_integer(&expression.ty);
+                    if !floating_fits_integer(value, width, signed) {
+                        state.undefined = true;
+                        return None;
+                    }
+                    Some(ConstantValue::Integer(value.trunc() as i128))
+                }
+                _ => None,
+            },
+            CastKind::FloatingCast => match self.evaluate(operand, state)? {
+                ConstantValue::Floating(value) => {
+                    let value = if expression.ty.builtin_kind() == Some(BuiltinType::Float) {
+                        f64::from(value as f32)
+                    } else {
+                        value
+                    };
+                    Some(ConstantValue::Floating(value))
+                }
+                _ => None,
+            },
+            CastKind::NullToPointer => {
+                self.evaluate(operand, state)?;
+                Some(ConstantValue::Address {
+                    base: AddressBase::Null,
+                    offset: 0,
+                })
+            }
+            CastKind::IntegralToPointer => match self.evaluate(operand, state)? {
+                ConstantValue::Integer(value) => Some(ConstantValue::Address {
+                    base: AddressBase::Null,
+                    offset: value,
+                }),
+                other => Some(other),
+            },
+            CastKind::PointerToIntegral => match self.evaluate(operand, state)? {
+                ConstantValue::Address {
+                    base: AddressBase::Null,
+                    offset,
+                } => Some(ConstantValue::Integer(
+                    self.normalize_integer(offset, &expression.ty),
+                )),
+                _ => None,
+            },
+            _ => None,
+        }
+    }
+}
+
+fn floating_fits_integer(value: f64, width: u32, signed: bool) -> bool {
+    if value.is_nan() {
+        return false;
+    }
+    let truncated = value.trunc();
+    if signed {
+        let limit = 2f64.powi(width as i32 - 1);
+        truncated >= -limit && truncated < limit
+    } else {
+        let limit = 2f64.powi(width as i32);
+        truncated > -1.0 && truncated < limit
+    }
+}
+
+fn format_floating(value: f64) -> String {
+    if value.is_infinite() {
+        return if value > 0.0 {
+            "+Inf".to_string()
+        } else {
+            "-Inf".to_string()
+        };
+    }
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    let text = format!("{value}");
+    if text.contains('.') || text.contains('e') {
+        text
+    } else {
+        format!("{text}.")
+    }
+}
+
+fn escape_character(value: u32, quote: u8) -> String {
+    match value {
+        0x5c => "\\\\".to_string(),
+        0x07 => "\\a".to_string(),
+        0x08 => "\\b".to_string(),
+        0x0c => "\\f".to_string(),
+        0x0a => "\\n".to_string(),
+        0x0d => "\\r".to_string(),
+        0x09 => "\\t".to_string(),
+        0x0b => "\\v".to_string(),
+        _ if value == u32::from(quote) => format!("\\{}", quote as char),
+        0x20..=0x7e => char::from_u32(value)
+            .map(|character| character.to_string())
+            .unwrap_or_default(),
+        _ if value <= 0xff => format!("\\x{value:02x}"),
+        _ => format!("\\U{value:08x}"),
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AssignmentAction {
+    Assigning,
+    Passing,
+    Returning,
+    Converting,
+    Initializing,
+    Sending,
+    Casting,
+}
+
+impl AssignmentAction {
+    fn index(self) -> i128 {
+        match self {
+            AssignmentAction::Assigning => 0,
+            AssignmentAction::Passing => 1,
+            AssignmentAction::Returning => 2,
+            AssignmentAction::Converting => 3,
+            AssignmentAction::Initializing => 4,
+            AssignmentAction::Sending => 5,
+            AssignmentAction::Casting => 6,
+        }
+    }
+}
+
+fn binary_operator_for(kind: TokenKind) -> Option<BinaryOperator> {
+    Some(match kind {
+        TokenKind::Star => BinaryOperator::Multiply,
+        TokenKind::Slash => BinaryOperator::Divide,
+        TokenKind::Percent => BinaryOperator::Remainder,
+        TokenKind::Plus => BinaryOperator::Add,
+        TokenKind::Minus => BinaryOperator::Subtract,
+        TokenKind::LessLess => BinaryOperator::ShiftLeft,
+        TokenKind::GreaterGreater => BinaryOperator::ShiftRight,
+        TokenKind::Less => BinaryOperator::Less,
+        TokenKind::Greater => BinaryOperator::Greater,
+        TokenKind::LessEqual => BinaryOperator::LessEqual,
+        TokenKind::GreaterEqual => BinaryOperator::GreaterEqual,
+        TokenKind::EqualEqual => BinaryOperator::Equal,
+        TokenKind::ExclaimEqual => BinaryOperator::NotEqual,
+        TokenKind::Amp => BinaryOperator::BitAnd,
+        TokenKind::Caret => BinaryOperator::BitXor,
+        TokenKind::Pipe => BinaryOperator::BitOr,
+        TokenKind::AmpAmp => BinaryOperator::LogicalAnd,
+        TokenKind::PipePipe => BinaryOperator::LogicalOr,
+        TokenKind::Equal => BinaryOperator::Assign,
+        TokenKind::StarEqual => BinaryOperator::MultiplyAssign,
+        TokenKind::SlashEqual => BinaryOperator::DivideAssign,
+        TokenKind::PercentEqual => BinaryOperator::RemainderAssign,
+        TokenKind::PlusEqual => BinaryOperator::AddAssign,
+        TokenKind::MinusEqual => BinaryOperator::SubtractAssign,
+        TokenKind::LessLessEqual => BinaryOperator::ShiftLeftAssign,
+        TokenKind::GreaterGreaterEqual => BinaryOperator::ShiftRightAssign,
+        TokenKind::AmpEqual => BinaryOperator::BitAndAssign,
+        TokenKind::CaretEqual => BinaryOperator::BitXorAssign,
+        TokenKind::PipeEqual => BinaryOperator::BitOrAssign,
+        TokenKind::Comma => BinaryOperator::Comma,
+        _ => return None,
+    })
+}
+
+fn token_precedence(kind: TokenKind) -> u32 {
+    if kind == TokenKind::Question {
+        return 3;
+    }
+    binary_operator_for(kind)
+        .map(BinaryOperator::precedence)
+        .unwrap_or(0)
+}
+
+#[derive(Clone, Debug)]
+pub struct NumericLiteral {
+    pub floating: bool,
+    pub value: u64,
+    pub overflow: bool,
+    pub radix: u32,
+    pub unsigned: bool,
+    pub long: bool,
+    pub long_long: bool,
+    pub size: bool,
+    pub float: bool,
+    pub float16: bool,
+    pub float128: bool,
+    pub imaginary: bool,
+    pub bit_int: bool,
+    pub digits: String,
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    pub fn parse_expression(&mut self) -> Option<Expression> {
+        let left = self.parse_assignment_expression()?;
+        self.parse_rhs_of_binary_expression(Some(left), 1)
+    }
+
+    pub fn parse_assignment_expression(&mut self) -> Option<Expression> {
+        let left = self.parse_cast_expression(false, false)?;
+        self.parse_rhs_of_binary_expression(Some(left), 2)
+    }
+
+    pub fn parse_constant_expression(&mut self) -> Option<Expression> {
+        self.constant_context_depth += 1;
+        let left = self.parse_cast_expression(false, false);
+        let result = self.parse_rhs_of_binary_expression(left, 3);
+        self.constant_context_depth -= 1;
+        result
+    }
+
+    pub fn parse_expression_in_unevaluated_context(&mut self) -> Option<Expression> {
+        self.unevaluated_depth += 1;
+        let result = self.parse_expression();
+        self.unevaluated_depth -= 1;
+        result
+    }
+
+    fn parse_rhs_of_binary_expression(
+        &mut self,
+        left: Option<Expression>,
+        minimum: u32,
+    ) -> Option<Expression> {
+        let mut left = left;
+        let mut next_precedence = token_precedence(self.token.kind);
+        loop {
+            if next_precedence < minimum || self.unsupported.is_some() {
+                return left;
+            }
+            if self.token.kind == TokenKind::Comma {
+                let next = self.peek(1);
+                let next_keyword = self.keyword_of(&next);
+                let stop = matches!(next.kind, TokenKind::LeftBrace | TokenKind::RightBrace)
+                    || matches!(next_keyword, Some("for" | "while" | "if" | "else" | "goto"))
+                    || self.token_starts_declaration_specifier(&next, next_keyword);
+                if stop {
+                    return left;
+                }
+            }
+            let operator_token = self.token.clone();
+            let operator_place = self.consume();
+            let mut middle: Option<Option<Expression>> = None;
+            let mut colon_place = None;
+            let condition_for_pruning = if matches!(
+                operator_token.kind,
+                TokenKind::AmpAmp | TokenKind::PipePipe | TokenKind::Question
+            ) {
+                left.clone()
+            } else {
+                None
+            };
+            if next_precedence == 3 {
+                if !self.at(TokenKind::Colon) {
+                    let pruned = condition_for_pruning
+                        .as_ref()
+                        .map(|condition| {
+                            self.conditional_operand_pruning(condition, BinaryOperator::Comma, true)
+                        })
+                        .unwrap_or(Some(false));
+                    let saved = self.enter_conditional_operand(pruned);
+                    let parsed = self.parse_expression();
+                    self.leave_conditional_operand(saved);
+                    match parsed {
+                        Some(expression) => middle = Some(Some(expression)),
+                        None => {
+                            left = None;
+                            middle = Some(None);
+                        }
+                    }
+                } else {
+                    let place = self.token.site;
+                    self.diagnose("ext_gnu_conditional_expr", place, Vec::new());
+                    middle = Some(None);
+                }
+                match self.try_consume(TokenKind::Colon) {
+                    Some(place) => colon_place = Some(place),
+                    None => {
+                        let place = self.token.site;
+                        self.diagnose("err_expected", place, vec![Argument::text("':'")]);
+                        self.diagnose("note_matching", operator_place, vec![Argument::text("'?'")]);
+                        colon_place = Some(place);
+                    }
+                }
+            }
+            let pruning_operator = match operator_token.kind {
+                TokenKind::AmpAmp => Some(BinaryOperator::LogicalAnd),
+                TokenKind::PipePipe => Some(BinaryOperator::LogicalOr),
+                TokenKind::Question => Some(BinaryOperator::Comma),
+                _ => None,
+            };
+            let saved = pruning_operator.map(|operator| {
+                let pruned = condition_for_pruning
+                    .as_ref()
+                    .map(|condition| self.conditional_operand_pruning(condition, operator, false))
+                    .unwrap_or(Some(false));
+                self.enter_conditional_operand(pruned)
+            });
+            let mut right = self.parse_cast_expression(false, false);
+            if right.is_none() && !self.at(TokenKind::Semi) {
+                left = None;
+            }
+            let this_precedence = next_precedence;
+            next_precedence = token_precedence(self.token.kind);
+            let right_associative = this_precedence == 3 || this_precedence == 2;
+            if this_precedence < next_precedence
+                || (this_precedence == next_precedence && right_associative)
+            {
+                let bump = if right_associative { 0 } else { 1 };
+                right = self.parse_rhs_of_binary_expression(right, this_precedence + bump);
+                if right.is_none() && !self.at(TokenKind::Semi) {
+                    left = None;
+                }
+                next_precedence = token_precedence(self.token.kind);
+            }
+            if let Some(saved) = saved {
+                self.leave_conditional_operand(saved);
+            }
+            let Some(current) = left.take() else {
+                continue;
+            };
+            let Some(right_expression) = right else {
+                left = Some(Expression::error(current.start));
+                continue;
+            };
+            if let Some(middle) = middle {
+                let _ = colon_place;
+                left = Some(self.act_on_conditional(
+                    current,
+                    middle,
+                    right_expression,
+                    operator_place,
+                ));
+            } else {
+                let operator =
+                    binary_operator_for(operator_token.kind).unwrap_or(BinaryOperator::Comma);
+                left =
+                    Some(self.act_on_binary(operator, current, right_expression, operator_place));
+            }
+        }
+    }
+
+    fn parse_cast_expression(
+        &mut self,
+        address_of_operand: bool,
+        unary_only: bool,
+    ) -> Option<Expression> {
+        let mut not_cast = false;
+        let result =
+            self.parse_cast_expression_inner(address_of_operand, unary_only, &mut not_cast);
+        if not_cast {
+            let place = self.token.site;
+            self.diagnose("err_expected_expression", place, Vec::new());
+        }
+        result
+    }
+
+    fn parse_cast_expression_inner(
+        &mut self,
+        address_of_operand: bool,
+        unary_only: bool,
+        not_cast: &mut bool,
+    ) -> Option<Expression> {
+        let _ = unary_only;
+        if self.unsupported.is_some() {
+            return None;
+        }
+        let place = self.token.site;
+        let mut allow_suffix = true;
+        let result: Option<Expression> = match self.token.kind {
+            TokenKind::LeftParen => return self.parse_parenthesized_expression(),
+            TokenKind::Number => {
+                let token = self.token.clone();
+                self.consume();
+                self.act_on_numeric_constant(&token)
+            }
+            TokenKind::Character(prefix) => {
+                let token = self.token.clone();
+                self.consume();
+                self.act_on_character_constant(&token, prefix)
+            }
+            TokenKind::String(_) => self.parse_string_literal_expression(),
+            TokenKind::Identifier => match self.keyword() {
+                None => self.parse_identifier_expression(address_of_operand),
+                Some(keyword) => match keyword {
+                    "__func__" | "__FUNCTION__" | "__PRETTY_FUNCTION__" => {
+                        self.consume();
+                        Some(self.act_on_predefined(keyword, place))
+                    }
+                    "true" | "false" => {
+                        self.consume();
+                        let value = u128::from(keyword == "true");
+                        let ty = if self.language().at_least(CStandard::C23) {
+                            QualifiedType::builtin(BuiltinType::Bool)
+                        } else {
+                            Parser::int_type()
+                        };
+                        Some(Expression::new(
+                            ExpressionKind::Integer {
+                                value,
+                                spelling_radix: 10,
+                            },
+                            ty,
+                            ValueCategory::RValue,
+                            place,
+                            place,
+                            place,
+                        ))
+                    }
+                    "nullptr" => {
+                        self.unsupported("nullptr");
+                        return None;
+                    }
+                    "_Generic" => {
+                        self.unsupported("_Generic");
+                        return None;
+                    }
+                    "__extension__" => {
+                        self.consume();
+                        self.extension_depth += 1;
+                        let operand = self.parse_cast_expression(false, false);
+                        self.extension_depth -= 1;
+                        let operand = operand?;
+                        return Some(self.act_on_unary(UnaryOperator::Extension, operand, place));
+                    }
+                    "_Alignof" | "alignof" | "__alignof" | "sizeof" | "_Countof" => {
+                        if keyword == "_Alignof" {
+                            self.diagnose_c11_keyword("_Alignof", place);
+                        }
+                        allow_suffix = false;
+                        self.parse_unary_trait_expression(keyword)
+                    }
+                    "__real" | "__imag" => {
+                        self.consume();
+                        let operand = self.parse_cast_expression(false, false)?;
+                        let operator = if keyword == "__real" {
+                            UnaryOperator::Real
+                        } else {
+                            UnaryOperator::Imaginary
+                        };
+                        return Some(self.act_on_unary(operator, operand, place));
+                    }
+                    "__builtin_va_arg"
+                    | "__builtin_offsetof"
+                    | "__builtin_choose_expr"
+                    | "__builtin_types_compatible_p"
+                    | "__builtin_convertvector"
+                    | "__builtin_LINE"
+                    | "__builtin_FILE"
+                    | "__builtin_FUNCTION"
+                    | "__builtin_COLUMN"
+                    | "__builtin_FILE_NAME"
+                    | "__builtin_bit_cast"
+                    | "__builtin_astype" => {
+                        self.unsupported(format!("builtin {keyword}"));
+                        return None;
+                    }
+                    _ => {
+                        *not_cast = true;
+                        return None;
+                    }
+                },
+            },
+            TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                let operator = if self.at(TokenKind::PlusPlus) {
+                    UnaryOperator::PreIncrement
+                } else {
+                    UnaryOperator::PreDecrement
+                };
+                self.consume();
+                let mut inner_not_cast = false;
+                let operand = self.parse_cast_expression_inner(false, true, &mut inner_not_cast);
+                if inner_not_cast {
+                    let here = self.token.site;
+                    self.diagnose("err_expected_expression", here, Vec::new());
+                    return None;
+                }
+                let operand = operand?;
+                return Some(self.act_on_unary(operator, operand, place));
+            }
+            TokenKind::Amp => {
+                self.consume();
+                let operand = self.parse_cast_expression(true, false)?;
+                return Some(self.act_on_unary(UnaryOperator::AddressOf, operand, place));
+            }
+            TokenKind::Star
+            | TokenKind::Plus
+            | TokenKind::Minus
+            | TokenKind::Tilde
+            | TokenKind::Exclaim => {
+                let operator = match self.token.kind {
+                    TokenKind::Star => UnaryOperator::Dereference,
+                    TokenKind::Plus => UnaryOperator::Plus,
+                    TokenKind::Minus => UnaryOperator::Minus,
+                    TokenKind::Tilde => UnaryOperator::Not,
+                    _ => UnaryOperator::LogicalNot,
+                };
+                self.consume();
+                let operand = self.parse_cast_expression(false, false)?;
+                return Some(self.act_on_unary(operator, operand, place));
+            }
+            TokenKind::AmpAmp => {
+                self.unsupported("address of label");
+                return None;
+            }
+            TokenKind::Caret => {
+                self.unsupported("block literal");
+                return None;
+            }
+            _ => {
+                *not_cast = true;
+                return None;
+            }
+        };
+        let result = result?;
+        if !allow_suffix {
+            match self.token.kind {
+                TokenKind::LeftSquare
+                | TokenKind::LeftParen
+                | TokenKind::PlusPlus
+                | TokenKind::MinusMinus => {
+                    if self.token.at_start_of_line() {
+                        return Some(result);
+                    }
+                }
+                TokenKind::Period | TokenKind::Arrow => {}
+                _ => return Some(result),
+            }
+            let here = self.token.site;
+            let spelling = self
+                .token
+                .kind
+                .punctuator_spelling()
+                .unwrap_or("")
+                .to_string();
+            self.diagnose(
+                "err_postfix_after_unary_requires_parens",
+                here,
+                vec![Argument::Text(format!("'{spelling}'"))],
+            );
+        }
+        self.parse_postfix_suffix(result)
+    }
+
+    fn parse_parenthesized_expression(&mut self) -> Option<Expression> {
+        let open = self.consume();
+        if self.at(TokenKind::LeftBrace) {
+            let place = self.token.site;
+            self.diagnose("ext_gnu_statement_expr", place, Vec::new());
+            self.unsupported("statement expression");
+            return None;
+        }
+        if self.is_type_name_start() {
+            let start = self.token.site;
+            let mut specifiers = DeclarationSpecifiers::new(start);
+            self.parse_specifier_qualifier_list(&mut specifiers, SpecifierContext::Normal);
+            let mut declarator = Declarator::new(DeclaratorContext::TypeName, start);
+            self.parse_declarator(&mut declarator);
+            if self.unsupported.is_some() {
+                return None;
+            }
+            if !self.expect_closing(TokenKind::RightParen, open) {
+                return None;
+            }
+            let close = self.previous_place;
+            if self.at(TokenKind::LeftBrace) {
+                let ty = self.type_for_declarator(&specifiers, &mut declarator);
+                if !self.language().at_least(CStandard::C99) {
+                    self.diagnose("ext_c99_compound_literal", open, Vec::new());
+                }
+                let initializer_start = self.token.site;
+                let initializer = self.parse_braced_initializer()?;
+                if declarator.invalid {
+                    return None;
+                }
+                let literal =
+                    self.act_on_compound_literal(open, ty, close, initializer, initializer_start)?;
+                return self.parse_postfix_suffix(literal);
+            }
+            let ty = self.type_for_declarator(&specifiers, &mut declarator);
+            if declarator.invalid {
+                let _ = self.parse_cast_expression(false, false);
+                return None;
+            }
+            let operand = self.parse_cast_expression(false, false)?;
+            return Some(self.act_on_cast(open, ty, close, operand));
+        }
+        let inner = self.parse_expression();
+        let Some(inner) = inner else {
+            self.skip_until(&[TokenKind::RightParen], true, false);
+            return None;
+        };
+        if !self.at(TokenKind::RightParen) {
+            self.expect_closing(TokenKind::RightParen, open);
+            return None;
+        }
+        let close = self.consume();
+        let ty = inner.ty.clone();
+        let category = inner.category;
+        let parenthesized = Expression::new(
+            ExpressionKind::Parenthesized(Box::new(inner)),
+            ty,
+            category,
+            open,
+            open,
+            close,
+        );
+        self.parse_postfix_suffix(parenthesized)
+    }
+
+    fn parse_postfix_suffix(&mut self, mut expression: Expression) -> Option<Expression> {
+        loop {
+            if self.unsupported.is_some() {
+                return Some(expression);
+            }
+            match self.token.kind {
+                TokenKind::LeftSquare => {
+                    let open = self.consume();
+                    let index = self.parse_expression();
+                    let close = self.token.site;
+                    let Some(index) = index else {
+                        self.expect_closing(TokenKind::RightSquare, open);
+                        return None;
+                    };
+                    if !self.at(TokenKind::RightSquare) {
+                        self.expect_closing(TokenKind::RightSquare, open);
+                        return None;
+                    }
+                    self.consume();
+                    expression = self.act_on_subscript(expression, index, open, close);
+                }
+                TokenKind::LeftParen => {
+                    let open = self.consume();
+                    let mut arguments = Vec::new();
+                    let mut invalid = false;
+                    if !self.at(TokenKind::RightParen) {
+                        loop {
+                            match self.parse_assignment_expression() {
+                                Some(argument) => arguments.push(argument),
+                                None => {
+                                    invalid = true;
+                                    break;
+                                }
+                            }
+                            if self.try_consume(TokenKind::Comma).is_none() {
+                                break;
+                            }
+                        }
+                    }
+                    if invalid {
+                        self.skip_until(&[TokenKind::RightParen], true, false);
+                        return None;
+                    }
+                    if !self.at(TokenKind::RightParen) {
+                        let had_errors = expression.contains_error()
+                            || arguments.iter().any(Expression::contains_error);
+                        if had_errors {
+                            self.skip_until(&[TokenKind::RightParen], true, false);
+                        } else {
+                            self.expect_closing(TokenKind::RightParen, open);
+                        }
+                        return None;
+                    }
+                    let close = self.token.site;
+                    expression = self.act_on_call(expression, arguments, open, close);
+                    self.consume();
+                }
+                TokenKind::Arrow | TokenKind::Period => {
+                    let arrow = self.at(TokenKind::Arrow);
+                    let operator_place = self.consume();
+                    if !self.is_identifier() {
+                        let place = self.token.site;
+                        self.diagnose(
+                            "err_expected_unqualified_id",
+                            place,
+                            vec![Argument::number(0)],
+                        );
+                        return None;
+                    }
+                    let name = self.token.spelling.clone();
+                    let name_place = self.consume();
+                    expression = self.act_on_member_access(
+                        expression,
+                        arrow,
+                        operator_place,
+                        name,
+                        name_place,
+                    )?;
+                }
+                TokenKind::PlusPlus | TokenKind::MinusMinus => {
+                    let operator = if self.at(TokenKind::PlusPlus) {
+                        UnaryOperator::PostIncrement
+                    } else {
+                        UnaryOperator::PostDecrement
+                    };
+                    let place = self.consume();
+                    expression = self.act_on_unary(operator, expression, place);
+                }
+                _ => return Some(expression),
+            }
+        }
+    }
+
+    fn parse_unary_trait_expression(&mut self, keyword: &'static str) -> Option<Expression> {
+        let place = self.consume();
+        let keyword_end = self.previous_end;
+        let kind = match keyword {
+            "sizeof" => TraitKind::SizeOf,
+            "__alignof" => TraitKind::PreferredAlignOf,
+            "_Countof" => TraitKind::CountOf,
+            _ => TraitKind::AlignOf,
+        };
+        if self.at(TokenKind::LeftParen) {
+            let next = self.peek(1);
+            let next_keyword = self.keyword_of(&next);
+            if self.token_starts_type_name(&next, next_keyword) {
+                let open = self.consume();
+                let ty = self.parse_type_name();
+                if !self.expect_closing(TokenKind::RightParen, open) {
+                    return None;
+                }
+                let close = self.previous_place;
+                let ty = ty?;
+                if self.at(TokenKind::LeftBrace) {
+                    if !self.language().at_least(CStandard::C99) {
+                        self.diagnose("ext_c99_compound_literal", open, Vec::new());
+                    }
+                    let initializer_start = self.token.site;
+                    let initializer = self.parse_braced_initializer()?;
+                    let literal = self.act_on_compound_literal(
+                        open,
+                        ty,
+                        close,
+                        initializer,
+                        initializer_start,
+                    )?;
+                    let operand = self.parse_postfix_suffix(literal)?;
+                    return self.act_on_trait_expression(kind, keyword, None, Some(operand), place);
+                }
+                return self.act_on_trait_expression(kind, keyword, Some((ty, close)), None, place);
+            }
+        }
+        if !self.at(TokenKind::LeftParen) && keyword != "_Countof" {
+            let token = self.token.clone();
+            let token_keyword = self.token_keyword;
+            if self.token_starts_type_name(&token, token_keyword) {
+                let _ = self.parse_type_name();
+                let close_end = self.previous_end;
+                let diagnostic_place = match (keyword_end, close_end) {
+                    (Some(open), Some(_)) => open,
+                    _ => place,
+                };
+                self.diagnose(
+                    "err_expected_parentheses_around_typename",
+                    diagnostic_place,
+                    vec![Argument::text(keyword)],
+                );
+                return None;
+            }
+        }
+        self.unevaluated_depth += 1;
+        let operand = self.parse_cast_expression(false, true);
+        self.unevaluated_depth -= 1;
+        let operand = operand?;
+        self.act_on_trait_expression(kind, keyword, None, Some(operand), place)
+    }
+
+    fn token_starts_type_name(&mut self, token: &Token, keyword: Option<&'static str>) -> bool {
+        if let Some(keyword) = keyword {
+            return matches!(
+                keyword,
+                "short"
+                    | "long"
+                    | "__int64"
+                    | "__int128"
+                    | "signed"
+                    | "unsigned"
+                    | "_Complex"
+                    | "_Imaginary"
+                    | "void"
+                    | "char"
+                    | "int"
+                    | "_BitInt"
+                    | "_ExtInt"
+                    | "half"
+                    | "__bf16"
+                    | "float"
+                    | "double"
+                    | "_Float16"
+                    | "__float128"
+                    | "__ibm128"
+                    | "bool"
+                    | "_Bool"
+                    | "_Decimal32"
+                    | "_Decimal64"
+                    | "_Decimal128"
+                    | "struct"
+                    | "union"
+                    | "enum"
+                    | "const"
+                    | "volatile"
+                    | "restrict"
+                    | "_Atomic"
+                    | "typeof"
+                    | "typeof_unqual"
+                    | "__attribute"
+                    | "_Alignas"
+                    | "alignas"
+                    | "_Nonnull"
+                    | "_Nullable"
+                    | "_Nullable_result"
+                    | "_Null_unspecified"
+                    | "__unaligned"
+            );
+        }
+        if token.kind == TokenKind::Identifier {
+            return self.typedef_named(&token.spelling).is_some();
+        }
+        false
+    }
+
+    fn parse_string_literal_expression(&mut self) -> Option<Expression> {
+        let mut pieces = Vec::new();
+        while matches!(self.token.kind, TokenKind::String(_)) {
+            pieces.push(self.token.clone());
+            self.consume();
+        }
+        self.act_on_string_literal(&pieces)
+    }
+
+    fn parse_identifier_expression(&mut self, address_of_operand: bool) -> Option<Expression> {
+        let _ = address_of_operand;
+        let name = self.token.spelling.clone();
+        let place = self.consume();
+        let followed_by_paren = self.at(TokenKind::LeftParen);
+        self.act_on_identifier(name, place, followed_by_paren)
+    }
+
+    fn numeric_literal(&mut self, token: &Token) -> Option<NumericLiteral> {
+        let parsed = self.preprocessor.parse_number(token, true).ok()?;
+        let spelling = String::from_utf8_lossy(&token.spelling).into_owned();
+        let bytes = spelling.as_bytes();
+        let hex = spelling.starts_with("0x") || spelling.starts_with("0X");
+        let (floating, value, overflow, radix) = match parsed {
+            NumberValue::Integer {
+                value,
+                radix,
+                overflow,
+                ..
+            } => (false, value, overflow, radix),
+            NumberValue::Floating => (true, 0, false, if hex { 16 } else { 10 }),
+        };
+        let mut suffix_start = bytes.len();
+        let mut position = if hex { 2 } else { 0 };
+        while position < bytes.len() {
+            let byte = bytes[position];
+            let in_number = if hex {
+                byte.is_ascii_hexdigit()
+                    || byte == b'.'
+                    || byte == b'\''
+                    || ((byte == b'p' || byte == b'P') && floating)
+                    || ((byte == b'+' || byte == b'-')
+                        && position > 0
+                        && matches!(bytes[position - 1], b'p' | b'P'))
+            } else {
+                byte.is_ascii_digit()
+                    || byte == b'.'
+                    || byte == b'\''
+                    || ((byte == b'e' || byte == b'E') && floating)
+                    || ((byte == b'+' || byte == b'-')
+                        && position > 0
+                        && matches!(bytes[position - 1], b'e' | b'E'))
+                    || (radix == 2 && position == 1 && (byte == b'b' || byte == b'B'))
+                    || (radix == 8 && position == 1 && (byte == b'o' || byte == b'O'))
+            };
+            if !in_number {
+                suffix_start = position;
+                break;
+            }
+            position += 1;
+        }
+        let suffix = spelling[suffix_start..].to_ascii_lowercase();
+        let digits: String = spelling[..suffix_start]
+            .chars()
+            .filter(|character| *character != '\'')
+            .collect();
+        let mut literal = NumericLiteral {
+            floating,
+            value,
+            overflow,
+            radix,
+            unsigned: false,
+            long: false,
+            long_long: false,
+            size: false,
+            float: false,
+            float16: false,
+            float128: false,
+            imaginary: false,
+            bit_int: false,
+            digits,
+        };
+        let mut rest = suffix.as_str();
+        while !rest.is_empty() {
+            if let Some(next) = rest.strip_prefix("f16") {
+                literal.float16 = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix("ll") {
+                literal.long_long = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix("wb") {
+                literal.bit_int = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix('u') {
+                literal.unsigned = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix('l') {
+                literal.long = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix('f') {
+                literal.float = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix('q') {
+                literal.float128 = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix('z') {
+                literal.size = true;
+                rest = next;
+            } else if let Some(next) = rest.strip_prefix('i').or_else(|| rest.strip_prefix('j')) {
+                literal.imaginary = true;
+                rest = next;
+            } else {
+                break;
+            }
+        }
+        Some(literal)
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum AssignResult {
+    Compatible,
+    PointerToInteger,
+    IntegerToPointer,
+    FunctionVoidPointer,
+    IncompatiblePointer,
+    IncompatibleFunctionPointer,
+    IncompatiblePointerSign,
+    CompatiblePointerDiscardsQualifiers,
+    IncompatibleNestedPointerQualifiers,
+    Incompatible,
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    fn implicit_cast(
+        &self,
+        expression: Expression,
+        ty: QualifiedType,
+        kind: CastKind,
+    ) -> Expression {
+        if expression.ty.is_arithmetic()
+            && ty.is_arithmetic()
+            && expression.ty.canonical().unqualified() != ty.canonical().unqualified()
+        {
+            self.guard_warning_groups(&CONVERSION_WARNING_GROUPS);
+        }
+        let start = expression.start;
+        let place = expression.place;
+        let end = expression.end;
+        Expression::new(
+            ExpressionKind::Cast {
+                kind,
+                operand: Box::new(expression),
+                explicit: false,
+                written: None,
+            },
+            ty,
+            ValueCategory::RValue,
+            start,
+            place,
+            end,
+        )
+    }
+
+    pub fn default_lvalue_conversion(&mut self, expression: Expression) -> Expression {
+        if expression.is_error() || !expression.is_lvalue() {
+            return expression;
+        }
+        let ty = expression.ty.clone();
+        if ty.is_function() || ty.is_array() {
+            return expression;
+        }
+        if ty.is_void() {
+            return expression;
+        }
+        if !self.is_complete_type(&ty) {
+            return expression;
+        }
+        let unqualified = ty.unqualified();
+        if let Some(value) = unqualified.atomic_value() {
+            let converted =
+                self.implicit_cast(expression, unqualified.clone(), CastKind::LValueToRValue);
+            return self.implicit_cast(converted, value.unqualified(), CastKind::AtomicToNonAtomic);
+        }
+        if let Some(declaration) = expression.referenced_declaration() {
+            self.declarations[declaration].used = true;
+        }
+        self.implicit_cast(expression, unqualified, CastKind::LValueToRValue)
+    }
+
+    fn default_function_array_conversion(&mut self, expression: Expression) -> Expression {
+        if expression.is_error() {
+            return expression;
+        }
+        let ty = expression.ty.clone();
+        if ty.is_function() {
+            return self.implicit_cast(
+                expression,
+                QualifiedType::pointer_to(ty),
+                CastKind::FunctionToPointerDecay,
+            );
+        }
+        if let Some(element) = ty.array_element() {
+            if !expression.is_lvalue()
+                && !matches!(
+                    expression.ignore_parentheses().kind,
+                    ExpressionKind::CompoundLiteral { .. }
+                )
+                && !self.language().at_least(CStandard::C99)
+            {
+                self.diagnose("ext_array_init_parens", expression.start, Vec::new());
+            }
+            let element_in_array = match &*ty.node {
+                TypeNode::ConstantArray { element, .. }
+                | TypeNode::IncompleteArray { element, .. }
+                | TypeNode::VariableArray { element, .. } => element.with_qualifiers(ty.qualifiers),
+                _ => element,
+            };
+            return self.implicit_cast(
+                expression,
+                QualifiedType::pointer_to(element_in_array),
+                CastKind::ArrayToPointerDecay,
+            );
+        }
+        expression
+    }
+
+    fn default_function_array_lvalue_conversion(&mut self, expression: Expression) -> Expression {
+        let converted = self.default_function_array_conversion(expression);
+        self.default_lvalue_conversion(converted)
+    }
+
+    fn usual_unary_conversions(&mut self, expression: Expression) -> Expression {
+        let expression = self.default_function_array_lvalue_conversion(expression);
+        if expression.is_error() {
+            return expression;
+        }
+        let ty = expression.ty.clone();
+        if ty.builtin_kind() == Some(BuiltinType::Half)
+            || ty.builtin_kind() == Some(BuiltinType::Float16)
+        {
+            return expression;
+        }
+        if ty.is_integer() {
+            if let Some(promoted) = self.promotable_bit_field_type(&expression) {
+                return self.implicit_cast(expression, promoted, CastKind::IntegralCast);
+            }
+            if self.is_promotable_integer(&ty) {
+                let promoted = self.promoted_integer_type(&ty);
+                return self.implicit_cast(expression, promoted, CastKind::IntegralCast);
+            }
+        }
+        expression
+    }
+
+    fn promotable_bit_field_type(&self, expression: &Expression) -> Option<QualifiedType> {
+        let ExpressionKind::Member { tag, field, .. } =
+            &expression.ignore_parentheses_and_implicit_casts().kind
+        else {
+            return None;
+        };
+        let field = &self.tags[*tag].fields[*field];
+        let width = field.bit_width?;
+        let ty = &field.ty;
+        if ty.is_bool() {
+            return None;
+        }
+        let int_width = self.target().int_width;
+        if width < int_width || (width == int_width && self.is_signed_integer(ty)) {
+            return Some(Parser::int_type());
+        }
+        if width == int_width {
+            return Some(QualifiedType::builtin(BuiltinType::UnsignedInt));
+        }
+        None
+    }
+
+    fn default_argument_promotion(&mut self, expression: Expression) -> Expression {
+        let expression = self.usual_unary_conversions(expression);
+        if expression.is_error() {
+            return expression;
+        }
+        let ty = expression.ty.clone();
+        if matches!(
+            ty.builtin_kind(),
+            Some(BuiltinType::Float | BuiltinType::Half | BuiltinType::Float16)
+        ) {
+            return self.implicit_cast(
+                expression,
+                QualifiedType::builtin(BuiltinType::Double),
+                CastKind::FloatingCast,
+            );
+        }
+        expression
+    }
+
+    fn scalar_cast_kind(&self, from: &QualifiedType, to: &QualifiedType) -> CastKind {
+        let from_canonical = from.canonical().unqualified();
+        let to_canonical = to.canonical().unqualified();
+        if from_canonical == to_canonical {
+            return CastKind::NoOp;
+        }
+        if to_canonical.is_bool() {
+            if from.is_pointer() {
+                return CastKind::PointerToBoolean;
+            }
+            if from.is_floating() {
+                return CastKind::FloatingToBoolean;
+            }
+            if from.is_complex() {
+                return CastKind::ComplexToBoolean;
+            }
+            return CastKind::IntegralToBoolean;
+        }
+        if to.is_pointer() {
+            if from.is_pointer() {
+                return CastKind::BitCast;
+            }
+            return CastKind::IntegralToPointer;
+        }
+        if from.is_pointer() {
+            return CastKind::PointerToIntegral;
+        }
+        if to.is_complex() {
+            if from.is_complex() {
+                return CastKind::ComplexCast;
+            }
+            if from.is_real_floating() {
+                return CastKind::FloatingRealToComplex;
+            }
+            return CastKind::IntegralRealToComplex;
+        }
+        if from.is_complex() {
+            return CastKind::ComplexToReal;
+        }
+        match (from.is_real_floating(), to.is_real_floating()) {
+            (true, true) => CastKind::FloatingCast,
+            (true, false) => CastKind::FloatingToIntegral,
+            (false, true) => CastKind::IntegralToFloating,
+            (false, false) => CastKind::IntegralCast,
+        }
+    }
+
+    fn convert_to(&mut self, expression: Expression, ty: &QualifiedType) -> Expression {
+        if expression.is_error() {
+            return expression;
+        }
+        let kind = self.scalar_cast_kind(&expression.ty, ty);
+        if kind == CastKind::NoOp
+            && expression.ty.canonical().unqualified() == ty.canonical().unqualified()
+        {
+            return expression;
+        }
+        self.implicit_cast(expression, ty.unqualified(), kind)
+    }
+
+    fn arithmetic_conversion_type(
+        &self,
+        left: &QualifiedType,
+        right: &QualifiedType,
+    ) -> QualifiedType {
+        let left = left.canonical().unqualified();
+        let right = right.canonical().unqualified();
+        if left == right {
+            return left;
+        }
+        let left_complex = left.complex_element();
+        let right_complex = right.complex_element();
+        if left_complex.is_some() || right_complex.is_some() {
+            let left_element = left_complex.clone().unwrap_or_else(|| left.clone());
+            let right_element = right_complex.clone().unwrap_or_else(|| right.clone());
+            let element = self.arithmetic_conversion_type(&left_element, &right_element);
+            return QualifiedType::new(TypeNode::Complex(element));
+        }
+        let left_floating = left.builtin_kind().filter(|kind| kind.is_floating());
+        let right_floating = right.builtin_kind().filter(|kind| kind.is_floating());
+        match (left_floating, right_floating) {
+            (Some(a), Some(b)) => {
+                return if a.floating_rank() >= b.floating_rank() {
+                    left
+                } else {
+                    right
+                };
+            }
+            (Some(_), None) => return left,
+            (None, Some(_)) => return right,
+            _ => {}
+        }
+        let left = if self.is_promotable_integer(&left) {
+            self.promoted_integer_type(&left)
+        } else {
+            left
+        };
+        let right = if self.is_promotable_integer(&right) {
+            self.promoted_integer_type(&right)
+        } else {
+            right
+        };
+        let left = left.canonical();
+        let right = right.canonical();
+        if left == right {
+            return left;
+        }
+        let left_signed = self.is_signed_integer(&left);
+        let right_signed = self.is_signed_integer(&right);
+        let left_rank = self.integer_rank(&left);
+        let right_rank = self.integer_rank(&right);
+        if left_signed == right_signed {
+            return if left_rank >= right_rank { left } else { right };
+        }
+        let (signed, unsigned, signed_rank, unsigned_rank) = if left_signed {
+            (left, right, left_rank, right_rank)
+        } else {
+            (right, left, right_rank, left_rank)
+        };
+        if unsigned_rank >= signed_rank {
+            return unsigned;
+        }
+        if self.integer_width(&signed) > self.integer_width(&unsigned) {
+            return signed;
+        }
+        self.corresponding_unsigned(&signed)
+    }
+
+    fn usual_arithmetic_conversions(
+        &mut self,
+        left: Expression,
+        right: Expression,
+        compound: bool,
+        kind: u8,
+        place: Place,
+    ) -> (Expression, Expression, Option<QualifiedType>) {
+        self.check_enum_arithmetic_conversions(
+            &left,
+            &right,
+            place,
+            if compound { 4 } else { kind },
+        );
+        let left = if compound {
+            left
+        } else {
+            self.usual_unary_conversions(left)
+        };
+        let right = self.usual_unary_conversions(right);
+        if left.is_error() || right.is_error() {
+            return (left, right, None);
+        }
+        if !left.ty.is_arithmetic() || !right.ty.is_arithmetic() {
+            return (left, right, None);
+        }
+        if (kind == 2 || kind == 3)
+            && left.ty.is_integer()
+            && right.ty.is_integer()
+            && self.is_signed_integer(&left.ty) != self.is_signed_integer(&right.ty)
+        {
+            self.guard_warning_groups(&["sign-compare"]);
+        }
+        let left_type = if compound {
+            let promoted = left.ty.clone();
+            if self.is_promotable_integer(&promoted) {
+                self.promoted_integer_type(&promoted)
+            } else {
+                promoted
+            }
+        } else {
+            left.ty.clone()
+        };
+        let common = self.arithmetic_conversion_type(&left_type, &right.ty);
+        let right = self.convert_to(right, &common);
+        let left = if compound {
+            left
+        } else {
+            self.convert_to(left, &common)
+        };
+        (left, right, Some(common))
+    }
+
+    pub fn is_null_pointer_constant(&self, expression: &Expression) -> bool {
+        let inner = expression.ignore_parentheses();
+        if let ExpressionKind::Cast {
+            explicit: true,
+            operand,
+            ..
+        } = &inner.kind
+        {
+            if let Some(pointee) = inner.ty.pointee() {
+                if pointee.is_void() && pointee.canonical().qualifiers == 0 {
+                    return self.is_null_pointer_constant(operand);
+                }
+            }
+        }
+        if let ExpressionKind::Cast {
+            explicit: false,
+            operand,
+            kind,
+            ..
+        } = &inner.kind
+        {
+            if matches!(
+                kind,
+                CastKind::NullToPointer | CastKind::BitCast | CastKind::NoOp
+            ) && inner.ty.is_pointer()
+            {
+                return self.is_null_pointer_constant(operand);
+            }
+        }
+        if !inner.ty.is_integer() {
+            return false;
+        }
+        if !self.is_integer_constant_expression(inner) {
+            return false;
+        }
+        self.evaluate_integer(inner) == Some(0)
+    }
+
+    fn act_on_numeric_constant(&mut self, token: &Token) -> Option<Expression> {
+        let place = token.site;
+        let literal = self.numeric_literal(token)?;
+        if literal.floating {
+            let ty = if literal.float {
+                QualifiedType::builtin(BuiltinType::Float)
+            } else if literal.long {
+                QualifiedType::builtin(BuiltinType::LongDouble)
+            } else if literal.float16 {
+                QualifiedType::builtin(BuiltinType::Float16)
+            } else if literal.float128 {
+                QualifiedType::builtin(BuiltinType::Float128)
+            } else {
+                QualifiedType::builtin(BuiltinType::Double)
+            };
+            let value = parse_floating_literal(&literal.digits, literal.radix == 16);
+            let narrowed = match ty.builtin_kind() {
+                Some(BuiltinType::Float) => f64::from(value as f32),
+                Some(BuiltinType::Float16) => {
+                    if value.abs() > 65504.0 {
+                        f64::INFINITY.copysign(value)
+                    } else {
+                        value
+                    }
+                }
+                _ => value,
+            };
+            let digits_nonzero = literal.digits.bytes().any(|byte| {
+                byte.is_ascii_digit() && byte != b'0'
+                    || (literal.radix == 16
+                        && byte.is_ascii_hexdigit()
+                        && byte != b'0'
+                        && byte != b'x'
+                        && byte != b'X')
+            });
+            if narrowed.is_infinite() {
+                let largest = match ty.builtin_kind() {
+                    Some(BuiltinType::Float) => "3.40282347E+38",
+                    Some(BuiltinType::Float16) => "6.5504E+4",
+                    Some(BuiltinType::LongDouble) if self.target().long_double_width > 64 => {
+                        "1.18973149535723176502E+4932"
+                    }
+                    _ => "1.7976931348623157E+308",
+                };
+                self.diagnose(
+                    "warn_float_overflow",
+                    place,
+                    vec![Argument::Type(ty.clone()), Argument::text(largest)],
+                );
+            } else if narrowed == 0.0
+                && digits_nonzero
+                && !floating_literal_is_zero(&literal.digits)
+            {
+                let smallest = match ty.builtin_kind() {
+                    Some(BuiltinType::Float) => "1.40129846E-45",
+                    Some(BuiltinType::Float16) => "5.9604644775390625E-8",
+                    Some(BuiltinType::LongDouble) if self.target().long_double_width > 64 => {
+                        "3.64519953188247460253E-4951"
+                    }
+                    _ => "4.9406564584124654E-324",
+                };
+                self.diagnose(
+                    "warn_float_underflow",
+                    place,
+                    vec![Argument::Type(ty.clone()), Argument::text(smallest)],
+                );
+            }
+            let mut expression = Expression::new(
+                ExpressionKind::Floating { value: narrowed },
+                ty,
+                ValueCategory::RValue,
+                place,
+                place,
+                place,
+            );
+            if literal.imaginary {
+                self.diagnose_compatibility(
+                    "imaginary_constant",
+                    CStandard::C2y,
+                    place,
+                    Vec::new(),
+                );
+                let complex = QualifiedType::new(TypeNode::Complex(expression.ty.clone()));
+                expression = Expression::new(
+                    ExpressionKind::Parenthesized(Box::new(expression)),
+                    complex,
+                    ValueCategory::RValue,
+                    place,
+                    place,
+                    place,
+                );
+                self.unsupported("imaginary literal");
+            }
+            return Some(expression);
+        }
+        if literal.bit_int {
+            self.unsupported("_BitInt literal");
+            return None;
+        }
+        if literal.size {
+            self.diagnose("err_cxx23_size_t_suffix", place, Vec::new());
+            self.unsupported("size_t literal suffix");
+            return None;
+        }
+        let target = self.target().clone();
+        let value = literal.value;
+        let ty;
+        if literal.overflow {
+            self.diagnose(
+                "err_integer_literal_too_large",
+                place,
+                vec![Argument::number(1)],
+            );
+            ty = QualifiedType::builtin(BuiltinType::UnsignedLongLong);
+        } else {
+            let allow_unsigned = literal.unsigned || literal.radix != 10;
+            let fits = |width: u32| -> bool { width >= 64 || value >> width == 0 };
+            let top_clear = |width: u32| -> bool { value >> (width - 1) == 0 };
+            let mut chosen: Option<BuiltinType> = None;
+            if !literal.long && !literal.long_long && fits(target.int_width) {
+                if !literal.unsigned && top_clear(target.int_width) {
+                    chosen = Some(BuiltinType::Int);
+                } else if allow_unsigned {
+                    chosen = Some(BuiltinType::UnsignedInt);
+                }
+            }
+            if chosen.is_none() && !literal.long_long && fits(target.long_width) {
+                if !literal.unsigned && top_clear(target.long_width) {
+                    chosen = Some(BuiltinType::Long);
+                } else if allow_unsigned {
+                    chosen = Some(BuiltinType::UnsignedLong);
+                } else if !self.language().at_least(CStandard::C99)
+                    && target.long_width < target.long_long_width
+                {
+                    self.diagnose(
+                        "warn_old_implicitly_unsigned_long",
+                        place,
+                        vec![Argument::number(0)],
+                    );
+                    chosen = Some(BuiltinType::UnsignedLong);
+                } else if !self.language().at_least(CStandard::C99) {
+                    self.diagnose(
+                        "warn_old_implicitly_unsigned_long",
+                        place,
+                        vec![Argument::number(1)],
+                    );
+                    chosen = Some(BuiltinType::UnsignedLong);
+                }
+            }
+            if chosen.is_none() && fits(target.long_long_width) {
+                if !literal.unsigned && top_clear(target.long_long_width) {
+                    chosen = Some(BuiltinType::LongLong);
+                } else if allow_unsigned {
+                    chosen = Some(BuiltinType::UnsignedLongLong);
+                }
+                if chosen.is_some() && !self.language().at_least(CStandard::C99) {
+                    self.diagnose("ext_c99_longlong", place, Vec::new());
+                }
+            }
+            ty = match chosen {
+                Some(kind) => QualifiedType::builtin(kind),
+                None => {
+                    self.diagnose(
+                        "ext_integer_literal_too_large_for_signed",
+                        place,
+                        Vec::new(),
+                    );
+                    QualifiedType::builtin(BuiltinType::UnsignedLongLong)
+                }
+            };
+        }
+        let expression = Expression::new(
+            ExpressionKind::Integer {
+                value: u128::from(value),
+                spelling_radix: literal.radix,
+            },
+            ty,
+            ValueCategory::RValue,
+            place,
+            place,
+            place,
+        );
+        if literal.imaginary {
+            self.unsupported("imaginary literal");
+        }
+        Some(expression)
+    }
+
+    fn act_on_character_constant(
+        &mut self,
+        token: &Token,
+        prefix: LiteralPrefix,
+    ) -> Option<Expression> {
+        let place = token.site;
+        let value = self.preprocessor.parse_character(token, prefix).ok()?;
+        let ty = match prefix {
+            LiteralPrefix::Plain => Parser::int_type(),
+            LiteralPrefix::Wide => self.wide_character_type(),
+            LiteralPrefix::Utf16 => {
+                QualifiedType::builtin(self.builtin_for_integer_type(self.target().char16_type))
+            }
+            LiteralPrefix::Utf32 => {
+                QualifiedType::builtin(self.builtin_for_integer_type(self.target().char32_type))
+            }
+            LiteralPrefix::Utf8 => {
+                if self.language().at_least(CStandard::C23) {
+                    QualifiedType::builtin(BuiltinType::UnsignedChar)
+                } else {
+                    self.char_type()
+                }
+            }
+        };
+        Some(Expression::new(
+            ExpressionKind::Character {
+                value: value.bits as u32,
+                prefix,
+            },
+            ty,
+            ValueCategory::RValue,
+            place,
+            place,
+            place,
+        ))
+    }
+
+    fn act_on_predefined(&mut self, name: &'static str, place: Place) -> Expression {
+        let function_name = match self.function.as_ref().map(|function| function.declaration) {
+            Some(declaration) => declaration
+                .and_then(|declaration| self.declarations[declaration].name.as_ref())
+                .map(|name| String::from_utf8_lossy(name).into_owned())
+                .unwrap_or_default(),
+            None => {
+                self.diagnose(
+                    "ext_predef_outside_function",
+                    place,
+                    vec![Argument::text(name)],
+                );
+                String::new()
+            }
+        };
+        let text = if name == "__PRETTY_FUNCTION__" && !function_name.is_empty() {
+            let function = self
+                .function
+                .as_ref()
+                .and_then(|function| function.declaration)
+                .unwrap_or(0);
+            let ty = self.declarations[function].ty.clone();
+            self.print_type_with(&ty, &function_name)
+        } else if name == "__PRETTY_FUNCTION__" {
+            "top level".to_string()
+        } else {
+            function_name
+        };
+        let mut units: Vec<u32> = text.bytes().map(u32::from).collect();
+        units.push(0);
+        let element = self.char_type().with_qualifiers(QUALIFIER_CONST);
+        let ty = QualifiedType::new(TypeNode::ConstantArray {
+            element,
+            size: units.len() as u64,
+            modifier: ArrayModifier::Normal,
+            index_qualifiers: 0,
+        });
+        Expression::new(
+            ExpressionKind::Predefined { name, units },
+            ty,
+            ValueCategory::LValue,
+            place,
+            place,
+            place,
+        )
+    }
+
+    fn act_on_string_literal(&mut self, pieces: &[Token]) -> Option<Expression> {
+        let start = pieces.first()?.site;
+        let end = pieces.last()?.site;
+        let mut prefix = LiteralPrefix::Plain;
+        for piece in pieces {
+            let TokenKind::String(piece_prefix) = piece.kind else {
+                continue;
+            };
+            if piece_prefix == LiteralPrefix::Plain {
+                continue;
+            }
+            if prefix != LiteralPrefix::Plain && prefix != piece_prefix {
+                self.diagnose("err_unsupported_string_concat", piece.site, Vec::new());
+                return None;
+            }
+            prefix = piece_prefix;
+        }
+        let width: u32 = match prefix {
+            LiteralPrefix::Plain | LiteralPrefix::Utf8 => 8,
+            LiteralPrefix::Wide => self.target().type_width(self.target().wchar_type),
+            LiteralPrefix::Utf16 => 16,
+            LiteralPrefix::Utf32 => 32,
+        };
+        let mut units: Vec<u32> = Vec::new();
+        for piece in pieces {
+            if !self.decode_string_piece(piece, width, &mut units) {
+                return None;
+            }
+        }
+        units.push(0);
+        let element = match prefix {
+            LiteralPrefix::Plain => self.char_type(),
+            LiteralPrefix::Utf8 => {
+                if self.language().at_least(CStandard::C23) {
+                    QualifiedType::builtin(BuiltinType::UnsignedChar)
+                } else {
+                    self.char_type()
+                }
+            }
+            LiteralPrefix::Wide => self.wide_character_type(),
+            LiteralPrefix::Utf16 => {
+                QualifiedType::builtin(self.builtin_for_integer_type(self.target().char16_type))
+            }
+            LiteralPrefix::Utf32 => {
+                QualifiedType::builtin(self.builtin_for_integer_type(self.target().char32_type))
+            }
+        };
+        let ty = QualifiedType::new(TypeNode::ConstantArray {
+            element,
+            size: units.len() as u64,
+            modifier: ArrayModifier::Normal,
+            index_qualifiers: 0,
+        });
+        Some(Expression::new(
+            ExpressionKind::String { units, prefix },
+            ty,
+            ValueCategory::LValue,
+            start,
+            start,
+            end,
+        ))
+    }
+
+    fn decode_string_piece(&mut self, token: &Token, width: u32, units: &mut Vec<u32>) -> bool {
+        let spelling = token.spelling.clone();
+        let Some(open) = spelling.iter().position(|byte| *byte == b'"') else {
+            return false;
+        };
+        if spelling.get(open.wrapping_sub(1)) == Some(&b'R') {
+            self.unsupported("raw string literal");
+            return false;
+        }
+        let end = spelling.len().saturating_sub(1);
+        let mut at = open + 1;
+        let mask: u64 = if width >= 32 {
+            0xFFFF_FFFF
+        } else {
+            (1u64 << width) - 1
+        };
+        let mut failed = false;
+        while at < end {
+            let byte = spelling[at];
+            if byte != b'\\' {
+                if byte < 0x80 || width == 8 {
+                    units.push(u32::from(byte));
+                    at += 1;
+                    continue;
+                }
+                let text = String::from_utf8_lossy(&spelling[at..end]);
+                let Some(character) = text.chars().next() else {
+                    at += 1;
+                    continue;
+                };
+                let length = character.len_utf8();
+                self.push_code_point(u32::from(character), width, units);
+                at += length;
+                continue;
+            }
+            at += 1;
+            let escape = spelling.get(at).copied().unwrap_or(0);
+            at += 1;
+            let value: u64 = match escape {
+                b'\\' | b'\'' | b'"' | b'?' => u64::from(escape),
+                b'a' => 7,
+                b'b' => 8,
+                b'e' | b'E' => {
+                    self.report(
+                        Message::NonstandardEscape,
+                        token.site,
+                        vec![(escape as char).to_string()],
+                    );
+                    27
+                }
+                b'f' => 12,
+                b'n' => 10,
+                b'r' => 13,
+                b't' => 9,
+                b'v' => 11,
+                b'x' => {
+                    if at >= end || !spelling[at].is_ascii_hexdigit() {
+                        self.report(
+                            Message::HexEscapeNoDigits,
+                            token.site,
+                            vec!["x".to_string()],
+                        );
+                        return false;
+                    }
+                    let mut value = 0u64;
+                    let mut overflow = false;
+                    while at < end && spelling[at].is_ascii_hexdigit() {
+                        if value & 0xF000_0000 != 0 {
+                            overflow = true;
+                        }
+                        value = ((value << 4) | u64::from(hex_value(spelling[at]).unwrap_or(0)))
+                            & 0xFFFF_FFFF;
+                        at += 1;
+                    }
+                    if width < 32 && (value >> width) != 0 {
+                        overflow = true;
+                        value &= mask;
+                    }
+                    if overflow && !failed {
+                        failed = true;
+                        self.report(Message::EscapeTooLarge, token.site, vec!["0".to_string()]);
+                    }
+                    value
+                }
+                b'0'..=b'7' => {
+                    let mut value = u64::from(escape - b'0');
+                    let mut count = 1;
+                    while count < 3 && at < end && (b'0'..=b'7').contains(&spelling[at]) {
+                        value = (value << 3) | u64::from(spelling[at] - b'0');
+                        at += 1;
+                        count += 1;
+                    }
+                    if width < 32 && (value >> width) != 0 {
+                        self.report(Message::EscapeTooLarge, token.site, vec!["1".to_string()]);
+                        value &= mask;
+                        failed = true;
+                    }
+                    value
+                }
+                b'u' | b'U' => {
+                    let count = if escape == b'u' { 4 } else { 8 };
+                    let digits = &spelling[at..(at + count).min(end)];
+                    if digits.len() < count || !digits.iter().all(|digit| digit.is_ascii_hexdigit())
+                    {
+                        self.unsupported("malformed universal character name in string");
+                        return false;
+                    }
+                    let code =
+                        u32::from_str_radix(&String::from_utf8_lossy(digits), 16).unwrap_or(0);
+                    at += count;
+                    self.push_code_point(code, width, units);
+                    continue;
+                }
+                b'(' | b'{' | b'[' | b'%' => {
+                    self.report(
+                        Message::NonstandardEscape,
+                        token.site,
+                        vec![(escape as char).to_string()],
+                    );
+                    u64::from(escape)
+                }
+                _ => {
+                    let shown = if (0x20..0x7f).contains(&escape) {
+                        (escape as char).to_string()
+                    } else {
+                        format!("x{escape:X}")
+                    };
+                    self.report(Message::UnknownEscape, token.site, vec![shown]);
+                    u64::from(escape)
+                }
+            };
+            units.push(value as u32);
+        }
+        !failed || width != 8
+    }
+
+    fn push_code_point(&mut self, code: u32, width: u32, units: &mut Vec<u32>) {
+        match width {
+            8 => {
+                let mut buffer = [0u8; 4];
+                let character = char::from_u32(code).unwrap_or('\u{fffd}');
+                for byte in character.encode_utf8(&mut buffer).bytes() {
+                    units.push(u32::from(byte));
+                }
+            }
+            16 => {
+                let character = char::from_u32(code).unwrap_or('\u{fffd}');
+                let mut buffer = [0u16; 2];
+                for unit in character.encode_utf16(&mut buffer) {
+                    units.push(u32::from(*unit));
+                }
+            }
+            _ => units.push(code),
+        }
+    }
+
+    fn act_on_identifier(
+        &mut self,
+        name: Rc<[u8]>,
+        place: Place,
+        followed_by_paren: bool,
+    ) -> Option<Expression> {
+        let found = self.lookup_ordinary(&name);
+        let Some(declaration) = found else {
+            if followed_by_paren {
+                return self.implicitly_declare_function(name, place);
+            }
+            if name.starts_with(b"__builtin_") {
+                self.unsupported("builtin function reference");
+                return None;
+            }
+            if self.has_typo_candidates(&name) {
+                self.unsupported("typo correction for undeclared identifier");
+                return None;
+            }
+            self.diagnose("err_undeclared_var_use", place, vec![Argument::Name(name)]);
+            return None;
+        };
+        let information = &self.declarations[declaration];
+        match information.kind {
+            DeclarationKind::Typedef => {
+                self.diagnose("err_unexpected_typedef", place, vec![Argument::Name(name)]);
+                return Some(Expression::error(place));
+            }
+            DeclarationKind::Tag => return Some(Expression::error(place)),
+            _ => {}
+        }
+        if information.invalid {
+            return Some(Expression::error(place));
+        }
+        let ty = information.ty.clone();
+        let (category, ty) = match information.kind {
+            DeclarationKind::EnumConstant => (ValueCategory::RValue, ty),
+            DeclarationKind::Function => (ValueCategory::LValue, ty),
+            _ => (ValueCategory::LValue, ty),
+        };
+        self.declarations[declaration].referenced = true;
+        if self.unevaluated_depth == 0 {
+            self.declarations[declaration].used = true;
+        }
+        Some(Expression::new(
+            ExpressionKind::Reference { declaration },
+            ty,
+            category,
+            place,
+            place,
+            place,
+        ))
+    }
+
+    fn implicitly_declare_function(&mut self, name: Rc<[u8]>, place: Place) -> Option<Expression> {
+        if name.starts_with(b"__builtin_")
+            || LIBRARY_BUILTIN_NAMES
+                .binary_search(&String::from_utf8_lossy(&name).as_ref())
+                .is_ok()
+        {
+            self.unsupported("call to undeclared builtin or library function");
+            return None;
+        }
+        if self.has_typo_candidates(&name) && self.language().at_least(CStandard::C99) {
+            self.unsupported("typo correction for undeclared function");
+            return None;
+        }
+        if self.language().at_least(CStandard::C99) {
+            self.diagnose(
+                "ext_implicit_function_decl_c99",
+                place,
+                vec![Argument::Name(name.clone())],
+            );
+        } else {
+            self.diagnose(
+                "warn_implicit_function_decl",
+                place,
+                vec![Argument::Name(name.clone())],
+            );
+        }
+        let ty = QualifiedType::new(TypeNode::FunctionNoPrototype {
+            result: Parser::int_type(),
+            noreturn: false,
+        });
+        let mut declaration = Declaration::new(
+            DeclarationKind::Function,
+            Some(name.clone()),
+            place,
+            ty.clone(),
+        );
+        declaration.implicit = true;
+        declaration.storage = StorageClass::Extern;
+        declaration.file_scope = true;
+        let index = self.add_declaration(declaration);
+        let depth = self
+            .scopes
+            .iter()
+            .rposition(|scope| scope.flags & (SCOPE_BLOCK | SCOPE_FUNCTION | SCOPE_FILE) != 0)
+            .unwrap_or(0);
+        self.push_on_scope_at(index, depth);
+        self.declarations[index].used = true;
+        Some(Expression::new(
+            ExpressionKind::Reference { declaration: index },
+            ty,
+            ValueCategory::LValue,
+            place,
+            place,
+            place,
+        ))
+    }
+
+    fn invalid_operands(
+        &mut self,
+        place: Place,
+        left: &Expression,
+        right: &Expression,
+    ) -> Expression {
+        self.diagnose(
+            "err_typecheck_invalid_operands",
+            place,
+            vec![
+                Argument::Type(left.ty.clone()),
+                Argument::Type(right.ty.clone()),
+            ],
+        );
+        Expression::error(place)
+    }
+
+    fn binary(
+        &self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        ty: QualifiedType,
+        place: Place,
+    ) -> Expression {
+        let start = left.start;
+        let end = right.end;
+        Expression::new(
+            ExpressionKind::Binary {
+                operator,
+                left: Box::new(left),
+                right: Box::new(right),
+            },
+            ty,
+            ValueCategory::RValue,
+            start,
+            place,
+            end,
+        )
+    }
+
+    fn act_on_binary(
+        &mut self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        place: Place,
+    ) -> Expression {
+        self.diagnose_binary_operator_precedence(operator, &left, &right, place);
+        let is_comparison = |expression: &Expression| matches!(&expression.ignore_parentheses().kind, ExpressionKind::Binary { operator, .. } if operator.is_comparison());
+        match operator {
+            BinaryOperator::Comma => self.guard_warning_groups(&["comma"]),
+            BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr
+                if is_comparison(&left) && is_comparison(&right) =>
+            {
+                self.guard_warning_groups(&["tautological-overlap-compare"]);
+            }
+            BinaryOperator::BitAnd | BinaryOperator::BitOr => self.guard_warning_groups(&[
+                "bitwise-instead-of-logical",
+                "tautological-bitwise-compare",
+            ]),
+            _ => {}
+        }
+        if left.contains_error() || right.contains_error() {
+            return Expression::error(left.start);
+        }
+        if operator.is_assignment() {
+            return self.act_on_assignment(operator, left, right, place);
+        }
+        match operator {
+            BinaryOperator::Comma => {
+                let left = if left.ty.is_void() {
+                    left
+                } else {
+                    self.default_function_array_lvalue_conversion(left)
+                };
+                self.diagnose_unused_comma_operand(&left, place);
+                let right = self.default_function_array_lvalue_conversion(right);
+                let ty = right.ty.clone();
+                self.binary(operator, left, right, ty, place)
+            }
+            BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                let left = self.usual_unary_conversions(left);
+                let right = self.usual_unary_conversions(right);
+                if !left.ty.is_scalar() || !right.ty.is_scalar() {
+                    return self.invalid_operands(place, &left, &right);
+                }
+                self.binary(operator, left, right, Parser::int_type(), place)
+            }
+            BinaryOperator::Multiply | BinaryOperator::Divide => {
+                self.check_multiplicative(operator, left, right, place, false)
+                    .0
+            }
+            BinaryOperator::Remainder => self.check_remainder(left, right, place, false).0,
+            BinaryOperator::Add => self.check_addition(left, right, place, false).0,
+            BinaryOperator::Subtract => self.check_subtraction(left, right, place, false).0,
+            BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => {
+                self.check_shift(operator, left, right, place, false).0
+            }
+            BinaryOperator::BitAnd | BinaryOperator::BitXor | BinaryOperator::BitOr => {
+                self.check_bitwise(operator, left, right, place, false).0
+            }
+            _ => self.check_comparison(operator, left, right, place),
+        }
+    }
+
+    fn check_multiplicative(
+        &mut self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        place: Place,
+        compound: bool,
+    ) -> (Expression, Option<QualifiedType>) {
+        let (left, right, common) =
+            self.usual_arithmetic_conversions(left, right, compound, 0, place);
+        let Some(common) = common else {
+            return (self.invalid_operands(place, &left, &right), None);
+        };
+        if operator == BinaryOperator::Divide {
+            self.check_division_by_zero(&left, &right, place, true);
+        }
+        let result_type = if compound {
+            left.ty.clone()
+        } else {
+            common.clone()
+        };
+        (
+            self.binary(operator, left, right, result_type, place),
+            Some(common),
+        )
+    }
+
+    fn check_division_by_zero(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        place: Place,
+        division: bool,
+    ) {
+        let _ = left;
+        if !right.ty.is_integer() {
+            return;
+        }
+        let mut state = EvaluationState::default();
+        if let Some(ConstantValue::Integer(0)) = self.evaluate(right, &mut state) {
+            if !state.side_effects {
+                self.diagnose_if_reachable(
+                    "warn_remainder_division_by_zero",
+                    place,
+                    vec![Argument::number(i128::from(division))],
+                );
+            }
+        }
+    }
+
+    fn check_remainder(
+        &mut self,
+        left: Expression,
+        right: Expression,
+        place: Place,
+        compound: bool,
+    ) -> (Expression, Option<QualifiedType>) {
+        let (left, right, common) =
+            self.usual_arithmetic_conversions(left, right, compound, 0, place);
+        let Some(common) = common.filter(|common| common.is_integer()) else {
+            return (self.invalid_operands(place, &left, &right), None);
+        };
+        self.check_division_by_zero(&left, &right, place, false);
+        let result_type = if compound {
+            left.ty.clone()
+        } else {
+            common.clone()
+        };
+        (
+            self.binary(BinaryOperator::Remainder, left, right, result_type, place),
+            Some(common),
+        )
+    }
+
+    fn check_pointer_arithmetic_operand(&mut self, place: Place, pointer: &Expression) -> bool {
+        let Some(pointee) = pointer.ty.pointee() else {
+            return true;
+        };
+        if pointee.is_void() {
+            self.diagnose("ext_gnu_void_ptr", place, vec![Argument::number(0)]);
+            return true;
+        }
+        if pointee.is_function() {
+            self.diagnose(
+                "ext_gnu_ptr_func_arith",
+                place,
+                vec![
+                    Argument::number(0),
+                    Argument::Type(pointee),
+                    Argument::number(0),
+                ],
+            );
+            return true;
+        }
+        if !self.is_complete_type(&pointee) {
+            self.diagnose(
+                "err_typecheck_arithmetic_incomplete_or_sizeless_type",
+                place,
+                vec![Argument::number(0), Argument::Type(pointer.ty.clone())],
+            );
+            self.note_incomplete_type(&pointee);
+            return false;
+        }
+        true
+    }
+
+    fn check_addition(
+        &mut self,
+        left: Expression,
+        right: Expression,
+        place: Place,
+        compound: bool,
+    ) -> (Expression, Option<QualifiedType>) {
+        let (left, right, common) =
+            self.usual_arithmetic_conversions(left, right, compound, 0, place);
+        if !compound {
+            self.diagnose_string_plus_scalar(&left, &right, place);
+        }
+        if let Some(common) = common {
+            let result_type = if compound {
+                left.ty.clone()
+            } else {
+                common.clone()
+            };
+            return (
+                self.binary(BinaryOperator::Add, left, right, result_type, place),
+                Some(common),
+            );
+        }
+        let left = if compound {
+            left
+        } else {
+            self.default_function_array_lvalue_conversion(left)
+        };
+        let right = self.default_function_array_lvalue_conversion(right);
+        let (pointer_on_left, pointer, integer) = if left.ty.is_pointer() {
+            (true, &left, &right)
+        } else if right.ty.is_pointer() && !compound {
+            (false, &right, &left)
+        } else {
+            return (self.invalid_operands(place, &left, &right), None);
+        };
+        if !integer.ty.is_integer() {
+            return (self.invalid_operands(place, &left, &right), None);
+        }
+        let pointer_clone = pointer.clone();
+        let integer_clone = integer.clone();
+        if self.is_null_pointer_constant(pointer_clone.ignore_parentheses_and_casts()) {
+            let gnu_idiom = pointer_on_left
+                && pointer_clone.ty.pointee().is_some_and(|pointee| {
+                    self.type_size_bits(&pointee) == Some(8) || pointee.is_void()
+                });
+            if gnu_idiom {
+                self.diagnose("warn_gnu_null_ptr_arith", place, Vec::new());
+            } else {
+                self.diagnose(
+                    "warn_pointer_arith_null_ptr",
+                    place,
+                    vec![Argument::number(0)],
+                );
+            }
+        }
+        if !self.check_pointer_arithmetic_operand(place, &pointer_clone) {
+            return (Expression::error(place), None);
+        }
+        self.check_array_access_guard(&pointer_clone, &integer_clone, true);
+        let ty = pointer_clone.ty.clone();
+        (
+            self.binary(BinaryOperator::Add, left, right, ty, place),
+            None,
+        )
+    }
+
+    fn check_subtraction(
+        &mut self,
+        left: Expression,
+        right: Expression,
+        place: Place,
+        compound: bool,
+    ) -> (Expression, Option<QualifiedType>) {
+        let (left, right, common) =
+            self.usual_arithmetic_conversions(left, right, compound, 0, place);
+        if let Some(common) = common {
+            let result_type = if compound {
+                left.ty.clone()
+            } else {
+                common.clone()
+            };
+            return (
+                self.binary(BinaryOperator::Subtract, left, right, result_type, place),
+                Some(common),
+            );
+        }
+        let left = if compound {
+            left
+        } else {
+            self.default_function_array_lvalue_conversion(left)
+        };
+        let right = self.default_function_array_lvalue_conversion(right);
+        if let Some(left_pointee) = left.ty.pointee() {
+            if right.ty.is_integer() {
+                let left_clone = left.clone();
+                if self.is_null_pointer_constant(left_clone.ignore_parentheses_and_casts()) {
+                    self.diagnose(
+                        "warn_pointer_arith_null_ptr",
+                        place,
+                        vec![Argument::number(0)],
+                    );
+                }
+                if !self.check_pointer_arithmetic_operand(place, &left_clone) {
+                    return (Expression::error(place), None);
+                }
+                if !compound {
+                    self.unsupported_if_array_access_may_warn(&left_clone, &right);
+                }
+                let ty = left.ty.clone();
+                return (
+                    self.binary(BinaryOperator::Subtract, left, right, ty, place),
+                    None,
+                );
+            }
+            if let Some(right_pointee) = right.ty.pointee() {
+                if compound {
+                    return (self.invalid_operands(place, &left, &right), None);
+                }
+                if !self.types_compatible(&left_pointee.unqualified(), &right_pointee.unqualified())
+                {
+                    self.diagnose(
+                        "err_typecheck_sub_ptr_compatible",
+                        place,
+                        vec![
+                            Argument::Type(left.ty.clone()),
+                            Argument::Type(right.ty.clone()),
+                        ],
+                    );
+                    return (Expression::error(place), None);
+                }
+                let left_clone = left.clone();
+                if !self.check_pointer_arithmetic_operand(place, &left_clone) {
+                    return (Expression::error(place), None);
+                }
+                let left_null = self.is_null_pointer_constant(left.ignore_parentheses_and_casts());
+                let right_null =
+                    self.is_null_pointer_constant(right.ignore_parentheses_and_casts());
+                if left_null {
+                    self.diagnose_if_reachable(
+                        "warn_pointer_sub_null_ptr",
+                        place,
+                        vec![Argument::number(0)],
+                    );
+                }
+                if right_null {
+                    self.diagnose_if_reachable(
+                        "warn_pointer_sub_null_ptr",
+                        place,
+                        vec![Argument::number(0)],
+                    );
+                }
+                if left_pointee.is_void() || left_pointee.is_function() {
+                    let _ = right_pointee;
+                } else if self.type_size_bits(&left_pointee) == Some(0) {
+                    self.diagnose(
+                        "warn_sub_ptr_zero_size_types",
+                        place,
+                        vec![Argument::Type(left_pointee.clone())],
+                    );
+                }
+                let ty = self.pointer_difference_type();
+                return (
+                    self.binary(BinaryOperator::Subtract, left, right, ty, place),
+                    None,
+                );
+            }
+        }
+        (self.invalid_operands(place, &left, &right), None)
+    }
+
+    fn check_shift(
+        &mut self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        place: Place,
+        compound: bool,
+    ) -> (Expression, Option<QualifiedType>) {
+        let right = self.usual_unary_conversions(right);
+        let left_promoted = if compound {
+            left
+        } else {
+            self.usual_unary_conversions(left)
+        };
+        if !left_promoted.ty.is_integer() || !right.ty.is_integer() {
+            return (self.invalid_operands(place, &left_promoted, &right), None);
+        }
+        self.diagnose_bad_shift(&left_promoted, &right, place, operator);
+        let ty = left_promoted.ty.clone();
+        let computation = if compound && self.is_promotable_integer(&ty) {
+            self.promoted_integer_type(&ty)
+        } else {
+            ty.clone()
+        };
+        (
+            self.binary(operator, left_promoted, right, ty, place),
+            Some(computation),
+        )
+    }
+
+    fn diagnose_bad_shift(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        place: Place,
+        operator: BinaryOperator,
+    ) {
+        let mut state = EvaluationState::default();
+        let Some(ConstantValue::Integer(amount)) = self.evaluate(right, &mut state) else {
+            return;
+        };
+        if amount < 0 && self.is_signed_integer(&right.ty) {
+            self.diagnose_if_reachable("warn_shift_negative", place, Vec::new());
+            return;
+        }
+        let width = if self.is_promotable_integer(&left.ty) {
+            self.integer_width(&self.promoted_integer_type(&left.ty))
+        } else {
+            self.integer_width(&left.ty)
+        };
+        if amount >= i128::from(width) {
+            self.diagnose_if_reachable("warn_shift_gt_typewidth", place, Vec::new());
+            return;
+        }
+        if operator != BinaryOperator::ShiftLeft {
+            return;
+        }
+        let mut left_state = EvaluationState::default();
+        let Some(ConstantValue::Integer(value)) = self.evaluate(left, &mut left_state) else {
+            return;
+        };
+        if !self.is_signed_integer(&left.ty) {
+            return;
+        }
+        if value < 0 {
+            if !self.language().at_least(CStandard::C23) {
+                self.diagnose_if_reachable("warn_shift_lhs_negative", place, Vec::new());
+            }
+            return;
+        }
+        let used = 128 - (value as u128).leading_zeros();
+        let needed = used + amount as u32;
+        if needed > width {
+            if needed == width + 1 {
+                if !self.language().at_least(CStandard::C23) {
+                    self.diagnose(
+                        "warn_shift_result_sets_sign_bit",
+                        place,
+                        vec![
+                            Argument::Text(format!("0x{:X}", (value as u128) << amount)),
+                            Argument::Type(left.ty.clone()),
+                        ],
+                    );
+                }
+                return;
+            }
+            let shifted = (value as u128)
+                .checked_shl(amount as u32)
+                .map(|v| v.to_string())
+                .unwrap_or_default();
+            self.diagnose(
+                "warn_shift_result_gt_typewidth",
+                place,
+                vec![
+                    Argument::Text(shifted),
+                    Argument::number(i128::from(needed)),
+                    Argument::Type(left.ty.clone()),
+                    Argument::number(i128::from(width)),
+                ],
+            );
+        }
+    }
+
+    fn check_bitwise(
+        &mut self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        place: Place,
+        compound: bool,
+    ) -> (Expression, Option<QualifiedType>) {
+        if operator == BinaryOperator::BitAnd {
+            self.diagnose_logical_not_on_left_of_check(&left, &right, operator);
+        }
+        let (left, right, common) =
+            self.usual_arithmetic_conversions(left, right, compound, 1, place);
+        let Some(common) = common.filter(|common| common.is_integer()) else {
+            return (self.invalid_operands(place, &left, &right), None);
+        };
+        let result_type = if compound {
+            left.ty.clone()
+        } else {
+            common.clone()
+        };
+        (
+            self.binary(operator, left, right, result_type, place),
+            Some(common),
+        )
+    }
+
+    fn check_comparison(
+        &mut self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        place: Place,
+    ) -> Expression {
+        let left = self.default_function_array_lvalue_conversion(left);
+        let right = self.default_function_array_lvalue_conversion(right);
+        if matches!(operator, BinaryOperator::Equal | BinaryOperator::NotEqual) {
+            self.check_pointer_comparison_with_null_character(&left, &right);
+            self.check_pointer_comparison_with_null_character(&right, &left);
+        }
+        self.diagnose_logical_not_on_left_of_check(&left, &right, operator);
+        self.diagnose_tautological_comparison(&left, &right, operator, place);
+        let relational = operator.is_relational();
+        let int_type = Parser::int_type();
+        if left.ty.is_arithmetic() && right.ty.is_arithmetic() {
+            let (left, right, _) = self.usual_arithmetic_conversions(left, right, false, 2, place);
+            return self.binary(operator, left, right, int_type, place);
+        }
+        let left_null = self.is_null_pointer_constant(&left);
+        let right_null = self.is_null_pointer_constant(&right);
+        let left_type = left.ty.clone();
+        let right_type = right.ty.clone();
+        if relational && left_type.is_function_pointer() && right_type.is_function_pointer() {
+            self.diagnose(
+                "ext_typecheck_ordered_comparison_of_function_pointers",
+                place,
+                vec![
+                    Argument::Type(left_type.clone()),
+                    Argument::Type(right_type.clone()),
+                ],
+            );
+        }
+        if (left_type.is_integer() && !left_null) || (right_type.is_integer() && !right_null) {
+        } else if let (Some(left_pointee), Some(right_pointee)) =
+            (left_type.pointee(), right_type.pointee())
+        {
+            let left_canonical = left_pointee.canonical();
+            let right_canonical = right_pointee.canonical();
+            if self.types_compatible(
+                &left_canonical.unqualified(),
+                &right_canonical.unqualified(),
+            ) {
+                if relational
+                    && self.is_complete_type(&left_canonical)
+                        != self.is_complete_type(&right_canonical)
+                    && !self.language().at_least(CStandard::C11)
+                {
+                    self.diagnose(
+                        "ext_typecheck_compare_complete_incomplete_pointers",
+                        place,
+                        vec![
+                            Argument::Type(left_type.clone()),
+                            Argument::Type(right_type.clone()),
+                            Argument::number(i128::from(!self.is_complete_type(&left_canonical))),
+                            Argument::number(i128::from(!self.is_complete_type(&right_canonical))),
+                        ],
+                    );
+                }
+            } else if !relational && (left_canonical.is_void() || right_canonical.is_void()) {
+                if (left_canonical.is_function() || right_canonical.is_function())
+                    && !left_null
+                    && !right_null
+                {
+                    self.diagnose(
+                        "ext_typecheck_comparison_of_fptr_to_void",
+                        place,
+                        vec![
+                            Argument::Type(left_type.clone()),
+                            Argument::Type(right_type.clone()),
+                        ],
+                    );
+                }
+            } else {
+                self.diagnose(
+                    "ext_typecheck_comparison_of_distinct_pointers",
+                    place,
+                    vec![
+                        Argument::Type(left_type.clone()),
+                        Argument::Type(right_type.clone()),
+                    ],
+                );
+            }
+            let (left, right) = if left_canonical != right_canonical {
+                if left_null && !right_null {
+                    let kind = CastKind::BitCast;
+                    (self.implicit_cast(left, right_type.clone(), kind), right)
+                } else {
+                    let kind = CastKind::BitCast;
+                    (left, self.implicit_cast(right, left_type.clone(), kind))
+                }
+            } else {
+                (left, right)
+            };
+            return self.binary(operator, left, right, int_type, place);
+        }
+        if !relational && left_null && right_null {
+            if left_type.is_pointer() {
+                let right = self.implicit_cast(right, left_type.clone(), CastKind::NullToPointer);
+                return self.binary(operator, left, right, int_type, place);
+            }
+            let left = self.implicit_cast(left, right_type.clone(), CastKind::NullToPointer);
+            return self.binary(operator, left, right, int_type, place);
+        }
+        if left_null && right_type.is_pointer() {
+            let left = self.implicit_cast(left, right_type.clone(), CastKind::NullToPointer);
+            return self.binary(operator, left, right, int_type, place);
+        }
+        if right_null && left_type.is_pointer() {
+            let right = self.implicit_cast(right, left_type.clone(), CastKind::NullToPointer);
+            return self.binary(operator, left, right, int_type, place);
+        }
+        if (left_type.is_pointer() && right_type.is_integer())
+            || (left_type.is_integer() && right_type.is_pointer())
+        {
+            let message = if (left_null && left_type.is_integer())
+                || (right_null && right_type.is_integer())
+            {
+                if relational {
+                    Some("ext_typecheck_ordered_comparison_of_pointer_and_zero")
+                } else {
+                    None
+                }
+            } else if relational {
+                Some("ext_typecheck_ordered_comparison_of_pointer_integer")
+            } else {
+                Some("ext_typecheck_comparison_of_pointer_integer")
+            };
+            if let Some(message) = message {
+                self.diagnose(
+                    message,
+                    place,
+                    vec![
+                        Argument::Type(left_type.clone()),
+                        Argument::Type(right_type.clone()),
+                    ],
+                );
+            }
+            if left_type.is_pointer() {
+                let kind = if right_null {
+                    CastKind::NullToPointer
+                } else {
+                    CastKind::IntegralToPointer
+                };
+                let right = self.implicit_cast(right, left_type.clone(), kind);
+                return self.binary(operator, left, right, int_type, place);
+            }
+            let kind = if left_null {
+                CastKind::NullToPointer
+            } else {
+                CastKind::IntegralToPointer
+            };
+            let left = self.implicit_cast(left, right_type.clone(), kind);
+            return self.binary(operator, left, right, int_type, place);
+        }
+        self.invalid_operands(place, &left, &right)
+    }
+
+    fn diagnose_tautological_comparison(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        operator: BinaryOperator,
+        place: Place,
+    ) {
+        let left_inner = left.ignore_parentheses_and_implicit_casts();
+        let right_inner = right.ignore_parentheses_and_implicit_casts();
+        let is_constant = |expression: &Expression| {
+            matches!(
+                self.evaluate(expression, &mut EvaluationState::default()),
+                Some(ConstantValue::Integer(_))
+            )
+        };
+        let is_bitwise = |expression: &Expression| {
+            matches!(
+                &expression.kind,
+                ExpressionKind::Binary {
+                    operator: BinaryOperator::BitAnd | BinaryOperator::BitOr,
+                    ..
+                }
+            )
+        };
+        if is_constant(left_inner) != is_constant(right_inner)
+            || is_bitwise(left_inner)
+            || is_bitwise(right_inner)
+        {
+            self.guard_warning_groups(&TAUTOLOGICAL_COMPARE_WARNING_GROUPS);
+        }
+        if let (
+            ExpressionKind::Reference { declaration: a },
+            ExpressionKind::Reference { declaration: b },
+        ) = (&left_inner.kind, &right_inner.kind)
+        {
+            if a == b
+                && self.declarations[*a].kind != DeclarationKind::EnumConstant
+                && !left.ty.is_floating()
+            {
+                let always_true = matches!(
+                    operator,
+                    BinaryOperator::Equal
+                        | BinaryOperator::LessEqual
+                        | BinaryOperator::GreaterEqual
+                );
+                if !left_inner.ty.is_array() {
+                    let in_macro = false;
+                    if !in_macro {
+                        self.diagnose_if_reachable(
+                            "warn_comparison_always",
+                            place,
+                            vec![
+                                Argument::number(0),
+                                Argument::number(i128::from(always_true)),
+                            ],
+                        );
+                    }
+                }
+            }
+        }
+        let is_string = |expression: &Expression| {
+            matches!(
+                expression.ignore_parentheses_and_implicit_casts().kind,
+                ExpressionKind::String { .. }
+            )
+        };
+        if operator.is_comparison() && (is_string(left) || is_string(right)) {
+            let other = if is_string(left) { right } else { left };
+            if !self.is_null_pointer_constant(other) {
+                self.diagnose_if_reachable(
+                    "warn_stringcompare",
+                    place,
+                    vec![Argument::number(i128::from(
+                        is_string(left) && is_string(right),
+                    ))],
+                );
+            }
+        }
+    }
+
+    fn diagnose_unused_comma_operand(&mut self, left: &Expression, place: Place) {
+        let _ = place;
+        let converted = self.ignored_value_conversions_for_statement(left.clone());
+        self.diagnose_unused_result_with(&converted, "warn_unused_comma_left_operand");
+    }
+
+    pub fn expression_has_side_effects(&self, expression: &Expression) -> bool {
+        match &expression.kind {
+            ExpressionKind::Call { .. } => true,
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                operator.is_assignment()
+                    || self.expression_has_side_effects(left)
+                    || self.expression_has_side_effects(right)
+            }
+            ExpressionKind::Unary { operator, operand } => {
+                matches!(
+                    operator,
+                    UnaryOperator::PreIncrement
+                        | UnaryOperator::PreDecrement
+                        | UnaryOperator::PostIncrement
+                        | UnaryOperator::PostDecrement
+                ) || self.expression_has_side_effects(operand)
+            }
+            ExpressionKind::Parenthesized(inner) | ExpressionKind::Generic { selected: inner } => {
+                self.expression_has_side_effects(inner)
+            }
+            ExpressionKind::Cast { operand, kind, .. } => {
+                (*kind == CastKind::LValueToRValue && operand.ty.is_volatile())
+                    || self.expression_has_side_effects(operand)
+            }
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                self.expression_has_side_effects(condition)
+                    || then
+                        .as_ref()
+                        .is_some_and(|then| self.expression_has_side_effects(then))
+                    || self.expression_has_side_effects(otherwise)
+            }
+            ExpressionKind::Subscript { base, index } => {
+                self.expression_has_side_effects(base) || self.expression_has_side_effects(index)
+            }
+            ExpressionKind::Member { base, .. } => self.expression_has_side_effects(base),
+            ExpressionKind::CompoundLiteral { initializer, .. } => {
+                self.expression_has_side_effects(initializer)
+            }
+            ExpressionKind::InitializerList { elements, .. } => elements
+                .iter()
+                .any(|element| self.expression_has_side_effects(element)),
+            ExpressionKind::Error => true,
+            _ => false,
+        }
+    }
+
+    fn check_for_modifiable_lvalue(&mut self, expression: &Expression, place: Place) -> bool {
+        if !expression.is_lvalue() {
+            let inner = expression.ignore_parentheses();
+            if let ExpressionKind::Cast {
+                explicit: true,
+                operand,
+                ..
+            } = &inner.kind
+            {
+                if operand.ignore_parentheses_and_implicit_casts().is_lvalue() {
+                    self.diagnose(
+                        "err_typecheck_lvalue_casts_not_supported",
+                        inner.place,
+                        Vec::new(),
+                    );
+                    return true;
+                }
+            }
+            if let ExpressionKind::Unary {
+                operator: UnaryOperator::Imaginary,
+                operand,
+            } = &expression.kind
+            {
+                if !operand.ignore_parentheses().ty.is_complex() {
+                    self.diagnose(
+                        "err_typecheck_lvalue_imag_not_modifiable_lvalue",
+                        place,
+                        vec![Argument::Type(expression.ty.clone())],
+                    );
+                    return true;
+                }
+            }
+            self.diagnose(
+                "err_typecheck_expression_not_modifiable_lvalue",
+                place,
+                Vec::new(),
+            );
+            return true;
+        }
+        let ty = expression.ty.clone();
+        if ty.is_function() {
+            self.diagnose(
+                "err_typecheck_non_object_not_modifiable_lvalue",
+                place,
+                vec![Argument::Type(ty)],
+            );
+            return true;
+        }
+        if ty.is_void() {
+            self.diagnose(
+                "err_typecheck_incomplete_type_not_modifiable_lvalue",
+                place,
+                vec![Argument::Type(ty)],
+            );
+            return true;
+        }
+        if ty.canonical().qualifiers & QUALIFIER_CONST != 0 || ty.is_const() && !ty.is_array() {
+            self.diagnose_const_assignment(expression, place);
+            return true;
+        }
+        if ty.is_array() {
+            self.diagnose(
+                "err_typecheck_array_not_modifiable_lvalue",
+                place,
+                vec![Argument::Type(ty)],
+            );
+            return true;
+        }
+        if !self.is_complete_type(&ty) {
+            self.require_complete_type(
+                place,
+                &ty,
+                "err_typecheck_incomplete_type_not_modifiable_lvalue",
+                Vec::new(),
+            );
+            return true;
+        }
+        if let Some((tag, TagKind::Struct | TagKind::Union)) = ty.tag() {
+            if self.record_has_const_fields(tag) {
+                self.unsupported("assignment to record with const fields");
+                return true;
+            }
+        }
+        false
+    }
+
+    fn record_has_const_fields(&self, tag: usize) -> bool {
+        self.tags[tag].fields.iter().any(|field| {
+            field.ty.is_const()
+                || field.ty.base_element().tag().is_some_and(|(inner, kind)| {
+                    kind != TagKind::Enum && self.record_has_const_fields(inner)
+                })
+        })
+    }
+
+    fn diagnose_const_assignment(&mut self, expression: &Expression, place: Place) {
+        let mut current = expression.clone();
+        let mut emitted = false;
+        let mut next_is_dereference = false;
+        loop {
+            let is_dereference = next_is_dereference;
+            let inner = current.ignore_parentheses_and_implicit_casts().clone();
+            match &inner.kind {
+                ExpressionKind::Member {
+                    base,
+                    tag,
+                    field,
+                    arrow,
+                } => {
+                    next_is_dereference = *arrow;
+                    let field_information = self.tags[*tag].fields[*field].clone();
+                    let modifiable = {
+                        let mut ty = field_information.ty.clone();
+                        if is_dereference {
+                            if let Some(pointee) = ty.pointee() {
+                                ty = pointee;
+                            }
+                        }
+                        !ty.is_const()
+                    };
+                    if !modifiable {
+                        let name = field_information
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| Rc::from(&b""[..]));
+                        if !emitted {
+                            self.diagnose(
+                                "err_typecheck_assign_const",
+                                place,
+                                vec![
+                                    Argument::number(2),
+                                    Argument::number(0),
+                                    Argument::Name(name.clone()),
+                                    Argument::Type(field_information.ty.clone()),
+                                ],
+                            );
+                            emitted = true;
+                        }
+                        self.diagnose(
+                            "note_typecheck_assign_const",
+                            field_information.place,
+                            vec![
+                                Argument::number(2),
+                                Argument::number(0),
+                                Argument::Name(name),
+                                Argument::Type(field_information.ty.clone()),
+                            ],
+                        );
+                    }
+                    current = (**base).clone();
+                    continue;
+                }
+                ExpressionKind::Subscript { base, .. } => {
+                    current = base.ignore_parentheses_and_implicit_casts().clone();
+                    continue;
+                }
+                ExpressionKind::Call { callee, .. } => {
+                    if let Some(function) = callee.referenced_declaration() {
+                        let result = self.declarations[function]
+                            .ty
+                            .function_result()
+                            .unwrap_or_else(Parser::int_type);
+                        let mut checked = result.clone();
+                        if is_dereference {
+                            if let Some(pointee) = checked.pointee() {
+                                checked = pointee;
+                            }
+                        }
+                        if checked.is_const() {
+                            let name = self.declarations[function]
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| Rc::from(&b""[..]));
+                            if !emitted {
+                                self.diagnose(
+                                    "err_typecheck_assign_const",
+                                    place,
+                                    vec![Argument::number(0), Argument::Name(name.clone())],
+                                );
+                                emitted = true;
+                            }
+                            let function_place = self.declarations[function].place;
+                            self.diagnose(
+                                "note_typecheck_assign_const",
+                                function_place,
+                                vec![
+                                    Argument::number(0),
+                                    Argument::Name(name),
+                                    Argument::Type(result),
+                                ],
+                            );
+                        }
+                    }
+                }
+                ExpressionKind::Reference { declaration } => {
+                    let information = self.declarations[*declaration].clone();
+                    let mut checked = information.ty.clone();
+                    if is_dereference {
+                        if let Some(pointee) = checked.pointee() {
+                            checked = pointee;
+                        }
+                    }
+                    if checked.is_const() {
+                        let name = information
+                            .name
+                            .clone()
+                            .unwrap_or_else(|| Rc::from(&b""[..]));
+                        if !emitted {
+                            self.diagnose(
+                                "err_typecheck_assign_const",
+                                place,
+                                vec![
+                                    Argument::number(1),
+                                    Argument::Name(name.clone()),
+                                    Argument::Type(information.ty.clone()),
+                                ],
+                            );
+                            emitted = true;
+                        }
+                        self.diagnose(
+                            "note_typecheck_assign_const",
+                            information.place,
+                            vec![
+                                Argument::number(1),
+                                Argument::Name(name),
+                                Argument::Type(information.ty.clone()),
+                            ],
+                        );
+                    }
+                }
+                _ => {}
+            }
+            break;
+        }
+        if !emitted {
+            self.diagnose(
+                "err_typecheck_assign_const",
+                place,
+                vec![Argument::number(4)],
+            );
+        }
+    }
+
+    fn act_on_assignment(
+        &mut self,
+        operator: BinaryOperator,
+        left: Expression,
+        right: Expression,
+        place: Place,
+    ) -> Expression {
+        self.guard_set_but_unused(&left);
+        if self.check_for_modifiable_lvalue(&left, place) {
+            return Expression::error(left.start);
+        }
+        let left_type = left.ty.clone();
+        if operator == BinaryOperator::Assign {
+            let (result, converted) = self.check_single_assignment_constraints(&left_type, right);
+            let source_type = converted.1.clone();
+            let converted = converted.0;
+            if self.diagnose_assignment_result(
+                result,
+                place,
+                &left_type,
+                &source_type,
+                &converted,
+                AssignmentAction::Assigning,
+            ) {
+                return Expression::error(left.start);
+            }
+            self.check_implicit_conversion(&converted, &left_type, place);
+            let ty = left_type.unqualified();
+            return self.binary(operator, left, converted, ty, place);
+        }
+        let base = operator.compound_base();
+        let (expression, computation) = match base {
+            BinaryOperator::Multiply | BinaryOperator::Divide => {
+                self.check_multiplicative(base, left, right, place, true)
+            }
+            BinaryOperator::Remainder => self.check_remainder(left, right, place, true),
+            BinaryOperator::Add => self.check_addition(left, right, place, true),
+            BinaryOperator::Subtract => self.check_subtraction(left, right, place, true),
+            BinaryOperator::ShiftLeft | BinaryOperator::ShiftRight => {
+                self.check_shift(base, left, right, place, true)
+            }
+            _ => self.check_bitwise(base, left, right, place, true),
+        };
+        let _ = computation;
+        let ExpressionKind::Binary { left, right, .. } = expression.kind else {
+            return expression;
+        };
+        let ty = left_type.unqualified();
+        self.binary(operator, *left, *right, ty, place)
+    }
+
+    fn check_single_assignment_constraints(
+        &mut self,
+        target: &QualifiedType,
+        source: Expression,
+    ) -> (AssignResult, (Expression, QualifiedType)) {
+        let source_type = source.ty.clone();
+        if target.is_enumeration() {
+            self.guard_warning_groups(&["assign-enum"]);
+        }
+        let source = self.default_function_array_lvalue_conversion(source);
+        let target_unatomic = target.atomic_value().unwrap_or_else(|| target.clone());
+        if target_unatomic.is_pointer() && self.is_null_pointer_constant(&source) {
+            let converted =
+                self.implicit_cast(source, target.unqualified(), CastKind::NullToPointer);
+            return (AssignResult::Compatible, (converted, source_type));
+        }
+        let (result, kind) = self.check_assignment_constraints(target, &source);
+        if result != AssignResult::Incompatible {
+            let target_canonical = target.canonical().unqualified();
+            if source.ty.canonical().unqualified() != target_canonical {
+                let converted = self.implicit_cast(source, target.unqualified(), kind);
+                return (result, (converted, source_type));
+            }
+        }
+        (result, (source, source_type))
+    }
+
+    fn check_assignment_constraints(
+        &self,
+        target: &QualifiedType,
+        source: &Expression,
+    ) -> (AssignResult, CastKind) {
+        let left = target.canonical().unqualified();
+        let right = source.ty.canonical().unqualified();
+        if left == right {
+            return (AssignResult::Compatible, CastKind::NoOp);
+        }
+        if let Some(value) = left.atomic_value() {
+            let (result, _) = self.check_assignment_constraints(&value, source);
+            return (result, CastKind::NonAtomicToAtomic);
+        }
+        if left.is_arithmetic() && right.is_arithmetic() {
+            return (
+                AssignResult::Compatible,
+                self.scalar_cast_kind(&right, &left),
+            );
+        }
+        if let Some(left_pointee) = left.pointee() {
+            if let Some(right_pointee) = right.pointee() {
+                return (
+                    self.check_pointer_types_for_assignment(
+                        &left_pointee,
+                        &right_pointee,
+                        &left,
+                        &right,
+                    ),
+                    CastKind::BitCast,
+                );
+            }
+            if right.is_integer() {
+                return (AssignResult::IntegerToPointer, CastKind::IntegralToPointer);
+            }
+            return (AssignResult::Incompatible, CastKind::NoOp);
+        }
+        if right.is_pointer() {
+            if left.is_bool() {
+                return (AssignResult::Compatible, CastKind::PointerToBoolean);
+            }
+            if left.is_integer() {
+                return (AssignResult::PointerToInteger, CastKind::PointerToIntegral);
+            }
+            return (AssignResult::Incompatible, CastKind::NoOp);
+        }
+        if left.is_record() && right.is_record() && self.types_compatible(&left, &right) {
+            return (AssignResult::Compatible, CastKind::NoOp);
+        }
+        (AssignResult::Incompatible, CastKind::NoOp)
+    }
+
+    fn check_pointer_types_for_assignment(
+        &self,
+        left_pointee: &QualifiedType,
+        right_pointee: &QualifiedType,
+        left: &QualifiedType,
+        right: &QualifiedType,
+    ) -> AssignResult {
+        let left_qualifiers = left_pointee.canonical().qualifiers;
+        let right_qualifiers = right_pointee.canonical().qualifiers;
+        let mut result = AssignResult::Compatible;
+        if right_qualifiers
+            & !left_qualifiers
+            & (QUALIFIER_CONST | QUALIFIER_VOLATILE | QUALIFIER_RESTRICT)
+            != 0
+        {
+            result = AssignResult::CompatiblePointerDiscardsQualifiers;
+        }
+        let left_unqualified = left_pointee.canonical().unqualified();
+        let right_unqualified = right_pointee.canonical().unqualified();
+        if left_unqualified.is_void() {
+            if !right_unqualified.is_function() {
+                return result;
+            }
+            return AssignResult::FunctionVoidPointer;
+        }
+        if right_unqualified.is_void() {
+            if !left_unqualified.is_function() {
+                return result;
+            }
+            return AssignResult::FunctionVoidPointer;
+        }
+        if !self.types_compatible(&left_unqualified, &right_unqualified) {
+            let map = |ty: &QualifiedType| -> QualifiedType {
+                if matches!(
+                    ty.builtin_kind(),
+                    Some(
+                        BuiltinType::CharSigned
+                            | BuiltinType::CharUnsigned
+                            | BuiltinType::SignedChar
+                            | BuiltinType::UnsignedChar
+                    )
+                ) {
+                    QualifiedType::builtin(BuiltinType::UnsignedChar)
+                } else if self.is_signed_integer(ty) {
+                    self.corresponding_unsigned(ty).canonical()
+                } else {
+                    ty.clone()
+                }
+            };
+            let left_mapped = map(&left_unqualified);
+            let right_mapped = map(&right_unqualified);
+            if left_mapped.canonical() == right_mapped.canonical() {
+                if result != AssignResult::Compatible {
+                    return result;
+                }
+                return AssignResult::IncompatiblePointerSign;
+            }
+            if let (Some(mut left_inner), Some(mut right_inner)) =
+                (left_unqualified.pointee(), right_unqualified.pointee())
+            {
+                while let (Some(a), Some(b)) = (left_inner.pointee(), right_inner.pointee()) {
+                    left_inner = a;
+                    right_inner = b;
+                }
+                if left_inner.canonical().unqualified() == right_inner.canonical().unqualified() {
+                    return AssignResult::IncompatibleNestedPointerQualifiers;
+                }
+            }
+            if right.is_function_pointer() && left.is_function_pointer() {
+                return AssignResult::IncompatibleFunctionPointer;
+            }
+            return AssignResult::IncompatiblePointer;
+        }
+        result
+    }
+
+    fn conversion_fix_kind(
+        &self,
+        expression: &Expression,
+        from: &QualifiedType,
+        to: &QualifiedType,
+    ) -> i128 {
+        let from_canonical = from.canonical();
+        let to_canonical = to.canonical();
+        let inner = expression.ignore_implicit_casts();
+        let compare = |from: &QualifiedType, to: &QualifiedType| -> bool {
+            let at_least = |a: &QualifiedType, b: &QualifiedType| -> bool {
+                a.qualifiers & b.qualifiers == b.qualifiers
+            };
+            if !at_least(to, from) {
+                return false;
+            }
+            let (from, to) = match (from.pointee(), to.pointee()) {
+                (Some(a), Some(b)) => (a.canonical(), b.canonical()),
+                _ => (from.clone(), to.clone()),
+            };
+            from.unqualified() == to.unqualified() && at_least(&to, &from)
+        };
+        if let Some(pointee) = from_canonical.pointee() {
+            if compare(&pointee.canonical(), &to_canonical) {
+                if self.is_null_pointer_constant(inner.ignore_parentheses_and_casts()) {
+                    return 0;
+                }
+                if let ExpressionKind::Unary {
+                    operator: UnaryOperator::AddressOf,
+                    ..
+                } = inner.kind
+                {
+                    return 4;
+                }
+                return 1;
+            }
+        }
+        if to_canonical.is_pointer() {
+            if !inner.is_lvalue() {
+                return 0;
+            }
+            if from_canonical.is_pointer()
+                && to_canonical
+                    .pointee()
+                    .is_some_and(|pointee| pointee.is_void())
+            {
+                return 0;
+            }
+            if compare(
+                &QualifiedType::pointer_to(from_canonical.clone()),
+                &to_canonical,
+            ) {
+                if let ExpressionKind::Unary {
+                    operator: UnaryOperator::Dereference,
+                    ..
+                } = inner.kind
+                {
+                    return 3;
+                }
+                return 2;
+            }
+        }
+        0
+    }
+
+    fn diagnose_assignment_result(
+        &mut self,
+        result: AssignResult,
+        place: Place,
+        target: &QualifiedType,
+        source_type: &QualifiedType,
+        source: &Expression,
+        action: AssignmentAction,
+    ) -> bool {
+        let mut source_type = source_type.clone();
+        let target_type = target.clone();
+        let (name, invalid, fix) = match result {
+            AssignResult::Compatible => {
+                self.diagnose_assignment_enum(&target_type, &source_type, source);
+                return false;
+            }
+            AssignResult::PointerToInteger => ("ext_typecheck_convert_pointer_int", false, true),
+            AssignResult::IntegerToPointer => ("ext_typecheck_convert_int_pointer", false, true),
+            AssignResult::IncompatibleFunctionPointer => (
+                "ext_typecheck_convert_incompatible_function_pointer",
+                false,
+                true,
+            ),
+            AssignResult::IncompatiblePointer => {
+                ("ext_typecheck_convert_incompatible_pointer", false, true)
+            }
+            AssignResult::IncompatiblePointerSign => (
+                "ext_typecheck_convert_incompatible_pointer_sign",
+                false,
+                false,
+            ),
+            AssignResult::FunctionVoidPointer => {
+                ("ext_typecheck_convert_pointer_void_func", false, false)
+            }
+            AssignResult::CompatiblePointerDiscardsQualifiers => {
+                if source_type.is_array() {
+                    source_type = self.adjusted_parameter_type(&source_type);
+                }
+                ("ext_typecheck_convert_discards_qualifiers", false, false)
+            }
+            AssignResult::IncompatibleNestedPointerQualifiers => {
+                ("ext_nested_pointer_qualifier_mismatch", false, false)
+            }
+            AssignResult::Incompatible => {
+                if source.ty.is_function() || target_type.is_function() {
+                    self.unsupported("assignment to function");
+                    return true;
+                }
+                ("err_typecheck_convert_incompatible", true, true)
+            }
+        };
+        let (first, second) = match action {
+            AssignmentAction::Assigning | AssignmentAction::Initializing => {
+                (target_type.clone(), source_type.clone())
+            }
+            _ => (source_type.clone(), target_type.clone()),
+        };
+        let mut arguments = vec![
+            Argument::Type(first.clone()),
+            Argument::Type(second.clone()),
+            Argument::number(action.index()),
+        ];
+        if name == "ext_typecheck_convert_incompatible_pointer_sign" {
+            let plain = |ty: &QualifiedType| -> bool {
+                let element = ty
+                    .pointee()
+                    .or_else(|| ty.array_element())
+                    .unwrap_or_else(|| ty.clone());
+                matches!(
+                    element.canonical().builtin_kind(),
+                    Some(BuiltinType::CharSigned | BuiltinType::CharUnsigned)
+                )
+            };
+            arguments.push(Argument::number(i128::from(
+                plain(&first) || plain(&second),
+            )));
+        }
+        if fix {
+            arguments.push(Argument::number(self.conversion_fix_kind(
+                source,
+                &source_type,
+                &target_type,
+            )));
+        }
+        if name == "err_typecheck_convert_incompatible" {
+            arguments.push(Argument::number(0));
+        }
+        self.diagnose(name, place, arguments);
+        invalid
+    }
+
+    fn diagnose_assignment_enum(
+        &mut self,
+        target: &QualifiedType,
+        source: &QualifiedType,
+        expression: &Expression,
+    ) {
+        let _ = (target, source, expression);
+    }
+
+    fn check_implicit_conversion(
+        &mut self,
+        expression: &Expression,
+        target: &QualifiedType,
+        place: Place,
+    ) {
+        let _ = place;
+        let ExpressionKind::Cast {
+            operand,
+            kind,
+            explicit: false,
+            ..
+        } = &expression.kind
+        else {
+            return;
+        };
+        if !matches!(kind, CastKind::IntegralCast | CastKind::FloatingToIntegral) {
+            return;
+        }
+        if !target.is_integer() || target.is_bool() {
+            return;
+        }
+        let source = operand.as_ref();
+        let mut state = EvaluationState::default();
+        let Some(value) = self.evaluate(source, &mut state) else {
+            return;
+        };
+        match value {
+            ConstantValue::Integer(value) => {
+                if !source.ty.is_integer() {
+                    return;
+                }
+                let target_width = self.integer_width(target);
+                let source_width = self.integer_width(&source.ty);
+                let normalized = self.normalize_integer(value, target);
+                if normalized == value {
+                    return;
+                }
+                if target_width >= source_width {
+                    return;
+                }
+                let unsigned_fit = !self.is_signed_integer(target)
+                    && value < 0
+                    && value >= -(1i128 << (target_width.min(126)))
+                    && false;
+                let _ = unsigned_fit;
+                let source_text = value.to_string();
+                let target_text = normalized.to_string();
+                let positive_fits =
+                    value >= 0 && (value as u128) < (1u128 << target_width.min(127));
+                if positive_fits && self.is_signed_integer(target) {
+                    self.diagnose_if_reachable(
+                        "warn_impcast_integer_precision_constant",
+                        source.start,
+                        vec![
+                            Argument::Type(source.ty.clone()),
+                            Argument::Type(target.clone()),
+                            Argument::Text(source_text),
+                            Argument::Text(target_text),
+                        ],
+                    );
+                    return;
+                }
+                self.diagnose_if_reachable(
+                    "warn_impcast_integer_precision_constant",
+                    source.start,
+                    vec![
+                        Argument::Type(source.ty.clone()),
+                        Argument::Type(target.clone()),
+                        Argument::Text(source_text),
+                        Argument::Text(target_text),
+                    ],
+                );
+            }
+            ConstantValue::Floating(_) => {
+                self.unsupported("floating literal conversion warning");
+            }
+            _ => {}
+        }
+    }
+
+    fn act_on_conditional(
+        &mut self,
+        condition: Expression,
+        middle: Option<Expression>,
+        otherwise: Expression,
+        place: Place,
+    ) -> Expression {
+        if condition.contains_error()
+            || otherwise.contains_error()
+            || middle.as_ref().is_some_and(Expression::contains_error)
+        {
+            return Expression::error(condition.start);
+        }
+        let start = condition.start;
+        let end = otherwise.end;
+        let condition = self.usual_unary_conversions(condition);
+        if !condition.ty.is_scalar() {
+            self.diagnose(
+                "err_typecheck_cond_expect_scalar",
+                condition.start,
+                vec![Argument::Type(condition.ty.clone())],
+            );
+            return Expression::error(start);
+        }
+        let then = match middle {
+            Some(middle) => middle,
+            None => condition.clone(),
+        };
+        let then = self.usual_unary_conversions(then);
+        let otherwise = self.usual_unary_conversions(otherwise);
+        let then_type = then.ty.clone();
+        let otherwise_type = otherwise.ty.clone();
+        let make = |parser: &Parser,
+                    condition: Expression,
+                    then: Expression,
+                    otherwise: Expression,
+                    ty: QualifiedType|
+         -> Expression {
+            let _ = parser;
+            Expression::new(
+                ExpressionKind::Conditional {
+                    condition: Box::new(condition),
+                    then: Some(Box::new(then)),
+                    otherwise: Box::new(otherwise),
+                },
+                ty,
+                ValueCategory::RValue,
+                start,
+                place,
+                end,
+            )
+        };
+        if then_type.is_arithmetic() && otherwise_type.is_arithmetic() {
+            let (then, otherwise, common) =
+                self.usual_arithmetic_conversions(then, otherwise, false, 3, place);
+            let ty = common.unwrap_or_else(Parser::int_type);
+            return make(self, condition, then, otherwise, ty);
+        }
+        if then_type.is_record()
+            && otherwise_type.is_record()
+            && then_type.canonical().unqualified() == otherwise_type.canonical().unqualified()
+        {
+            let ty = then_type.unqualified();
+            return make(self, condition, then, otherwise, ty);
+        }
+        if then_type.is_void() || otherwise_type.is_void() {
+            if !then_type.is_void() || !otherwise_type.is_void() {
+                self.diagnose("ext_typecheck_cond_one_void", place, Vec::new());
+            }
+            return make(
+                self,
+                condition,
+                then,
+                otherwise,
+                QualifiedType::builtin(BuiltinType::Void),
+            );
+        }
+        let then_null = self.is_null_pointer_constant(&then);
+        let otherwise_null = self.is_null_pointer_constant(&otherwise);
+        if otherwise_null && then_type.is_pointer() {
+            let otherwise =
+                self.implicit_cast(otherwise, then_type.clone(), CastKind::NullToPointer);
+            return make(self, condition, then, otherwise, then_type);
+        }
+        if then_null && otherwise_type.is_pointer() {
+            let then = self.implicit_cast(then, otherwise_type.clone(), CastKind::NullToPointer);
+            return make(self, condition, then, otherwise, otherwise_type);
+        }
+        if let (Some(then_pointee), Some(otherwise_pointee)) =
+            (then_type.pointee(), otherwise_type.pointee())
+        {
+            let qualifiers =
+                then_pointee.canonical_qualifiers() | otherwise_pointee.canonical_qualifiers();
+            if then_pointee.is_void() || otherwise_pointee.is_void() {
+                let void = QualifiedType::builtin(BuiltinType::Void).with_qualifiers(qualifiers);
+                let ty = QualifiedType::pointer_to(void);
+                let then = self.implicit_cast(then, ty.clone(), CastKind::BitCast);
+                let otherwise = self.implicit_cast(otherwise, ty.clone(), CastKind::BitCast);
+                return make(self, condition, then, otherwise, ty);
+            }
+            let merged = self.merge_types(
+                &then_pointee.canonical().unqualified(),
+                &otherwise_pointee.canonical().unqualified(),
+                false,
+                false,
+            );
+            match merged {
+                Some(composite) => {
+                    let ty = if then_pointee.canonical() == otherwise_pointee.canonical() {
+                        then_type.clone()
+                    } else {
+                        QualifiedType::pointer_to(composite.with_qualifiers(qualifiers))
+                    };
+                    return make(self, condition, then, otherwise, ty);
+                }
+                None => {
+                    self.diagnose(
+                        "ext_typecheck_cond_incompatible_pointers",
+                        place,
+                        vec![
+                            Argument::Type(then_type.clone()),
+                            Argument::Type(otherwise_type.clone()),
+                        ],
+                    );
+                    let void =
+                        QualifiedType::builtin(BuiltinType::Void).with_qualifiers(qualifiers);
+                    let ty = QualifiedType::pointer_to(void);
+                    return make(self, condition, then, otherwise, ty);
+                }
+            }
+        }
+        if (then_type.is_pointer() && otherwise_type.is_integer())
+            || (then_type.is_integer() && otherwise_type.is_pointer())
+        {
+            self.diagnose(
+                "ext_typecheck_cond_pointer_integer_mismatch",
+                place,
+                vec![
+                    Argument::Type(then_type.clone()),
+                    Argument::Type(otherwise_type.clone()),
+                ],
+            );
+            let ty = if then_type.is_pointer() {
+                then_type
+            } else {
+                otherwise_type
+            };
+            return make(self, condition, then, otherwise, ty);
+        }
+        self.diagnose(
+            "err_typecheck_cond_incompatible_operands",
+            place,
+            vec![Argument::Type(then_type), Argument::Type(otherwise_type)],
+        );
+        Expression::error(start)
+    }
+
+    fn act_on_unary(
+        &mut self,
+        operator: UnaryOperator,
+        operand: Expression,
+        place: Place,
+    ) -> Expression {
+        if operand.contains_error() {
+            return Expression::error(place);
+        }
+        let start = if operator.is_postfix() {
+            operand.start
+        } else {
+            place
+        };
+        let end = if operator.is_postfix() {
+            place
+        } else {
+            operand.end
+        };
+        let make =
+            |operand: Expression, ty: QualifiedType, category: ValueCategory| -> Expression {
+                Expression::new(
+                    ExpressionKind::Unary {
+                        operator,
+                        operand: Box::new(operand),
+                    },
+                    ty,
+                    category,
+                    start,
+                    place,
+                    end,
+                )
+            };
+        match operator {
+            UnaryOperator::PreIncrement
+            | UnaryOperator::PreDecrement
+            | UnaryOperator::PostIncrement
+            | UnaryOperator::PostDecrement => {
+                self.guard_set_but_unused(&operand);
+                let increment = matches!(
+                    operator,
+                    UnaryOperator::PreIncrement | UnaryOperator::PostIncrement
+                );
+                let ty = operand.ty.clone();
+                if ty.is_bool() {
+                    if !increment {
+                        self.diagnose("err_decrement_bool", place, vec![]);
+                        return Expression::error(place);
+                    }
+                } else if ty.is_real_floating() || ty.is_integer() {
+                } else if ty.is_complex() {
+                    self.diagnose_compatibility(
+                        "increment_complex",
+                        CStandard::C2y,
+                        place,
+                        vec![Argument::number(i128::from(increment))],
+                    );
+                } else if let Some(pointee) = ty.pointee() {
+                    let _ = pointee;
+                    let operand_clone = operand.clone();
+                    if !self.check_pointer_arithmetic_operand(place, &operand_clone) {
+                        return Expression::error(place);
+                    }
+                } else if let Some(value) = ty.atomic_value() {
+                    let _ = value;
+                } else {
+                    self.diagnose(
+                        "err_typecheck_illegal_increment_decrement",
+                        place,
+                        vec![Argument::Type(ty), Argument::number(i128::from(increment))],
+                    );
+                    return Expression::error(place);
+                }
+                if self.check_for_modifiable_lvalue(&operand, place) {
+                    return Expression::error(place);
+                }
+                let result = operand.ty.unqualified();
+                make(operand, result, ValueCategory::RValue)
+            }
+            UnaryOperator::AddressOf => self.check_address_of(operand, place, start, end),
+            UnaryOperator::Dereference => {
+                let operand = self.usual_unary_conversions(operand);
+                let Some(pointee) = operand.ty.pointee() else {
+                    self.diagnose(
+                        "err_typecheck_indirection_requires_pointer",
+                        place,
+                        vec![Argument::Type(operand.ty.clone())],
+                    );
+                    return Expression::error(place);
+                };
+                if pointee.is_void() && !operand.ty.pointee().is_some_and(|p| p.is_function()) {
+                    self.diagnose(
+                        "ext_typecheck_indirection_through_void_pointer",
+                        place,
+                        vec![Argument::Type(operand.ty.clone())],
+                    );
+                }
+                let category = if pointee.is_void() {
+                    ValueCategory::RValue
+                } else {
+                    ValueCategory::LValue
+                };
+                make(operand, pointee, category)
+            }
+            UnaryOperator::Plus | UnaryOperator::Minus => {
+                let operand = self.usual_unary_conversions(operand);
+                let ty = operand.ty.clone();
+                if ty.is_arithmetic() {
+                    return make(operand, ty, ValueCategory::RValue);
+                }
+                if operator == UnaryOperator::Plus && ty.is_pointer() {
+                    return make(operand, ty, ValueCategory::RValue);
+                }
+                self.diagnose("err_typecheck_unary_expr", place, vec![Argument::Type(ty)]);
+                Expression::error(place)
+            }
+            UnaryOperator::Not => {
+                let operand = self.usual_unary_conversions(operand);
+                let ty = operand.ty.clone();
+                if ty.is_complex() {
+                    self.diagnose(
+                        "ext_integer_complement_complex",
+                        place,
+                        vec![Argument::Type(ty.clone())],
+                    );
+                    return make(operand, ty, ValueCategory::RValue);
+                }
+                if !ty.is_integer() {
+                    self.diagnose("err_typecheck_unary_expr", place, vec![Argument::Type(ty)]);
+                    return Expression::error(place);
+                }
+                make(operand, ty, ValueCategory::RValue)
+            }
+            UnaryOperator::LogicalNot => {
+                let operand = self.default_function_array_lvalue_conversion(operand);
+                let ty = operand.ty.clone();
+                if !ty.is_scalar() {
+                    self.diagnose("err_typecheck_unary_expr", place, vec![Argument::Type(ty)]);
+                    return Expression::error(place);
+                }
+                make(operand, Parser::int_type(), ValueCategory::RValue)
+            }
+            UnaryOperator::Real | UnaryOperator::Imaginary => {
+                if operand.ty.is_complex() {
+                    self.unsupported("__real/__imag on complex");
+                    return Expression::error(place);
+                }
+                let operand = self.default_function_array_lvalue_conversion(operand);
+                if !operand.ty.is_arithmetic() {
+                    self.diagnose(
+                        "err_realimag_invalid_type",
+                        place,
+                        vec![
+                            Argument::Type(operand.ty.clone()),
+                            Argument::text(if operator == UnaryOperator::Real {
+                                "__real"
+                            } else {
+                                "__imag"
+                            }),
+                        ],
+                    );
+                    return Expression::error(place);
+                }
+                let ty = operand.ty.clone();
+                make(operand, ty, ValueCategory::RValue)
+            }
+            UnaryOperator::Extension => {
+                let ty = operand.ty.clone();
+                let category = operand.category;
+                make(operand, ty, category)
+            }
+        }
+    }
+
+    fn check_address_of(
+        &mut self,
+        operand: Expression,
+        place: Place,
+        start: Place,
+        end: Place,
+    ) -> Expression {
+        let make = |operand: Expression, ty: QualifiedType| -> Expression {
+            Expression::new(
+                ExpressionKind::Unary {
+                    operator: UnaryOperator::AddressOf,
+                    operand: Box::new(operand),
+                },
+                ty,
+                ValueCategory::RValue,
+                start,
+                place,
+                end,
+            )
+        };
+        if operand.ty.is_function() {
+            let ty = QualifiedType::pointer_to(operand.ty.clone());
+            return make(operand, ty);
+        }
+        if !operand.is_lvalue() {
+            if matches!(
+                operand.ignore_parentheses().kind,
+                ExpressionKind::CompoundLiteral { .. }
+            ) {
+            } else if operand.ty.is_void()
+                && matches!(
+                    operand.ignore_parentheses().kind,
+                    ExpressionKind::Unary {
+                        operator: UnaryOperator::Dereference,
+                        ..
+                    }
+                )
+            {
+                self.diagnose("ext_typecheck_addrof_void", place, Vec::new());
+                let ty = QualifiedType::pointer_to(operand.ty.clone());
+                return make(operand, ty);
+            } else {
+                self.diagnose(
+                    "err_typecheck_invalid_lvalue_addrof",
+                    place,
+                    vec![Argument::Type(operand.ty.clone())],
+                );
+                return Expression::error(place);
+            }
+        }
+        if operand.is_bit_field(self) {
+            self.diagnose("err_typecheck_address_of", place, vec![Argument::number(0)]);
+            return Expression::error(place);
+        }
+        if let Some(declaration) = operand.referenced_declaration() {
+            if self.declarations[declaration].storage == StorageClass::Register {
+                if self.declarations[declaration].file_scope {
+                    self.diagnose("err_typecheck_address_of", place, vec![Argument::number(3)]);
+                    return Expression::error(place);
+                }
+                self.diagnose("err_typecheck_address_of", place, vec![Argument::number(3)]);
+                return Expression::error(place);
+            }
+        }
+        if let ExpressionKind::Member { base, .. } = &operand.ignore_parentheses().kind {
+            let mut current: &Expression = base;
+            loop {
+                match &current.ignore_parentheses().kind {
+                    ExpressionKind::Member {
+                        base, arrow: false, ..
+                    } => current = base,
+                    ExpressionKind::Reference { declaration } => {
+                        if self.declarations[*declaration].storage == StorageClass::Register {
+                            self.diagnose(
+                                "err_typecheck_address_of",
+                                place,
+                                vec![Argument::number(3)],
+                            );
+                            return Expression::error(place);
+                        }
+                        break;
+                    }
+                    _ => break,
+                }
+            }
+        }
+        let ty = QualifiedType::pointer_to(operand.ty.clone());
+        make(operand, ty)
+    }
+
+    fn act_on_subscript(
+        &mut self,
+        base: Expression,
+        index: Expression,
+        open: Place,
+        close: Place,
+    ) -> Expression {
+        if base.contains_error() || index.contains_error() {
+            return Expression::error(base.start);
+        }
+        let start = base.start;
+        if base.ty.is_array() {
+            self.unsupported_if_array_access_may_warn(&base, &index);
+        } else if index.ty.is_array() {
+            self.unsupported_if_array_access_may_warn(&index, &base);
+        }
+        let base = self.default_function_array_lvalue_conversion(base);
+        let index = self.default_function_array_lvalue_conversion(index);
+        let (pointer, integer, swapped) = if base.ty.is_pointer() {
+            (base, index, false)
+        } else if index.ty.is_pointer() {
+            (index, base, true)
+        } else {
+            self.diagnose("err_typecheck_subscript_value", open, Vec::new());
+            return Expression::error(start);
+        };
+        if !integer.ty.is_integer() {
+            self.diagnose(
+                "err_typecheck_subscript_not_integer",
+                integer.start,
+                Vec::new(),
+            );
+            return Expression::error(start);
+        }
+        if matches!(
+            integer.ty.canonical().builtin_kind(),
+            Some(BuiltinType::CharSigned | BuiltinType::CharUnsigned)
+        ) {
+            let constant = if self.check_integer_constant(&integer).kind == IceKind::Ice {
+                let mut state = EvaluationState::default();
+                match self.evaluate(&integer, &mut state) {
+                    Some(ConstantValue::Integer(value)) => Some(value),
+                    _ => None,
+                }
+            } else {
+                None
+            };
+            if constant.is_none_or(|value| value < 0) {
+                self.diagnose("warn_subscript_is_char", open, Vec::new());
+            }
+        }
+        let pointee = pointer.ty.pointee().unwrap_or_else(Parser::int_type);
+        if pointee.is_function() {
+            self.diagnose(
+                "err_subscript_function_type",
+                pointer.start,
+                vec![Argument::Type(pointee)],
+            );
+            return Expression::error(start);
+        }
+        if pointee.is_void() {
+            self.diagnose("ext_gnu_subscript_void_type", pointer.start, Vec::new());
+        } else if !self.is_complete_type(&pointee) {
+            self.require_complete_type(
+                pointer.start,
+                &pointee,
+                "err_subscript_incomplete_or_sizeless_type",
+                vec![Argument::number(0)],
+            );
+            return Expression::error(start);
+        }
+        let place = pointer.place;
+        let (left, right) = if swapped {
+            (integer, pointer)
+        } else {
+            (pointer, integer)
+        };
+        let category = ValueCategory::LValue;
+        Expression::new(
+            ExpressionKind::Subscript {
+                base: Box::new(left),
+                index: Box::new(right),
+            },
+            pointee,
+            category,
+            start,
+            place,
+            close,
+        )
+    }
+
+    fn act_on_member_access(
+        &mut self,
+        base: Expression,
+        arrow: bool,
+        operator_place: Place,
+        name: Rc<[u8]>,
+        name_place: Place,
+    ) -> Option<Expression> {
+        if base.contains_error() {
+            return Some(Expression::error(base.start));
+        }
+        let start = base.start;
+        let base = if arrow {
+            self.default_function_array_lvalue_conversion(base)
+        } else {
+            base
+        };
+        let record_type = if arrow {
+            match base.ty.pointee() {
+                Some(pointee) => pointee,
+                None => {
+                    if base.ty.is_record() {
+                        self.diagnose(
+                            "err_typecheck_member_reference_suggestion",
+                            operator_place,
+                            vec![Argument::Type(base.ty.clone()), Argument::number(1)],
+                        );
+                        self.unsupported("member access recovery");
+                        return None;
+                    }
+                    self.diagnose(
+                        "err_typecheck_member_reference_arrow",
+                        operator_place,
+                        vec![Argument::Type(base.ty.clone())],
+                    );
+                    return Some(Expression::error(start));
+                }
+            }
+        } else {
+            if let Some(pointee) = base.ty.pointee() {
+                if pointee.is_record() {
+                    self.diagnose(
+                        "err_typecheck_member_reference_suggestion",
+                        operator_place,
+                        vec![Argument::Type(base.ty.clone()), Argument::number(0)],
+                    );
+                    self.unsupported("member access recovery");
+                    return None;
+                }
+            }
+            base.ty.clone()
+        };
+        let Some((tag, kind)) = record_type.tag() else {
+            self.diagnose(
+                "err_typecheck_member_reference_struct_union",
+                operator_place,
+                vec![Argument::Type(record_type.clone())],
+            );
+            return Some(Expression::error(start));
+        };
+        if kind == TagKind::Enum {
+            self.diagnose(
+                "err_typecheck_member_reference_struct_union",
+                operator_place,
+                vec![Argument::Type(record_type.clone())],
+            );
+            return Some(Expression::error(start));
+        }
+        if !self.tags[tag].complete {
+            self.require_complete_type(
+                operator_place,
+                &record_type,
+                "err_typecheck_incomplete_tag",
+                Vec::new(),
+            );
+            return Some(Expression::error(start));
+        }
+        let Some(path) = self.find_field_path(tag, &name) else {
+            if self.has_member_typo_candidates(tag, &name) {
+                self.unsupported("typo correction for member name");
+                return None;
+            }
+            let shown = QualifiedType::new(TypeNode::Tag {
+                declaration: tag,
+                kind,
+                keyword: false,
+            });
+            let _ = shown;
+            self.diagnose(
+                "err_no_member",
+                name_place,
+                vec![
+                    Argument::Name(name),
+                    Argument::Type(record_type.unqualified()),
+                ],
+            );
+            return Some(Expression::error(start));
+        };
+        let base_qualifiers = record_type.canonical_qualifiers();
+        let base_lvalue = arrow || base.is_lvalue();
+        let mut current = base;
+        let mut current_tag = tag;
+        let mut first = true;
+        for field_index in path {
+            let field = self.tags[current_tag].fields[field_index].clone();
+            let ty = field
+                .ty
+                .with_qualifiers(base_qualifiers & (QUALIFIER_CONST | QUALIFIER_VOLATILE));
+            let category = if base_lvalue {
+                ValueCategory::LValue
+            } else {
+                ValueCategory::RValue
+            };
+            current = Expression::new(
+                ExpressionKind::Member {
+                    base: Box::new(current),
+                    tag: current_tag,
+                    field: field_index,
+                    arrow: arrow && first,
+                },
+                ty.clone(),
+                category,
+                start,
+                name_place,
+                name_place,
+            );
+            first = false;
+            if let Some((inner, _)) = field.ty.tag() {
+                current_tag = inner;
+            }
+        }
+        Some(current)
+    }
+
+    fn find_field_path(&self, tag: usize, name: &[u8]) -> Option<Vec<usize>> {
+        for (index, field) in self.tags[tag].fields.iter().enumerate() {
+            if field.name.as_deref() == Some(name) {
+                return Some(vec![index]);
+            }
+            if field.name.is_none() && field.bit_width.is_none() {
+                if let Some((inner, kind)) = field.ty.tag() {
+                    if kind != TagKind::Enum && self.tags[inner].information.name.is_none() {
+                        if let Some(mut rest) = self.find_field_path(inner, name) {
+                            rest.insert(0, index);
+                            return Some(rest);
+                        }
+                    }
+                }
+            }
+        }
+        None
+    }
+
+    fn has_member_typo_candidates(&self, tag: usize, name: &[u8]) -> bool {
+        if !self.preprocessor.options.spell_checking {
+            return false;
+        }
+        let typed = String::from_utf8_lossy(name).to_string();
+        let limit = typed.len().div_ceil(3);
+        self.tags[tag].fields.iter().any(|field| {
+            field.name.as_ref().is_some_and(|candidate| {
+                edit_distance(&typed, &String::from_utf8_lossy(candidate)) <= limit
+            })
+        })
+    }
+
+    fn act_on_call(
+        &mut self,
+        callee: Expression,
+        arguments: Vec<Expression>,
+        open: Place,
+        close: Place,
+    ) -> Expression {
+        let start = callee.start;
+        if callee.contains_error() || arguments.iter().any(Expression::contains_error) {
+            return Expression::error(start);
+        }
+        let callee = self.usual_unary_conversions(callee);
+        let Some(function_type) = callee.ty.pointee().filter(|pointee| pointee.is_function())
+        else {
+            self.diagnose(
+                "err_typecheck_call_not_function",
+                callee.start,
+                vec![Argument::Type(callee.ty.clone())],
+            );
+            return Expression::error(start);
+        };
+        let function_declaration = callee.referenced_declaration();
+        if let Some(declaration) = function_declaration {
+            if let Some(name) = self.declarations[declaration].name.clone() {
+                let text = String::from_utf8_lossy(&name);
+                if text.starts_with("__builtin_")
+                    || LIBRARY_BUILTIN_NAMES.binary_search(&text.as_ref()).is_ok()
+                {
+                    self.unsupported("checks for calls to library builtin functions");
+                    return Expression::error(start);
+                }
+            }
+        }
+        let result_type = function_type
+            .function_result()
+            .unwrap_or_else(Parser::int_type);
+        if !result_type.is_void() && !self.is_complete_type(&result_type) {
+            self.require_complete_type(
+                open,
+                &result_type,
+                "err_call_incomplete_return",
+                Vec::new(),
+            );
+            return Expression::error(start);
+        }
+        let canonical = function_type.desugared();
+        let converted = match &*canonical.node {
+            TypeNode::FunctionPrototype {
+                parameters,
+                variadic,
+                ..
+            } => {
+                let parameters = parameters.clone();
+                let variadic = *variadic;
+                if arguments.len() < parameters.len() {
+                    self.diagnose(
+                        "err_typecheck_call_too_few_args",
+                        close,
+                        vec![
+                            Argument::number(0),
+                            Argument::number(parameters.len() as i128),
+                            Argument::number(arguments.len() as i128),
+                            Argument::number(0),
+                        ],
+                    );
+                    if let Some(declaration) = function_declaration {
+                        self.note_callee(declaration);
+                    }
+                    return Expression::error(start);
+                }
+                if arguments.len() > parameters.len() && !variadic {
+                    let place = arguments[parameters.len()].start;
+                    self.diagnose(
+                        "err_typecheck_call_too_many_args",
+                        place,
+                        vec![
+                            Argument::number(0),
+                            Argument::number(parameters.len() as i128),
+                            Argument::number(arguments.len() as i128),
+                            Argument::number(0),
+                        ],
+                    );
+                    if let Some(declaration) = function_declaration {
+                        self.note_callee(declaration);
+                    }
+                    return Expression::error(start);
+                }
+                let mut converted = Vec::new();
+                for (index, argument) in arguments.into_iter().enumerate() {
+                    if index < parameters.len() {
+                        let parameter_type = parameters[index].clone();
+                        if !self.is_complete_type(&parameter_type) {
+                            self.require_complete_type(
+                                argument.start,
+                                &parameter_type,
+                                "err_call_incomplete_argument",
+                                Vec::new(),
+                            );
+                            return Expression::error(start);
+                        }
+                        let argument_place = argument.start;
+                        let (result, (value, source_type)) =
+                            self.check_single_assignment_constraints(&parameter_type, argument);
+                        if self.diagnose_assignment_result(
+                            result,
+                            argument_place,
+                            &parameter_type,
+                            &source_type,
+                            &value,
+                            AssignmentAction::Passing,
+                        ) {
+                            return Expression::error(start);
+                        }
+                        self.check_implicit_conversion(&value, &parameter_type, argument_place);
+                        converted.push(value);
+                    } else {
+                        let promoted = self.default_argument_promotion(argument);
+                        if promoted.ty.is_record() && !self.is_complete_type(&promoted.ty) {
+                            self.require_complete_type(
+                                promoted.start,
+                                &promoted.ty.clone(),
+                                "err_call_incomplete_argument",
+                                Vec::new(),
+                            );
+                            return Expression::error(start);
+                        }
+                        converted.push(promoted);
+                    }
+                }
+                converted
+            }
+            _ => {
+                if !arguments.is_empty() {
+                    if let Some(declaration) = function_declaration {
+                        if !self.declarations[declaration].implicit
+                            && self.declarations[declaration].builtin.is_none()
+                        {
+                            let name = self.declarations[declaration]
+                                .name
+                                .clone()
+                                .unwrap_or_else(|| Rc::from(&b""[..]));
+                            self.diagnose(
+                                "warn_strict_uses_without_prototype",
+                                open,
+                                vec![Argument::Name(name)],
+                            );
+                        }
+                    }
+                }
+                let mut converted = Vec::new();
+                for argument in arguments {
+                    let promoted = self.default_argument_promotion(argument);
+                    if promoted.ty.is_record() && !self.is_complete_type(&promoted.ty) {
+                        self.require_complete_type(
+                            promoted.start,
+                            &promoted.ty.clone(),
+                            "err_call_incomplete_argument",
+                            Vec::new(),
+                        );
+                        return Expression::error(start);
+                    }
+                    converted.push(promoted);
+                }
+                converted
+            }
+        };
+        let noreturn = function_type_is_noreturn(&function_type)
+            || function_declaration.is_some_and(|declaration| {
+                self.declarations[declaration].kind == DeclarationKind::Function
+                    && self.declarations[declaration].noreturn
+            });
+        self.note_call_for_reachability(noreturn);
+        Expression::new(
+            ExpressionKind::Call {
+                callee: Box::new(callee),
+                arguments: converted,
+            },
+            result_type.unqualified(),
+            ValueCategory::RValue,
+            start,
+            start,
+            close,
+        )
+    }
+
+    fn note_callee(&mut self, declaration: usize) {
+        let information = self.declarations[declaration].clone();
+        if information.implicit {
+            return;
+        }
+        if let Some(name) = information.name {
+            self.diagnose(
+                "note_callee_decl",
+                information.place,
+                vec![Argument::Name(name)],
+            );
+        }
+    }
+
+    fn act_on_cast(
+        &mut self,
+        open: Place,
+        ty: QualifiedType,
+        close: Place,
+        operand: Expression,
+    ) -> Expression {
+        let _ = close;
+        self.guard_warning_groups(&CAST_WARNING_GROUPS);
+        if operand.contains_error() {
+            return Expression::error(open);
+        }
+        let end = operand.end;
+        let make = |operand: Expression, kind: CastKind, ty: QualifiedType| -> Expression {
+            Expression::new(
+                ExpressionKind::Cast {
+                    kind,
+                    operand: Box::new(operand),
+                    explicit: true,
+                    written: Some(ty.clone()),
+                },
+                ty.unqualified(),
+                ValueCategory::RValue,
+                open,
+                open,
+                end,
+            )
+        };
+        if ty.is_void() {
+            let operand = self.ignored_value_conversions(operand);
+            return make(operand, CastKind::ToVoid, ty);
+        }
+        if !self.is_complete_type(&ty) && !ty.is_void() {
+            self.require_complete_type(open, &ty, "err_typecheck_cast_to_incomplete", Vec::new());
+            return Expression::error(open);
+        }
+        let operand = self.default_function_array_lvalue_conversion(operand);
+        let source = operand.ty.clone();
+        if ty.is_record() {
+            if self.types_compatible(
+                &ty.canonical().unqualified(),
+                &source.canonical().unqualified(),
+            ) {
+                self.diagnose(
+                    "ext_typecheck_cast_nonscalar",
+                    open,
+                    vec![Argument::Type(ty.clone())],
+                );
+                return make(operand, CastKind::NoOp, ty);
+            }
+            if let Some((tag, TagKind::Union)) = ty.tag() {
+                let fields = self.tags[tag].fields.clone();
+                if fields.iter().any(|field| {
+                    field.ty.canonical().unqualified() == source.canonical().unqualified()
+                }) {
+                    self.diagnose("ext_typecheck_cast_to_union", open, Vec::new());
+                    return make(operand, CastKind::ToUnion, ty);
+                }
+                self.diagnose(
+                    "err_typecheck_cast_to_union_no_type",
+                    open,
+                    vec![Argument::Type(source)],
+                );
+                return Expression::error(open);
+            }
+            self.diagnose(
+                "err_typecheck_cond_expect_scalar",
+                open,
+                vec![Argument::Type(ty)],
+            );
+            return Expression::error(open);
+        }
+        if !ty.is_scalar() {
+            self.diagnose(
+                "err_typecheck_cond_expect_scalar",
+                open,
+                vec![Argument::Type(ty)],
+            );
+            return Expression::error(open);
+        }
+        if !source.is_scalar() {
+            self.diagnose(
+                "err_typecheck_expect_scalar_operand",
+                operand.start,
+                vec![Argument::Type(source)],
+            );
+            return Expression::error(open);
+        }
+        if ty.is_pointer() && !source.is_pointer() && !source.is_integer() {
+            self.diagnose(
+                "err_cast_pointer_from_non_pointer_int",
+                operand.start,
+                vec![Argument::Type(source)],
+            );
+            return Expression::error(open);
+        }
+        if source.is_pointer() && !ty.is_pointer() && !ty.is_integer() {
+            self.diagnose(
+                "err_cast_pointer_to_non_pointer_int",
+                open,
+                vec![Argument::Type(ty)],
+            );
+            return Expression::error(open);
+        }
+        if ty.is_pointer() && source.is_integer() && !self.is_null_pointer_constant(&operand) {
+            let source_width = self.integer_width(&source);
+            if source_width < self.target().pointer_width
+                && !source.is_bool()
+                && !source.is_enumeration()
+            {
+                self.diagnose(
+                    "warn_int_to_pointer_cast",
+                    open,
+                    vec![Argument::Type(source.clone()), Argument::Type(ty.clone())],
+                );
+            }
+        }
+        if source.is_pointer() && ty.is_integer() && !ty.is_bool() {
+            let target_width = self.integer_width(&ty);
+            if target_width < self.target().pointer_width {
+                let message = if ty.is_enumeration() {
+                    "warn_pointer_to_enum_cast"
+                } else {
+                    "warn_pointer_to_int_cast"
+                };
+                self.diagnose(
+                    message,
+                    open,
+                    vec![Argument::Type(source.clone()), Argument::Type(ty.clone())],
+                );
+            }
+        }
+        let kind =
+            if ty.is_pointer() && self.is_null_pointer_constant(&operand) && source.is_integer() {
+                CastKind::NullToPointer
+            } else {
+                self.scalar_cast_kind(&source, &ty)
+            };
+        make(operand, kind, ty)
+    }
+
+    fn ignored_value_conversions(&mut self, expression: Expression) -> Expression {
+        if expression.ty.is_function() || expression.ty.is_array() {
+            return self.default_function_array_conversion(expression);
+        }
+        expression
+    }
+
+    fn act_on_trait_expression(
+        &mut self,
+        kind: TraitKind,
+        keyword: &'static str,
+        ty: Option<(QualifiedType, Place)>,
+        operand: Option<Expression>,
+        place: Place,
+    ) -> Option<Expression> {
+        let spelling = match keyword {
+            "sizeof" => "sizeof",
+            "_Alignof" => "_Alignof",
+            "alignof" => "alignof",
+            "_Countof" => "_Countof",
+            _ => "__alignof",
+        };
+        let (argument, end, operand) = match (ty, operand) {
+            (Some((ty, close)), _) => (ty, close, None),
+            (None, Some(operand)) => {
+                if operand.contains_error() {
+                    return Some(Expression::error(place));
+                }
+                if operand.is_bit_field(self) {
+                    let index = if kind == TraitKind::SizeOf { 0 } else { 1 };
+                    self.diagnose(
+                        "err_sizeof_alignof_typeof_bitfield",
+                        operand.start,
+                        vec![Argument::number(index)],
+                    );
+                    return Some(Expression::error(place));
+                }
+                let ty = operand.ty.clone();
+                let end = operand.end;
+                (ty, end, Some(operand))
+            }
+            (None, None) => return None,
+        };
+        if kind != TraitKind::CountOf {
+            let check_type = if kind != TraitKind::SizeOf {
+                match argument.array_element() {
+                    Some(element) if argument.is_incomplete_array() => {
+                        self.diagnose_compatibility(
+                            "alignof_incomplete_array",
+                            CStandard::C2y,
+                            place,
+                            Vec::new(),
+                        );
+                        element
+                    }
+                    _ => argument.clone(),
+                }
+            } else {
+                argument.clone()
+            };
+            if check_type.is_function() {
+                self.diagnose(
+                    "ext_sizeof_alignof_function_type",
+                    place,
+                    vec![Argument::text(spelling)],
+                );
+            } else if check_type.is_void() {
+                self.diagnose(
+                    "ext_sizeof_alignof_void_type",
+                    place,
+                    vec![Argument::text(spelling)],
+                );
+            } else if !self.is_complete_type(&check_type.base_element())
+                || (kind == TraitKind::SizeOf && check_type.is_incomplete_array())
+            {
+                self.diagnose(
+                    "err_sizeof_alignof_incomplete_or_sizeless_type",
+                    place,
+                    vec![
+                        Argument::text(spelling),
+                        Argument::number(0),
+                        Argument::Type(check_type.clone()),
+                    ],
+                );
+                self.note_incomplete_type(&check_type);
+                return Some(Expression::error(place));
+            }
+        } else {
+            self.unsupported("_Countof");
+            return None;
+        }
+        if let Some(operand) = &operand {
+            if let Some(element) = operand.ignore_parentheses().ty.array_element() {
+                let _ = element;
+            }
+        }
+        let ty = self.size_type();
+        Some(Expression::new(
+            ExpressionKind::Trait {
+                kind,
+                argument,
+                operand: operand.map(Box::new),
+                spelling,
+            },
+            ty,
+            ValueCategory::RValue,
+            place,
+            place,
+            end,
+        ))
+    }
+
+    fn act_on_compound_literal(
+        &mut self,
+        open: Place,
+        ty: QualifiedType,
+        close: Place,
+        initializer: Expression,
+        initializer_start: Place,
+    ) -> Option<Expression> {
+        let _ = close;
+        let mut literal_type = ty.clone();
+        if ty.is_array() && ty.is_incomplete_array() {
+        } else if ty.is_variable_array() {
+            self.diagnose("err_variable_object_no_init", initializer_start, Vec::new());
+            return Some(Expression::error(open));
+        } else if !self.is_complete_type(&ty) {
+            self.require_complete_type(open, &ty, "err_typecheck_decl_incomplete_type", Vec::new());
+            return Some(Expression::error(open));
+        }
+        let file_scope = self.function.is_none();
+        let converted =
+            self.perform_initialization(&mut literal_type, initializer, file_scope, Some(open))?;
+        if file_scope {
+            if let Some(culprit) = self.check_constant_initializer(&converted) {
+                self.diagnose("err_init_element_not_constant", culprit, Vec::new());
+            }
+        }
+        let end = converted.end;
+        Some(Expression::new(
+            ExpressionKind::CompoundLiteral {
+                initializer: Box::new(converted),
+                file_scope,
+            },
+            literal_type,
+            ValueCategory::LValue,
+            open,
+            open,
+            end,
+        ))
+    }
+}
+
+fn parse_floating_literal(digits: &str, hexadecimal: bool) -> f64 {
+    if !hexadecimal {
+        return digits.parse::<f64>().unwrap_or(0.0);
+    }
+    let body = &digits[2..];
+    let (mantissa, exponent) = match body.find(['p', 'P']) {
+        Some(position) => (
+            &body[..position],
+            body[position + 1..].parse::<i32>().unwrap_or(0),
+        ),
+        None => (body, 0),
+    };
+    let (whole, fraction) = match mantissa.find('.') {
+        Some(position) => (&mantissa[..position], &mantissa[position + 1..]),
+        None => (mantissa, ""),
+    };
+    let mut value = 0f64;
+    for character in whole.chars() {
+        value = value * 16.0 + f64::from(character.to_digit(16).unwrap_or(0));
+    }
+    let mut scale = 1.0 / 16.0;
+    for character in fraction.chars() {
+        value += f64::from(character.to_digit(16).unwrap_or(0)) * scale;
+        scale /= 16.0;
+    }
+    value * 2f64.powi(exponent)
+}
+
+fn floating_literal_is_zero(digits: &str) -> bool {
+    let hexadecimal = digits.starts_with("0x") || digits.starts_with("0X");
+    let body = if hexadecimal { &digits[2..] } else { digits };
+    let end = body
+        .find(if hexadecimal { ['p', 'P'] } else { ['e', 'E'] })
+        .unwrap_or(body.len());
+    body[..end]
+        .chars()
+        .all(|character| character == '0' || character == '.')
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
     pub fn parse_translation_unit(mut self) -> Option<String> {
+        self.check_unported_warning_groups();
+        self.push_scope(SCOPE_FILE);
         let mut at_end = self.parse_top_level_declaration();
         if at_end && !self.preprocessor.language.header_file {
             let place = self.token.site;
-            self.report(Message::EmptyTranslationUnit, place, Vec::new());
+            self.diagnose("ext_empty_translation_unit", place, Vec::new());
         }
         while !at_end && self.unsupported.is_none() {
             at_end = self.parse_top_level_declaration();
         }
+        if self.unsupported.is_none() {
+            self.act_on_end_of_translation_unit();
+        }
+        self.check_unported_warning_groups();
         self.unsupported
+    }
+
+    fn warning_group_enabled(&self, group: &str) -> bool {
+        let state = &self.preprocessor.engine.state;
+        if state.ignore_all {
+            return false;
+        }
+        if let Some(all) = state.all_override {
+            if !state.groups.get(group).is_some_and(|mapping| mapping.user) {
+                return all != CSeverity::Ignored;
+            }
+        }
+        match state.groups.get(group) {
+            Some(mapping) if mapping.user => mapping
+                .severity
+                .is_some_and(|severity| severity != CSeverity::Ignored),
+            _ => state.enable_all,
+        }
+    }
+
+    fn guard_warning_groups(&self, groups: &[&'static str]) {
+        if self.group_guard.get().is_some() {
+            return;
+        }
+        if let Some(group) = groups
+            .iter()
+            .find(|group| self.warning_group_enabled(group))
+        {
+            self.group_guard.set(Some(group));
+        }
+    }
+
+    fn guard_set_but_unused(&self, target: &Expression) {
+        if let Some(declaration) = target.ignore_parentheses().referenced_declaration() {
+            if matches!(
+                self.declarations[declaration].kind,
+                DeclarationKind::Variable | DeclarationKind::Parameter
+            ) && !self.declarations[declaration].file_scope
+            {
+                self.guard_warning_groups(&["unused-but-set-variable", "unused-but-set-parameter"]);
+            }
+        }
+    }
+
+    fn guard_variable_declaration(&self, declaration: usize, initializer: Option<&Expression>) {
+        let variable = &self.declarations[declaration];
+        if variable.file_scope {
+            if variable.storage != StorageClass::Static
+                && variable.storage != StorageClass::Extern
+                && variable.previous.is_none()
+            {
+                self.guard_warning_groups(&["missing-variable-declarations"]);
+            }
+            return;
+        }
+        if let Some(name) = &variable.name {
+            if self.scopes.len() > 1
+                && self.scopes[..self.scopes.len() - 1].iter().any(|scope| {
+                    scope.declarations.iter().any(|index| {
+                        *index != declaration
+                            && self.declarations[*index].name.as_ref() == Some(name)
+                    })
+                })
+            {
+                self.guard_warning_groups(&["shadow"]);
+            }
+        }
+        if matches!(
+            variable.storage,
+            StorageClass::Static | StorageClass::Extern
+        ) {
+            return;
+        }
+        if initializer.is_none_or(|initializer| initializer.mentions_declaration(declaration)) {
+            self.guard_warning_groups(&UNINITIALIZED_WARNING_GROUPS);
+        }
+    }
+
+    fn check_unported_warning_groups(&mut self) {
+        if self.unsupported.is_some() {
+            return;
+        }
+        if let Some(group) = self.group_guard.get() {
+            self.unsupported(format!("warning group -W{group}"));
+            return;
+        }
+        for group in UNPORTED_WARNING_GROUPS {
+            if self.warning_group_enabled(group) {
+                self.unsupported(format!("warning group -W{group}"));
+                return;
+            }
+        }
     }
 
     fn parse_top_level_declaration(&mut self) -> bool {
         if self.token.kind == TokenKind::EndOfFile {
             return true;
         }
+        let saved = self.save_balance();
         self.parse_external_declaration();
+        self.restore_balance(saved);
         false
     }
 
     fn parse_external_declaration(&mut self) {
         match self.token.kind {
             TokenKind::PragmaAnnotation => self.handle_pragma_annotation(),
-            TokenKind::Semi => self.consume_extra_semicolon(0),
+            TokenKind::Semi => self.consume_extra_semicolon(0, ""),
             TokenKind::RightBrace => {
                 let place = self.consume();
-                self.report(Message::ExtraneousClosingBrace, place, Vec::new());
+                self.diagnose("err_extraneous_closing_brace", place, Vec::new());
             }
             TokenKind::EndOfFile => {
                 let place = self.token.site;
-                self.report(Message::ExpectedExternalDeclaration, place, Vec::new());
+                self.diagnose("err_expected_external_declaration", place, Vec::new());
             }
-            _ => {
-                let what = match self.keyword() {
-                    Some(keyword) => format!("declaration starting with '{keyword}'"),
-                    None => format!("declaration starting with {:?}", self.token.kind),
-                };
-                self.unsupported(what);
-            }
+            _ => match self.keyword() {
+                Some("__extension__") => {
+                    self.consume();
+                    self.extension_depth += 1;
+                    self.parse_external_declaration();
+                    self.extension_depth -= 1;
+                }
+                Some("asm") => self.unsupported("file scope asm"),
+                Some("_Static_assert" | "static_assert") => self.parse_static_assert(),
+                _ => self.parse_declaration_or_function_definition(),
+            },
         }
     }
 
@@ -21454,22 +33160,9508 @@ impl<'session, 'files> Parser<'session, 'files> {
             (Some("fp_contract" | "cx_limited_range" | "fenv_round"), _) => {}
             (Some("fenv_access"), Some(state)) => {
                 if state == "ON" && self.preprocessor.options.fast_math {
-                    self.report(Message::PragmaFenvRequiresPrecise, place, Vec::new());
+                    self.diagnose("err_pragma_fenv_requires_precise", place, Vec::new());
                 }
             }
             _ => self.unsupported(value),
         }
     }
 
-    fn consume_extra_semicolon(&mut self, kind: usize) {
+    fn consume_extra_semicolon(&mut self, kind: i128, tag: &str) {
         let start = self.consume();
         while self.token.kind == TokenKind::Semi && !self.token.at_start_of_line() {
             self.consume();
         }
-        self.report(
-            Message::ExtraSemi,
+        self.diagnose(
+            "ext_extra_semi",
             start,
-            vec![kind.to_string(), String::new()],
+            vec![Argument::number(kind), Argument::text(tag)],
         );
     }
+
+    fn expect_and_consume_semicolon(&mut self, message: &str, arguments: Vec<Argument>) -> bool {
+        if self.try_consume(TokenKind::Semi).is_some() {
+            return true;
+        }
+        if matches!(
+            self.token.kind,
+            TokenKind::RightParen | TokenKind::RightSquare
+        ) && self.peek(1).kind == TokenKind::Semi
+        {
+            let place = self.token.site;
+            let spelling = self
+                .token
+                .kind
+                .punctuator_spelling()
+                .unwrap_or("")
+                .to_string();
+            self.diagnose(
+                "err_extraneous_token_before_semi",
+                place,
+                vec![Argument::Text(spelling)],
+            );
+            self.consume();
+            self.consume();
+            return true;
+        }
+        if matches!(self.token.kind, TokenKind::Colon | TokenKind::Comma) {
+            let place = self.token.site;
+            let mut arguments = arguments;
+            if message == "err_expected" {
+                arguments = vec![Argument::text("';'")];
+            }
+            self.diagnose(message, place, arguments);
+            self.consume();
+            return true;
+        }
+        let place = self.previous_end.unwrap_or(self.token.site);
+        let mut arguments = arguments;
+        if message == "err_expected" {
+            arguments = vec![Argument::text("';'")];
+        } else if message == "err_expected_after" {
+            arguments.push(Argument::text("';'"));
+        }
+        self.diagnose(message, place, arguments);
+        false
+    }
+
+    fn parse_static_assert(&mut self) {
+        let keyword = self.keyword().unwrap_or("_Static_assert");
+        let place = self.token.site;
+        if keyword == "_Static_assert" {
+            self.diagnose_c11_keyword("_Static_assert", place);
+        } else if self.language().at_least(CStandard::C23) {
+            self.diagnose(
+                "warn_c23_compat_keyword",
+                place,
+                vec![Argument::text("static_assert")],
+            );
+        }
+        let assert_place = self.consume();
+        let Some(open) = self.try_consume(TokenKind::LeftParen) else {
+            let here = self.token.site;
+            self.diagnose("err_expected", here, vec![Argument::text("'('")]);
+            self.skip_malformed_declaration();
+            return;
+        };
+        let Some(condition) = self.parse_constant_expression() else {
+            self.skip_malformed_declaration();
+            return;
+        };
+        let mut message: Option<Expression> = None;
+        if self.at(TokenKind::RightParen) {
+            let here = self.token.site;
+            self.diagnose_compatibility(
+                "c_static_assert_no_message",
+                CStandard::C23,
+                here,
+                Vec::new(),
+            );
+        } else {
+            if self.try_consume(TokenKind::Comma).is_none() {
+                let here = self.previous_end.unwrap_or(self.token.site);
+                self.diagnose("err_expected", here, vec![Argument::text("','")]);
+                self.skip_until(&[TokenKind::Semi], false, false);
+                return;
+            }
+            if !matches!(self.token.kind, TokenKind::String(_)) {
+                let here = self.token.site;
+                self.diagnose(
+                    "err_expected_string_literal",
+                    here,
+                    vec![Argument::number(1)],
+                );
+                self.skip_malformed_declaration();
+                return;
+            }
+            message = self.parse_string_literal_expression();
+            if message.is_none() {
+                self.skip_malformed_declaration();
+                return;
+            }
+        }
+        self.expect_closing(TokenKind::RightParen, open);
+        self.expect_and_consume_semicolon(
+            "err_expected_semi_after_static_assert",
+            vec![Argument::text(keyword)],
+        );
+        self.act_on_static_assert(assert_place, condition, message);
+    }
+
+    fn act_on_static_assert(
+        &mut self,
+        place: Place,
+        condition: Expression,
+        message: Option<Expression>,
+    ) {
+        let _ = place;
+        if condition.contains_error() {
+            return;
+        }
+        let condition = self.default_function_array_lvalue_conversion(condition);
+        if !condition.ty.is_integer() {
+            self.diagnose(
+                "err_static_assert_expression_is_not_constant",
+                condition.start,
+                vec![Argument::number(0)],
+            );
+            return;
+        }
+        match self.verify_integer_constant_expression(&condition) {
+            ConstantCheck::Constant(value, folded) => {
+                if folded {
+                    self.diagnose(
+                        "ext_expr_not_ice",
+                        condition.start,
+                        vec![Argument::number(0)],
+                    );
+                }
+                if value != 0 {
+                    return;
+                }
+                let text = message.as_ref().map(|message| match &message.kind {
+                    ExpressionKind::String { units, .. } => {
+                        let bytes: Vec<u8> = units
+                            .iter()
+                            .take(units.len().saturating_sub(1))
+                            .map(|unit| *unit as u8)
+                            .collect();
+                        String::from_utf8_lossy(&bytes).into_owned()
+                    }
+                    _ => String::new(),
+                });
+                let inner = condition.ignore_parentheses_and_implicit_casts();
+                let simple = matches!(
+                    inner.kind,
+                    ExpressionKind::Integer { .. } | ExpressionKind::Character { .. }
+                );
+                if simple {
+                    match text {
+                        Some(text) => self.diagnose(
+                            "err_static_assert_failed",
+                            condition.start,
+                            vec![Argument::number(0), Argument::Text(text)],
+                        ),
+                        None => self.diagnose(
+                            "err_static_assert_failed",
+                            condition.start,
+                            vec![Argument::number(1)],
+                        ),
+                    }
+                    return;
+                }
+                let printed = self.print_expression(&condition);
+                match text {
+                    Some(text) => self.diagnose(
+                        "err_static_assert_requirement_failed",
+                        condition.start,
+                        vec![
+                            Argument::Text(printed),
+                            Argument::number(0),
+                            Argument::Text(text),
+                        ],
+                    ),
+                    None => self.diagnose(
+                        "err_static_assert_requirement_failed",
+                        condition.start,
+                        vec![Argument::Text(printed), Argument::number(1)],
+                    ),
+                }
+                self.unsupported("static assertion failure notes");
+            }
+            ConstantCheck::NotConstant(diagnostic_place) => {
+                self.diagnose(
+                    "err_static_assert_expression_is_not_constant",
+                    condition.start,
+                    vec![Argument::number(0)],
+                );
+                let _ = diagnostic_place;
+                self.unsupported("static assertion constant evaluation notes");
+            }
+        }
+    }
+
+    pub fn verify_integer_constant_expression(&mut self, expression: &Expression) -> ConstantCheck {
+        let check = self.check_integer_constant(expression);
+        if check.kind == IceKind::Ice {
+            let mut state = EvaluationState::default();
+            let value = match self.evaluate(expression, &mut state) {
+                Some(ConstantValue::Integer(value)) => value,
+                _ => 0,
+            };
+            if let Some((place, text, ty)) = state.overflow.clone() {
+                let _ = (place, text, ty);
+                self.unsupported("overflow in integer constant expression");
+            }
+            return ConstantCheck::Constant(value, false);
+        }
+        let place = if check.kind == IceKind::NotIce {
+            check.place
+        } else {
+            expression.start
+        };
+        let mut state = EvaluationState::default();
+        let folded = self.evaluate(expression, &mut state);
+        if let Some(ConstantValue::Integer(_)) = folded {
+            if !state.side_effects {
+                return ConstantCheck::NotConstant(state.note.unwrap_or(place));
+            }
+        }
+        ConstantCheck::NotConstant(state.note.unwrap_or(place))
+    }
+
+    fn skip_malformed_declaration(&mut self) {
+        loop {
+            match self.token.kind {
+                TokenKind::LeftBrace => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::RightBrace], false, false);
+                    if matches!(self.token.kind, TokenKind::Comma | TokenKind::LeftBrace) {
+                        continue;
+                    }
+                    self.try_consume(TokenKind::Semi);
+                    return;
+                }
+                TokenKind::LeftSquare => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::RightSquare], false, false);
+                    continue;
+                }
+                TokenKind::LeftParen => {
+                    self.consume();
+                    self.skip_until(&[TokenKind::RightParen], false, false);
+                    continue;
+                }
+                TokenKind::RightBrace => return,
+                TokenKind::Semi => {
+                    self.consume();
+                    return;
+                }
+                TokenKind::EndOfFile => return,
+                _ => {
+                    if self.is_keyword("extern") && self.token.at_start_of_line() {
+                        return;
+                    }
+                }
+            }
+            self.consume();
+        }
+    }
+
+    fn parse_declaration_or_function_definition(&mut self) {
+        let start = self.token.site;
+        let mut specifiers = DeclarationSpecifiers::new(start);
+        self.parse_declaration_specifiers(&mut specifiers, SpecifierContext::TopLevel);
+        if self.unsupported.is_some() {
+            return;
+        }
+        if self.at(TokenKind::Semi) {
+            self.consume();
+            self.act_on_free_standing_specifiers(&specifiers, start);
+            return;
+        }
+        self.parse_declaration_group(&mut specifiers, DeclaratorContext::File, start);
+    }
+
+    fn act_on_free_standing_specifiers(
+        &mut self,
+        specifiers: &DeclarationSpecifiers,
+        start: Place,
+    ) {
+        let _ = start;
+        if specifiers.specifier == TypeSpecifier::Error {
+            return;
+        }
+        if specifiers.inline {
+            self.diagnose(
+                "err_inline_non_function",
+                specifiers.inline_place,
+                vec![Argument::number(0)],
+            );
+        }
+        if specifiers.noreturn {
+            self.diagnose(
+                "err_noreturn_non_function",
+                specifiers.noreturn_place,
+                Vec::new(),
+            );
+        }
+        let tag_kind = matches!(
+            specifiers.specifier,
+            TypeSpecifier::Struct | TypeSpecifier::Union | TypeSpecifier::Enum
+        );
+        if tag_kind {
+            if let Some(tag) = specifiers.tag {
+                if self.tags[tag].information.name.is_some() {
+                    if specifiers.storage == StorageClass::Typedef {
+                        self.diagnose(
+                            "ext_typedef_without_a_name",
+                            specifiers.storage_place,
+                            Vec::new(),
+                        );
+                        return;
+                    }
+                    if specifiers.storage != StorageClass::None
+                        || specifiers.thread != ThreadStorage::None
+                    {
+                        let place = if specifiers.storage != StorageClass::None {
+                            specifiers.storage_place
+                        } else {
+                            specifiers.thread_place
+                        };
+                        let name = if specifiers.storage != StorageClass::None {
+                            specifiers.storage.name()
+                        } else {
+                            specifiers.thread.name()
+                        };
+                        self.diagnose(
+                            "warn_standalone_specifier",
+                            place,
+                            vec![Argument::text(name)],
+                        );
+                    }
+                    for (bit, name, place) in [
+                        (QUALIFIER_CONST, "const", specifiers.const_place),
+                        (QUALIFIER_VOLATILE, "volatile", specifiers.volatile_place),
+                        (QUALIFIER_RESTRICT, "restrict", specifiers.restrict_place),
+                    ] {
+                        if specifiers.qualifiers & bit != 0 {
+                            self.diagnose(
+                                "warn_standalone_specifier",
+                                place,
+                                vec![Argument::text(name)],
+                            );
+                        }
+                    }
+                    return;
+                }
+                if specifiers.specifier != TypeSpecifier::Enum
+                    && specifiers.tag_defined
+                    && self.scope_flags() & SCOPE_RECORD == 0
+                {
+                    self.diagnose("ext_no_declarators", specifiers.start, Vec::new());
+                    return;
+                }
+                if specifiers.specifier == TypeSpecifier::Enum {
+                    if specifiers.storage == StorageClass::Typedef {
+                        self.diagnose(
+                            "ext_typedef_without_a_name",
+                            specifiers.storage_place,
+                            Vec::new(),
+                        );
+                    }
+                    return;
+                }
+                return;
+            }
+            return;
+        }
+        if specifiers.storage == StorageClass::Typedef {
+            self.diagnose(
+                "ext_typedef_without_a_name",
+                specifiers.storage_place,
+                Vec::new(),
+            );
+            return;
+        }
+        self.diagnose("ext_no_declarators", specifiers.start, Vec::new());
+    }
+
+    fn is_declaration_after_declarator(&mut self) -> bool {
+        matches!(
+            self.token.kind,
+            TokenKind::Equal | TokenKind::Comma | TokenKind::Semi
+        ) || matches!(self.keyword(), Some("asm" | "__attribute"))
+    }
+
+    fn parse_declaration_group(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        context: DeclaratorContext,
+        start: Place,
+    ) -> Vec<usize> {
+        let mut declarations = Vec::new();
+        let mut declarator = Declarator::new(context, start);
+        self.parse_declarator(&mut declarator);
+        if self.unsupported.is_some() {
+            return declarations;
+        }
+        if declarator.name.is_none() && !declarator.may_omit_identifier() {
+            self.skip_malformed_declaration();
+            return declarations;
+        }
+        if declarator.is_function_declarator() {
+            if self.is_keyword("__attribute") {
+                self.unsupported("GNU attributes after function declarator");
+                return declarations;
+            }
+            if self.is_keyword("_Noreturn") {
+                let place = self.consume();
+                if !specifiers.noreturn {
+                    specifiers.noreturn = true;
+                    specifiers.noreturn_place = place;
+                }
+                self.diagnose("err_c11_noreturn_misplaced", place, Vec::new());
+            }
+            if !self.is_declaration_after_declarator() {
+                if context == DeclaratorContext::File {
+                    if self.is_start_of_function_definition(&declarator) {
+                        if specifiers.storage == StorageClass::Typedef {
+                            self.diagnose(
+                                "err_function_declared_typedef",
+                                specifiers.storage_place,
+                                Vec::new(),
+                            );
+                            specifiers.storage = StorageClass::None;
+                        }
+                        self.parse_function_definition(specifiers, &mut declarator);
+                        return declarations;
+                    }
+                    if !self.is_declaration_specifier() {
+                        let place = self.token.site;
+                        self.diagnose("err_expected_fn_body", place, Vec::new());
+                        self.skip_until(&[TokenKind::Semi], false, false);
+                        return declarations;
+                    }
+                } else if self.at(TokenKind::LeftBrace) {
+                    let place = self.token.site;
+                    self.diagnose("err_function_definition_not_allowed", place, Vec::new());
+                    self.skip_malformed_declaration();
+                    return declarations;
+                }
+            }
+        }
+        if let Some(declaration) =
+            self.parse_declaration_after_declarator(specifiers, &mut declarator)
+        {
+            declarations.push(declaration);
+        }
+        let mut expect_semicolon = context != DeclaratorContext::ForInit;
+        while let Some(comma) = self.try_consume(TokenKind::Comma) {
+            if self.token.at_start_of_line()
+                && expect_semicolon
+                && !self.might_be_declarator(context)
+            {
+                self.diagnose("err_expected_semi_declaration", comma, Vec::new());
+                expect_semicolon = false;
+                break;
+            }
+            let mut next = Declarator::new(context, self.token.site);
+            next.first = false;
+            if self.is_keyword("__attribute") {
+                self.unsupported("GNU attributes on declarator");
+                return declarations;
+            }
+            self.parse_declarator(&mut next);
+            if self.unsupported.is_some() {
+                return declarations;
+            }
+            if !next.invalid {
+                if let Some(declaration) =
+                    self.parse_declaration_after_declarator(specifiers, &mut next)
+                {
+                    declarations.push(declaration);
+                }
+            }
+        }
+        if expect_semicolon {
+            let message = if context == DeclaratorContext::File {
+                "err_invalid_token_after_toplevel_declarator"
+            } else {
+                "err_expected_semi_declaration"
+            };
+            if !self.expect_and_consume_semicolon(message, Vec::new())
+                && !self.is_declaration_specifier()
+            {
+                self.skip_malformed_declaration();
+            }
+        }
+        declarations
+    }
+
+    fn might_be_declarator(&mut self, context: DeclaratorContext) -> bool {
+        match self.token.kind {
+            TokenKind::Caret | TokenKind::Ellipsis | TokenKind::LeftParen | TokenKind::Star => true,
+            TokenKind::Colon => context == DeclaratorContext::Member,
+            TokenKind::Identifier if self.keyword().is_none() => {
+                let next = self.peek(1);
+                let next_keyword = self.keyword_of(&next);
+                match next.kind {
+                    TokenKind::Comma
+                    | TokenKind::Equal
+                    | TokenKind::EqualEqual
+                    | TokenKind::LeftBrace
+                    | TokenKind::LeftParen
+                    | TokenKind::LeftSquare
+                    | TokenKind::Less
+                    | TokenKind::RightBrace
+                    | TokenKind::RightParen
+                    | TokenKind::RightSquare
+                    | TokenKind::Semi => true,
+                    TokenKind::Colon => context == DeclaratorContext::Member,
+                    _ => matches!(next_keyword, Some("asm" | "__attribute" | "alignas")),
+                }
+            }
+            _ => self.is_keyword("__attribute"),
+        }
+    }
+
+    fn is_start_of_function_definition(&mut self, declarator: &Declarator) -> bool {
+        if self.at(TokenKind::LeftBrace) {
+            return true;
+        }
+        if let Some(DeclaratorChunk::Function {
+            parameters,
+            has_prototype,
+            ..
+        }) = declarator.function_chunk()
+        {
+            if !has_prototype && !parameters.is_empty() && parameters[0].declaration.is_none() {
+                return self.is_declaration_specifier();
+            }
+            if !has_prototype && parameters.is_empty() {
+                return self.is_declaration_specifier()
+                    && !self.language().at_least(CStandard::C23);
+            }
+        }
+        false
+    }
+
+    fn parse_declaration_after_declarator(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+    ) -> Option<usize> {
+        if self.is_keyword("asm") {
+            self.unsupported("asm label");
+            return None;
+        }
+        if self.is_keyword("__attribute") {
+            self.unsupported("GNU attributes after declarator");
+            return None;
+        }
+        let has_initializer = self.at(TokenKind::Equal);
+        declarator.has_initializer = has_initializer;
+        let declaration = self.act_on_declarator(specifiers, declarator);
+        if has_initializer {
+            let equal = self.consume();
+            let initializer_start = self.token.site;
+            let initializer = self.parse_initializer();
+            match initializer {
+                Some(initializer) => {
+                    if let Some(declaration) = declaration {
+                        self.add_initializer_to_declaration(
+                            declaration,
+                            initializer,
+                            equal,
+                            initializer_start,
+                        );
+                    }
+                }
+                None => {
+                    self.skip_until(&[TokenKind::Comma], true, true);
+                    if let Some(declaration) = declaration {
+                        self.declarations[declaration].invalid = true;
+                    }
+                }
+            }
+        } else if let Some(declaration) = declaration {
+            self.act_on_uninitialized_declaration(declaration);
+        }
+        declaration
+    }
+
+    fn function_specifiers_on_non_function(&mut self, specifiers: &DeclarationSpecifiers) {
+        if specifiers.inline {
+            self.diagnose(
+                "err_inline_non_function",
+                specifiers.inline_place,
+                vec![Argument::number(0)],
+            );
+        }
+        if specifiers.noreturn {
+            self.diagnose(
+                "err_noreturn_non_function",
+                specifiers.noreturn_place,
+                Vec::new(),
+            );
+        }
+    }
+
+    fn act_on_declarator(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+    ) -> Option<usize> {
+        let ty = self.type_for_declarator(specifiers, declarator);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        let Some(name) = declarator.name.clone() else {
+            if !declarator.invalid {
+                self.diagnose("err_declarator_need_ident", specifiers.start, Vec::new());
+            }
+            return None;
+        };
+        if specifiers.storage == StorageClass::Typedef {
+            return self.act_on_typedef_declarator(specifiers, declarator, name, ty);
+        }
+        if ty.is_function() {
+            return self.act_on_function_declarator(specifiers, declarator, name, ty);
+        }
+        self.act_on_variable_declarator(specifiers, declarator, name, ty)
+    }
+
+    fn previous_in_scope(&self, name: &[u8]) -> Option<usize> {
+        self.lookup_ordinary_in_current_scope(name)
+    }
+
+    fn previous_with_linkage(&self, name: &[u8]) -> Option<usize> {
+        for scope in self.scopes.iter().rev() {
+            if let Some(found) = scope.ordinary.get(name) {
+                let declaration = &self.declarations[*found];
+                let has_linkage = matches!(
+                    declaration.kind,
+                    DeclarationKind::Function | DeclarationKind::Variable
+                ) && (declaration.file_scope
+                    || declaration.storage == StorageClass::Extern
+                    || declaration.kind == DeclarationKind::Function);
+                if has_linkage {
+                    return Some(*found);
+                }
+                return None;
+            }
+        }
+        None
+    }
+
+    fn note_previous_definition(&mut self, previous: usize) {
+        let place = self.declarations[previous].place;
+        if self.declarations[previous].implicit {
+            return;
+        }
+        self.diagnose("note_previous_definition", place, Vec::new());
+    }
+
+    fn previous_note_name(&self, previous: usize) -> &'static str {
+        let declaration = &self.declarations[previous];
+        let definition = match declaration.kind {
+            DeclarationKind::Variable => {
+                declaration.has_initializer
+                    || (declaration.file_scope && declaration.storage != StorageClass::Extern)
+                    || (!declaration.file_scope && declaration.storage != StorageClass::Extern)
+            }
+            DeclarationKind::Function => declaration.defined,
+            _ => true,
+        };
+        if definition {
+            "note_previous_definition"
+        } else if declaration.implicit {
+            if declaration.builtin.is_some() {
+                "note_previous_builtin_declaration"
+            } else {
+                "note_previous_implicit_declaration"
+            }
+        } else {
+            "note_previous_declaration"
+        }
+    }
+
+    fn act_on_typedef_declarator(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+        name: Rc<[u8]>,
+        ty: QualifiedType,
+    ) -> Option<usize> {
+        self.function_specifiers_on_non_function(specifiers);
+        if specifiers.thread != ThreadStorage::None {
+            self.diagnose(
+                "err_invalid_thread",
+                specifiers.thread_place,
+                vec![Argument::text(specifiers.thread.name())],
+            );
+        }
+        let mut ty = ty;
+        if self.at_file_scope() && ty.is_variably_modified() {
+            match self.try_to_fix_variably_modified(&ty) {
+                Some(fixed) => {
+                    self.diagnose(
+                        "ext_vla_folded_to_constant",
+                        declarator.name_place,
+                        Vec::new(),
+                    );
+                    ty = fixed;
+                }
+                None => {
+                    let message = if ty.is_variable_array() {
+                        "err_vla_decl_in_file_scope"
+                    } else {
+                        "err_vm_decl_in_file_scope"
+                    };
+                    self.diagnose(message, declarator.name_place, Vec::new());
+                    declarator.invalid = true;
+                }
+            }
+        }
+        let mut declaration = Declaration::new(
+            DeclarationKind::Typedef,
+            Some(name.clone()),
+            declarator.name_place,
+            ty.clone(),
+        );
+        declaration.storage = StorageClass::Typedef;
+        declaration.file_scope = self.at_file_scope();
+        declaration.invalid = declarator.invalid;
+        let index = self.add_declaration(declaration);
+        if let Some(tag) = specifiers.tag {
+            if specifiers.tag_defined
+                && self.tags[tag].information.name.is_none()
+                && self.tags[tag].information.typedef_for_anonymous.is_none()
+                && ty.canonical()
+                    == QualifiedType::new(TypeNode::Tag {
+                        declaration: tag,
+                        kind: self.tags[tag].information.kind,
+                        keyword: false,
+                    })
+            {
+                self.tags[tag].information.typedef_for_anonymous =
+                    Some(Rc::from(String::from_utf8_lossy(&name).as_ref()));
+            }
+        }
+        if !declarator.invalid {
+            if let Some(previous) = self.previous_in_scope(&name) {
+                self.merge_typedef(index, previous);
+            }
+        }
+        self.push_on_scope(index);
+        Some(index)
+    }
+
+    fn try_to_fix_variably_modified(&self, ty: &QualifiedType) -> Option<QualifiedType> {
+        let qualifiers = ty.qualifiers;
+        match &*ty.node {
+            TypeNode::Pointer(pointee) => {
+                let fixed = self.try_to_fix_variably_modified(pointee)?;
+                Some(QualifiedType::pointer_to(fixed).with_qualifiers(qualifiers))
+            }
+            TypeNode::Typedef { underlying, .. } => {
+                if underlying.is_variably_modified() {
+                    self.try_to_fix_variably_modified(&underlying.with_qualifiers(qualifiers))
+                } else {
+                    Some(ty.clone())
+                }
+            }
+            TypeNode::VariableArray {
+                element,
+                folded,
+                index_qualifiers,
+                ..
+            } => {
+                let size = (*folded)?;
+                let element = if element.is_variably_modified() {
+                    self.try_to_fix_variably_modified(element)?
+                } else {
+                    element.clone()
+                };
+                Some(
+                    QualifiedType::new(TypeNode::ConstantArray {
+                        element,
+                        size,
+                        modifier: ArrayModifier::Normal,
+                        index_qualifiers: *index_qualifiers,
+                    })
+                    .with_qualifiers(qualifiers),
+                )
+            }
+            TypeNode::ConstantArray {
+                element,
+                size,
+                modifier,
+                index_qualifiers,
+            } => {
+                let element = self.try_to_fix_variably_modified(element)?;
+                Some(
+                    QualifiedType::new(TypeNode::ConstantArray {
+                        element,
+                        size: *size,
+                        modifier: *modifier,
+                        index_qualifiers: *index_qualifiers,
+                    })
+                    .with_qualifiers(qualifiers),
+                )
+            }
+            _ => {
+                if ty.is_variably_modified() {
+                    None
+                } else {
+                    Some(ty.clone())
+                }
+            }
+        }
+    }
+
+    fn merge_typedef(&mut self, new: usize, previous: usize) {
+        if self.declarations[previous].kind != DeclarationKind::Typedef {
+            let name = self.declarations[new]
+                .name
+                .clone()
+                .unwrap_or_else(|| Rc::from(&b""[..]));
+            let place = self.declarations[new].place;
+            self.diagnose(
+                "err_redefinition_different_kind",
+                place,
+                vec![Argument::Name(name)],
+            );
+            self.note_previous_definition(previous);
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if self.declarations[previous].invalid {
+            self.declarations[new].invalid = true;
+            return;
+        }
+        let new_type = self.declarations[new].ty.clone();
+        let old_type = self.declarations[previous].ty.clone();
+        let place = self.declarations[new].place;
+        if new_type.is_variably_modified() {
+            self.diagnose(
+                "err_redefinition_variably_modified_typedef",
+                place,
+                vec![Argument::number(0), Argument::Type(new_type)],
+            );
+            self.note_previous_definition(previous);
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if old_type != new_type && old_type.canonical() != new_type.canonical() {
+            self.diagnose(
+                "err_redefinition_different_typedef",
+                place,
+                vec![
+                    Argument::number(0),
+                    Argument::Type(new_type),
+                    Argument::Type(old_type),
+                ],
+            );
+            self.note_previous_definition(previous);
+            self.declarations[new].invalid = true;
+            return;
+        }
+        self.declarations[new].previous = Some(previous);
+        if self.language().at_least(CStandard::C11) {
+            return;
+        }
+        let previous_place = self.declarations[previous].place;
+        if self.preprocessor.in_system_header(previous_place)
+            || self.preprocessor.in_system_header(place)
+        {
+            return;
+        }
+        let name = self.declarations[new]
+            .name
+            .clone()
+            .unwrap_or_else(|| Rc::from(&b""[..]));
+        self.diagnose(
+            "ext_redefinition_of_typedef",
+            place,
+            vec![Argument::Name(name)],
+        );
+        self.note_previous_definition(previous);
+    }
+
+    fn act_on_variable_declarator(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+        name: Rc<[u8]>,
+        ty: QualifiedType,
+    ) -> Option<usize> {
+        let file_scope = self.at_file_scope();
+        let mut storage = specifiers.storage;
+        if file_scope && matches!(storage, StorageClass::Auto | StorageClass::Register) {
+            self.diagnose(
+                "err_typecheck_sclass_fscope",
+                specifiers.storage_place,
+                Vec::new(),
+            );
+            declarator.invalid = true;
+            storage = StorageClass::None;
+        }
+        self.function_specifiers_on_non_function(specifiers);
+        if specifiers.thread != ThreadStorage::None
+            && !file_scope
+            && !matches!(storage, StorageClass::Static | StorageClass::Extern)
+        {
+            self.diagnose(
+                "err_thread_non_global",
+                specifiers.thread_place,
+                vec![Argument::text(specifiers.thread.name())],
+            );
+            declarator.invalid = true;
+        }
+        let mut declaration = Declaration::new(
+            DeclarationKind::Variable,
+            Some(name.clone()),
+            declarator.name_place,
+            ty.clone(),
+        );
+        declaration.storage = storage;
+        declaration.thread = specifiers.thread;
+        declaration.file_scope = file_scope;
+        declaration.invalid = declarator.invalid;
+        declaration.has_initializer = declarator.has_initializer;
+        let index = self.add_declaration(declaration);
+        self.check_variable_declaration_type(index);
+        let previous = if file_scope {
+            self.previous_in_scope(&name)
+        } else if storage == StorageClass::Extern {
+            self.previous_in_scope(&name)
+                .or_else(|| self.previous_with_linkage(&name))
+        } else {
+            self.previous_in_scope(&name)
+        };
+        if let Some(previous) = previous {
+            self.merge_variable(index, previous);
+        }
+        if file_scope && !self.declarations[index].invalid {
+            if let Some(first) = self.declarations[index].previous {
+                let _ = first;
+            }
+        }
+        self.push_on_scope(index);
+        Some(index)
+    }
+
+    fn has_external_storage(&self, declaration: usize) -> bool {
+        self.declarations[declaration].storage == StorageClass::Extern
+            || self.declarations[declaration].storage == StorageClass::PrivateExtern
+    }
+
+    fn check_variable_declaration_type(&mut self, index: usize) {
+        if self.declarations[index].invalid {
+            return;
+        }
+        let ty = self.declarations[index].ty.clone();
+        let place = self.declarations[index].place;
+        let file_scope = self.declarations[index].file_scope;
+        let storage = self.declarations[index].storage;
+        let has_linkage = file_scope || storage == StorageClass::Extern;
+        let global_storage =
+            file_scope || matches!(storage, StorageClass::Static | StorageClass::Extern);
+        if (ty.is_variably_modified() && has_linkage) || (ty.is_variable_array() && global_storage)
+        {
+            match self.try_to_fix_variably_modified(&ty) {
+                Some(fixed) => {
+                    self.diagnose("ext_vla_folded_to_constant", place, Vec::new());
+                    self.declarations[index].ty = fixed;
+                }
+                None => {
+                    let message = if ty.is_variable_array() {
+                        if file_scope {
+                            "err_vla_decl_in_file_scope"
+                        } else if storage == StorageClass::Static {
+                            "err_vla_decl_has_static_storage"
+                        } else {
+                            "err_vla_decl_has_extern_linkage"
+                        }
+                    } else if file_scope {
+                        "err_vm_decl_in_file_scope"
+                    } else {
+                        "err_vm_decl_has_extern_linkage"
+                    };
+                    self.diagnose(message, place, Vec::new());
+                    self.declarations[index].invalid = true;
+                    return;
+                }
+            }
+        }
+        if ty.is_void() && !self.has_external_storage(index) {
+            self.diagnose(
+                "err_typecheck_decl_incomplete_type",
+                place,
+                vec![Argument::Type(ty)],
+            );
+            self.declarations[index].invalid = true;
+        }
+    }
+
+    fn merge_variable(&mut self, new: usize, previous: usize) {
+        if self.declarations[new].invalid {
+            return;
+        }
+        let name = self.declarations[new]
+            .name
+            .clone()
+            .unwrap_or_else(|| Rc::from(&b""[..]));
+        let place = self.declarations[new].place;
+        if self.declarations[previous].kind != DeclarationKind::Variable {
+            self.diagnose(
+                "err_redefinition_different_kind",
+                place,
+                vec![Argument::Name(name)],
+            );
+            self.note_previous_definition(previous);
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if self.declarations[previous].invalid {
+            return;
+        }
+        let new_type = self.declarations[new].ty.clone();
+        let old_type = self.declarations[previous].ty.clone();
+        let merge_with_old = self.declarations[previous].file_scope
+            || self.declarations[new].file_scope == self.declarations[previous].file_scope;
+        match self.merge_types(&new_type, &old_type, false, false) {
+            Some(merged) => {
+                if merge_with_old {
+                    let merged = if merged.is_incomplete_array() && old_type.is_constant_array() {
+                        old_type.clone()
+                    } else {
+                        merged
+                    };
+                    self.declarations[new].ty = merged;
+                }
+            }
+            None => {
+                let new_is_definition = !self.has_external_storage(new);
+                let message = if new_is_definition {
+                    "err_redefinition_different_type"
+                } else {
+                    "err_redeclaration_different_type"
+                };
+                self.diagnose(
+                    message,
+                    place,
+                    vec![
+                        Argument::Name(name),
+                        Argument::Type(new_type),
+                        Argument::Type(old_type),
+                    ],
+                );
+                let note = self.previous_note_name(previous);
+                let previous_place = self.declarations[previous].place;
+                self.diagnose(note, previous_place, Vec::new());
+                self.declarations[new].invalid = true;
+                return;
+            }
+        }
+        let note = self.previous_note_name(previous);
+        let previous_place = self.declarations[previous].place;
+        let old_has_linkage = self.declarations[previous].file_scope
+            || self.declarations[previous].storage == StorageClass::Extern;
+        let old_internal = self.first_declaration_storage(previous) == StorageClass::Static;
+        if self.declarations[new].storage == StorageClass::Static
+            && old_has_linkage
+            && !old_internal
+        {
+            self.diagnose(
+                "err_static_non_static",
+                place,
+                vec![
+                    Argument::Name(name),
+                    Argument::number(i128::from(!self.language().at_least(CStandard::C2y))),
+                ],
+            );
+            self.diagnose(note, previous_place, Vec::new());
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if self.has_external_storage(new) && old_has_linkage {
+        } else if self.declarations[new].storage != StorageClass::Static && old_internal {
+            self.diagnose("err_non_static_static", place, vec![Argument::Name(name)]);
+            self.diagnose(note, previous_place, Vec::new());
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if self.has_external_storage(new)
+            && !old_has_linkage
+            && !self.declarations[previous].file_scope
+        {
+            self.diagnose("err_extern_non_extern", place, vec![Argument::Name(name)]);
+            self.diagnose(note, previous_place, Vec::new());
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if old_has_linkage && !self.declarations[new].file_scope && !self.has_external_storage(new)
+        {
+            self.diagnose("err_non_extern_extern", place, vec![Argument::Name(name)]);
+            self.diagnose(note, previous_place, Vec::new());
+            self.declarations[new].invalid = true;
+            return;
+        }
+        if !self.has_external_storage(new) && !self.declarations[new].file_scope {
+            self.diagnose("err_redefinition", place, vec![Argument::Name(name)]);
+            self.diagnose(note, previous_place, Vec::new());
+            self.declarations[new].invalid = true;
+            return;
+        }
+        let new_thread = self.declarations[new].thread;
+        let old_thread = self.declarations[previous].thread;
+        if (new_thread == ThreadStorage::None) != (old_thread == ThreadStorage::None) {
+            let message = if old_thread == ThreadStorage::None {
+                "err_thread_non_thread"
+            } else {
+                "err_non_thread_thread"
+            };
+            self.diagnose(message, place, vec![Argument::Name(name)]);
+            self.diagnose(note, previous_place, Vec::new());
+        }
+        if self.declarations[previous].used {
+            self.declarations[new].used = true;
+        }
+        self.declarations[new].previous = Some(previous);
+    }
+
+    fn first_declaration_storage(&self, declaration: usize) -> StorageClass {
+        let mut current = declaration;
+        while let Some(previous) = self.declarations[current].previous {
+            current = previous;
+        }
+        self.declarations[current].storage
+    }
+
+    fn act_on_function_declarator(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+        name: Rc<[u8]>,
+        ty: QualifiedType,
+    ) -> Option<usize> {
+        let file_scope = self.at_file_scope();
+        let mut storage = specifiers.storage;
+        match storage {
+            StorageClass::Auto | StorageClass::Register => {
+                self.diagnose(
+                    "err_typecheck_sclass_func",
+                    specifiers.storage_place,
+                    Vec::new(),
+                );
+                declarator.invalid = true;
+                storage = StorageClass::None;
+            }
+            StorageClass::Static if !file_scope => {
+                self.diagnose(
+                    "err_static_block_func",
+                    specifiers.storage_place,
+                    Vec::new(),
+                );
+                storage = StorageClass::None;
+            }
+            _ => {}
+        }
+        if specifiers.thread != ThreadStorage::None {
+            self.diagnose(
+                "err_invalid_thread",
+                specifiers.thread_place,
+                vec![Argument::text(specifiers.thread.name())],
+            );
+        }
+        let mut declaration = Declaration::new(
+            DeclarationKind::Function,
+            Some(name.clone()),
+            declarator.name_place,
+            ty.clone(),
+        );
+        declaration.storage = storage;
+        declaration.file_scope = true;
+        declaration.inline = specifiers.inline;
+        declaration.noreturn = specifiers.noreturn;
+        declaration.invalid = declarator.invalid;
+        declaration.has_prototype_written =
+            matches!(&*ty.desugared().node, TypeNode::FunctionPrototype { .. });
+        let index = self.add_declaration(declaration);
+        if &*name == b"main" {
+            self.check_main(index, specifiers);
+        }
+        let previous = if file_scope {
+            self.previous_in_scope(&name)
+        } else {
+            self.previous_in_scope(&name)
+                .or_else(|| self.previous_with_linkage(&name))
+        };
+        if let Some(previous) = previous {
+            if !self.declarations[index].invalid {
+                let is_definition = declarator.function_definition;
+                if self.merge_function(index, previous, is_definition) {
+                    self.declarations[index].invalid = true;
+                }
+            }
+        }
+        if !file_scope && previous.is_none() {
+            if let Some(outer) = self.lookup_ordinary(&name) {
+                let _ = outer;
+            }
+        }
+        self.push_on_scope(index);
+        Some(index)
+    }
+
+    fn check_main(&mut self, index: usize, specifiers: &DeclarationSpecifiers) {
+        if specifiers.inline {
+            self.diagnose("err_inline_main", specifiers.inline_place, Vec::new());
+        }
+        if specifiers.noreturn {
+            self.diagnose("ext_noreturn_main", specifiers.noreturn_place, Vec::new());
+            self.diagnose(
+                "note_main_remove_noreturn",
+                specifiers.noreturn_place,
+                Vec::new(),
+            );
+        }
+        if specifiers.storage == StorageClass::Static {
+            self.diagnose(
+                "warn_static_main",
+                self.declarations[index].place,
+                Vec::new(),
+            );
+        }
+        let ty = self.declarations[index].ty.clone();
+        if let Some(result) = ty.function_result() {
+            if result.canonical().unqualified() != Parser::int_type() {
+                let place = self.declarations[index].place;
+                self.diagnose("ext_main_returns_nonint", place, Vec::new());
+            }
+        }
+        if let TypeNode::FunctionPrototype {
+            parameters,
+            variadic,
+            ..
+        } = &*ty.desugared().node
+        {
+            let parameters = parameters.clone();
+            if *variadic {
+                let place = self.declarations[index].place;
+                self.diagnose(
+                    "err_main_surplus_args",
+                    place,
+                    vec![Argument::number(parameters.len() as i128)],
+                );
+            }
+            if parameters.len() > 3 {
+                let place = self.declarations[index].place;
+                self.diagnose(
+                    "err_main_surplus_args",
+                    place,
+                    vec![Argument::number(parameters.len() as i128)],
+                );
+            }
+            let char_pointer_pointer = |ty: &QualifiedType| -> bool {
+                ty.pointee()
+                    .and_then(|inner| inner.pointee())
+                    .is_some_and(|inner| {
+                        matches!(
+                            inner.canonical().unqualified().builtin_kind(),
+                            Some(BuiltinType::CharSigned | BuiltinType::CharUnsigned)
+                        )
+                    })
+            };
+            for (position, parameter) in parameters.iter().enumerate().take(3) {
+                let ok = match position {
+                    0 => parameter.canonical().unqualified() == Parser::int_type(),
+                    _ => char_pointer_pointer(parameter),
+                };
+                if !ok {
+                    let place = self.declarations[index].place;
+                    self.diagnose(
+                        "err_main_arg_wrong",
+                        place,
+                        vec![
+                            Argument::number(position as i128),
+                            Argument::Type(parameter.clone()),
+                        ],
+                    );
+                }
+            }
+            if parameters.len() == 1 {
+                let place = self.declarations[index].place;
+                self.diagnose("warn_main_one_arg", place, Vec::new());
+            }
+        }
+    }
+
+    fn merge_function(&mut self, new: usize, previous: usize, new_is_definition: bool) -> bool {
+        let name = self.declarations[new]
+            .name
+            .clone()
+            .unwrap_or_else(|| Rc::from(&b""[..]));
+        let place = self.declarations[new].place;
+        if self.declarations[previous].kind != DeclarationKind::Function {
+            self.diagnose(
+                "err_redefinition_different_kind",
+                place,
+                vec![Argument::Name(name)],
+            );
+            self.note_previous_definition(previous);
+            return true;
+        }
+        if self.declarations[previous].invalid {
+            return true;
+        }
+        let note = self.previous_note_name(previous);
+        let previous_place = self.declarations[previous].place;
+        let old_type = self.declarations[previous].ty.clone();
+        let new_type = self.declarations[new].ty.clone();
+        let old_internal = self.first_declaration_storage(previous) == StorageClass::Static;
+        if self.declarations[new].storage == StorageClass::Static && !old_internal {
+            let gnu_inline_redefinition = self.declarations[previous].inline
+                && self.declarations[previous].storage == StorageClass::Extern
+                && self
+                    .preprocessor
+                    .options
+                    .gnu_inline
+                    .unwrap_or(!self.language().at_least(CStandard::C99));
+            if !gnu_inline_redefinition {
+                self.diagnose(
+                    "err_static_non_static",
+                    place,
+                    vec![Argument::Name(name.clone()), Argument::number(0)],
+                );
+                self.diagnose(
+                    note,
+                    previous_place,
+                    vec![Argument::Name(name), Argument::Type(old_type)],
+                );
+                return true;
+            }
+        }
+        if self.declarations[previous].noreturn {
+            self.declarations[new].noreturn = true;
+        }
+        let old_parameter_count = function_parameter_count(&old_type);
+        let new_parameter_count = function_parameter_count(&new_type);
+        let old_prototype = self.declarations[previous].has_prototype_written
+            || matches!(
+                &*old_type.desugared().node,
+                TypeNode::FunctionPrototype { .. }
+            );
+        let new_written = self.declarations[new].has_prototype_written;
+        let old_written = self.declarations[previous].has_prototype_written;
+        if old_prototype
+            && !new_written
+            && new_is_definition
+            && old_parameter_count != new_parameter_count
+            && !self.declarations[previous].implicit
+        {
+            self.diagnose(
+                "err_conflicting_types",
+                place,
+                vec![Argument::Name(name.clone())],
+            );
+            self.diagnose(
+                note,
+                previous_place,
+                vec![Argument::Name(name), Argument::Type(old_type)],
+            );
+            return true;
+        }
+        if new_written != old_written
+            && !self.declarations[new].implicit
+            && !self.declarations[previous].implicit
+        {
+            let (with_prototype, without_prototype) = if new_written {
+                (new, previous)
+            } else {
+                (previous, new)
+            };
+            let with_count =
+                function_parameter_count(&self.declarations[with_prototype].ty.clone());
+            if with_count != 0 && self.declarations[without_prototype].builtin.is_none() {
+                let without_is_definition = if without_prototype == new {
+                    new_is_definition
+                } else {
+                    self.declarations[without_prototype].defined
+                };
+                let with_is_definition = if with_prototype == new {
+                    new_is_definition
+                } else {
+                    false
+                };
+                let without_count =
+                    function_parameter_count(&self.declarations[without_prototype].ty.clone());
+                let without_place = self.declarations[without_prototype].place;
+                self.diagnose(
+                    "warn_non_prototype_changes_behavior",
+                    without_place,
+                    vec![
+                        Argument::number(i128::from(without_is_definition)),
+                        Argument::number(if without_count != 0 { 0 } else { 1 }),
+                        Argument::number(i128::from(without_prototype == previous)),
+                        Argument::number(i128::from(with_is_definition)),
+                    ],
+                );
+                if self.declarations[with_prototype].builtin.is_none()
+                    && !self.declarations[with_prototype].implicit
+                    && !without_is_definition
+                {
+                    let with_place = self.declarations[with_prototype].place;
+                    self.diagnose("note_conflicting_prototype", with_place, Vec::new());
+                }
+            }
+        }
+        if self.types_compatible(&old_type, &new_type) {
+            let old_is_prototype = matches!(
+                &*old_type.desugared().node,
+                TypeNode::FunctionPrototype { .. }
+            );
+            let new_is_prototype = matches!(
+                &*new_type.desugared().node,
+                TypeNode::FunctionPrototype { .. }
+            );
+            if !new_is_prototype && old_is_prototype {
+                let TypeNode::FunctionPrototype {
+                    parameters,
+                    variadic,
+                    noreturn,
+                    ..
+                } = &*old_type.desugared().node
+                else {
+                    unreachable!()
+                };
+                let result = new_type.function_result().unwrap_or_else(Parser::int_type);
+                self.declarations[new].ty = QualifiedType::new(TypeNode::FunctionPrototype {
+                    result,
+                    parameters: parameters.clone(),
+                    variadic: *variadic,
+                    noreturn: *noreturn,
+                });
+            } else if let Some(merged) = self.merge_types(&old_type, &new_type, false, false) {
+                let _ = merged;
+            }
+            self.declarations[new].previous = Some(previous);
+            if self.declarations[previous].used {
+                self.declarations[new].used = true;
+            }
+            if self.declarations[previous].defined {
+                self.declarations[new].defined_earlier = Some(previous);
+            }
+            if self.declarations[previous].defined_earlier.is_some() {
+                self.declarations[new].defined_earlier =
+                    self.declarations[previous].defined_earlier;
+            }
+            return false;
+        }
+        if self.declarations[previous].implicit && self.declarations[previous].builtin.is_some() {
+            self.unsupported("redeclaration of library builtin");
+            return false;
+        }
+        let promoted_compatible = self.check_promoted_compatible(previous, new);
+        if promoted_compatible {
+            return false;
+        }
+        self.diagnose(
+            "err_conflicting_types",
+            place,
+            vec![Argument::Name(name.clone())],
+        );
+        self.diagnose(
+            note,
+            previous_place,
+            vec![Argument::Name(name), Argument::Type(old_type)],
+        );
+        true
+    }
+
+    fn check_promoted_compatible(&mut self, previous: usize, new: usize) -> bool {
+        let old_type = self.declarations[previous].ty.clone();
+        let new_type = self.declarations[new].ty.clone();
+        let old_written = self.declarations[previous].has_prototype_written;
+        let new_written = self.declarations[new].has_prototype_written;
+        if !(old_written
+            && !new_written
+            && matches!(
+                &*new_type.desugared().node,
+                TypeNode::FunctionPrototype { .. }
+            ))
+        {
+            return false;
+        }
+        let (
+            TypeNode::FunctionPrototype {
+                parameters: old_parameters,
+                ..
+            },
+            TypeNode::FunctionPrototype {
+                parameters: new_parameters,
+                ..
+            },
+        ) = (&*old_type.desugared().node, &*new_type.desugared().node)
+        else {
+            return false;
+        };
+        if old_parameters.len() != new_parameters.len() {
+            return false;
+        }
+        let _ = (old_parameters, new_parameters);
+        self.unsupported("K&R definition parameter promotion compatibility");
+        true
+    }
+
+    fn act_on_parameter_declarator(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+    ) -> usize {
+        let mut storage = StorageClass::None;
+        if specifiers.storage == StorageClass::Register {
+            storage = StorageClass::Register;
+            if specifiers.specifier == TypeSpecifier::Void && declarator.chunks.is_empty() {
+                self.diagnose(
+                    "err_invalid_storage_class_in_func_decl",
+                    specifiers.storage_place,
+                    Vec::new(),
+                );
+                storage = StorageClass::None;
+            }
+        } else if specifiers.storage != StorageClass::None {
+            self.diagnose(
+                "err_invalid_storage_class_in_func_decl",
+                specifiers.storage_place,
+                Vec::new(),
+            );
+        }
+        if specifiers.thread != ThreadStorage::None {
+            self.diagnose(
+                "err_invalid_thread",
+                specifiers.thread_place,
+                vec![Argument::text(specifiers.thread.name())],
+            );
+        }
+        if specifiers.inline {
+            self.diagnose(
+                "err_inline_non_function",
+                specifiers.inline_place,
+                vec![Argument::number(0)],
+            );
+        }
+        if specifiers.noreturn {
+            self.diagnose(
+                "err_noreturn_non_function",
+                specifiers.noreturn_place,
+                Vec::new(),
+            );
+        }
+        let ty = self.type_for_declarator(specifiers, declarator);
+        let mut name = declarator.name.clone();
+        if let Some(parameter_name) = &name {
+            if let Some(previous) = self.lookup_ordinary_in_current_scope(parameter_name) {
+                self.diagnose(
+                    "err_param_redefinition",
+                    declarator.name_place,
+                    vec![Argument::Name(parameter_name.clone())],
+                );
+                let previous_place = self.declarations[previous].place;
+                self.diagnose("note_previous_declaration", previous_place, Vec::new());
+                name = None;
+                declarator.invalid = true;
+            }
+        }
+        let adjusted = self.adjusted_parameter_type(&ty);
+        let mut declaration = Declaration::new(
+            DeclarationKind::Parameter,
+            name,
+            declarator.name_place,
+            adjusted,
+        );
+        declaration.storage = storage;
+        declaration.invalid = declarator.invalid;
+        declaration.original_type = Some(ty);
+        let index = self.add_declaration(declaration);
+        self.push_on_scope(index);
+        index
+    }
 }
+
+fn function_parameter_count(ty: &QualifiedType) -> usize {
+    match &*ty.desugared().node {
+        TypeNode::FunctionPrototype { parameters, .. } => parameters.len(),
+        _ => 0,
+    }
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum TagUse {
+    Reference,
+    Declaration,
+    Definition,
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    fn tag_scope_depth(&self) -> usize {
+        let mut depth = self.scopes.len() - 1;
+        while depth > 0 && self.scopes[depth].flags & SCOPE_RECORD != 0 {
+            depth -= 1;
+        }
+        depth
+    }
+
+    fn create_tag(
+        &mut self,
+        name: Option<Rc<[u8]>>,
+        kind: TagKind,
+        place: Place,
+        depth: usize,
+    ) -> usize {
+        let description = if name.is_none() {
+            self.tag_description(place, kind)
+        } else {
+            String::new()
+        };
+        let tag = Tag {
+            information: TagInformation {
+                name: name
+                    .as_ref()
+                    .map(|name| Rc::from(String::from_utf8_lossy(name).as_ref())),
+                kind,
+                anonymous_description: description,
+                typedef_for_anonymous: None,
+            },
+            place,
+            complete: false,
+            being_defined: false,
+            definition_place: None,
+            fields: Vec::new(),
+            enumerators: Vec::new(),
+            integer_type: None,
+            promotion_type: None,
+            flexible_array: false,
+            invalid: false,
+            packed: false,
+            layout: None,
+        };
+        let index = self.tags.len();
+        self.tags.push(tag);
+        if let Some(name) = name {
+            self.scopes[depth].tags.insert(name, index);
+        }
+        index
+    }
+
+    fn act_on_tag(
+        &mut self,
+        kind: TagKind,
+        keyword_place: Place,
+        name: Option<(Rc<[u8]>, Place)>,
+        usage: TagUse,
+    ) -> Option<usize> {
+        let Some((name, name_place)) = name else {
+            let depth = self.tag_scope_depth();
+            return Some(self.create_tag(None, kind, keyword_place, depth));
+        };
+        let depth = self.tag_scope_depth();
+        let found = match usage {
+            TagUse::Reference => self.lookup_tag(&name),
+            _ => self.scopes[depth].tags.get(&name).map(|tag| (*tag, depth)),
+        };
+        if let Some((tag, found_depth)) = found {
+            let previous_kind = self.tags[tag].information.kind;
+            if previous_kind != kind {
+                let safe = previous_kind != TagKind::Enum && kind != TagKind::Enum;
+                self.diagnose(
+                    "err_use_with_wrong_tag",
+                    keyword_place,
+                    vec![Argument::Name(name.clone())],
+                );
+                let previous_place = self.tags[tag].place;
+                self.diagnose("note_previous_use", previous_place, Vec::new());
+                if !safe {
+                    let created = self.create_tag(None, kind, keyword_place, depth);
+                    self.tags[created].invalid = true;
+                    return Some(created);
+                }
+            }
+            match usage {
+                TagUse::Reference | TagUse::Declaration => return Some(tag),
+                TagUse::Definition => {
+                    if found_depth == depth {
+                        if self.tags[tag].being_defined {
+                            self.diagnose(
+                                "err_nested_redefinition",
+                                name_place,
+                                vec![Argument::Name(name.clone())],
+                            );
+                            let created = self.create_tag(None, kind, keyword_place, depth);
+                            self.tags[created].invalid = true;
+                            return Some(created);
+                        }
+                        if self.tags[tag].complete {
+                            self.diagnose(
+                                "err_redefinition",
+                                name_place,
+                                vec![Argument::Name(name.clone())],
+                            );
+                            let previous_place = self.tags[tag]
+                                .definition_place
+                                .unwrap_or(self.tags[tag].place);
+                            self.diagnose("note_previous_definition", previous_place, Vec::new());
+                            let created = self.create_tag(None, kind, keyword_place, depth);
+                            self.tags[created].invalid = true;
+                            return Some(created);
+                        }
+                        self.tags[tag].place = name_place;
+                        return Some(tag);
+                    }
+                }
+            }
+        }
+        if kind == TagKind::Enum && usage != TagUse::Definition {
+            self.diagnose("ext_forward_ref_enum", name_place, Vec::new());
+        }
+        if self.scopes[depth].flags & SCOPE_PROTOTYPE != 0 && usage != TagUse::Definition {
+            let shown = format!("{} {}", kind.name(), String::from_utf8_lossy(&name));
+            self.diagnose(
+                "warn_decl_in_param_list",
+                name_place,
+                vec![Argument::Text(format!("'{shown}'"))],
+            );
+        }
+        Some(self.create_tag(Some(name), kind, name_place, depth))
+    }
+
+    fn parse_record_specifier(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        kind: TagKind,
+        keyword_place: Place,
+        context: SpecifierContext,
+    ) {
+        if matches!(
+            self.keyword(),
+            Some("__attribute" | "__declspec" | "alignas" | "_Alignas")
+        ) || self.at(TokenKind::LeftSquare)
+        {
+            self.unsupported("attributes on struct or union");
+            return;
+        }
+        let name = if self.is_identifier() {
+            let name = self.token.spelling.clone();
+            let place = self.consume();
+            Some((name, place))
+        } else {
+            None
+        };
+        let usage = if self.at(TokenKind::LeftBrace) {
+            TagUse::Definition
+        } else if self.at(TokenKind::Semi) && context != SpecifierContext::TypeSpecifier {
+            TagUse::Declaration
+        } else {
+            TagUse::Reference
+        };
+        if name.is_none() && usage != TagUse::Definition {
+            let place = self.token.site;
+            self.diagnose(
+                "err_anon_type_definition",
+                place,
+                vec![Argument::text(kind.name())],
+            );
+            self.skip_until(&[TokenKind::Comma], true, true);
+            specifiers.specifier = TypeSpecifier::Error;
+            return;
+        }
+        let Some(tag) = self.act_on_tag(kind, keyword_place, name.clone(), usage) else {
+            specifiers.specifier = TypeSpecifier::Error;
+            return;
+        };
+        let specifier = if kind == TagKind::Struct {
+            TypeSpecifier::Struct
+        } else {
+            TypeSpecifier::Union
+        };
+        if usage == TagUse::Definition {
+            self.parse_record_body(tag, keyword_place);
+            specifiers.tag_defined = true;
+        }
+        if self.set_type_specifier(specifiers, specifier, keyword_place) {
+            specifiers.tag = Some(tag);
+        }
+        specifiers.end = self.previous_place;
+    }
+
+    fn parse_record_body(&mut self, tag: usize, keyword_place: Place) {
+        let open = self.consume();
+        self.tags[tag].being_defined = true;
+        self.push_scope(SCOPE_RECORD);
+        let kind = self.tags[tag].information.kind;
+        let mut fields: Vec<Field> = Vec::new();
+        let mut field_names: HashMap<Rc<[u8]>, Place> = HashMap::new();
+        while !self.at(TokenKind::RightBrace) && !self.at(TokenKind::EndOfFile) {
+            if self.at(TokenKind::Semi) {
+                self.consume_extra_semicolon(1, kind.name());
+                continue;
+            }
+            if self.at(TokenKind::PragmaAnnotation) {
+                self.unsupported("pragma inside struct");
+                break;
+            }
+            if matches!(self.keyword(), Some("_Static_assert" | "static_assert")) {
+                self.parse_static_assert();
+                continue;
+            }
+            if self.is_keyword("__extension__") {
+                self.unsupported("__extension__ inside struct");
+                break;
+            }
+            self.parse_struct_declaration(tag, &mut fields, &mut field_names);
+            if self.unsupported.is_some() {
+                break;
+            }
+            if self.try_consume(TokenKind::Semi).is_some() {
+                continue;
+            }
+            if self.at(TokenKind::RightBrace) {
+                let place = self.previous_end.unwrap_or(self.token.site);
+                self.diagnose("ext_expected_semi_decl_list", place, Vec::new());
+                break;
+            }
+            let place = self.previous_end.unwrap_or(self.token.site);
+            self.diagnose("err_expected_semi_decl_list", place, Vec::new());
+            self.skip_until(&[TokenKind::RightBrace], true, true);
+            self.try_consume(TokenKind::Semi);
+        }
+        self.pop_scope();
+        if self.unsupported.is_some() {
+            return;
+        }
+        let close = self.token.site;
+        if !self.expect_closing(TokenKind::RightBrace, open) {
+            self.tags[tag].being_defined = false;
+            self.tags[tag].complete = true;
+            self.tags[tag].fields = fields;
+            return;
+        }
+        let _ = close;
+        if self.is_keyword("__attribute") {
+            self.unsupported("attributes after struct body");
+            return;
+        }
+        self.act_on_fields(tag, keyword_place, fields);
+    }
+
+    fn parse_struct_declaration(
+        &mut self,
+        tag: usize,
+        fields: &mut Vec<Field>,
+        field_names: &mut HashMap<Rc<[u8]>, Place>,
+    ) {
+        let start = self.token.site;
+        let mut specifiers = DeclarationSpecifiers::new(start);
+        self.parse_specifier_qualifier_list(&mut specifiers, SpecifierContext::Class);
+        if self.unsupported.is_some() {
+            return;
+        }
+        if self.at(TokenKind::Semi) {
+            self.act_on_free_standing_member(tag, &specifiers, fields, field_names, start);
+            return;
+        }
+        let mut first = true;
+        loop {
+            let mut declarator = Declarator::new(DeclaratorContext::Member, self.token.site);
+            declarator.first = first;
+            first = false;
+            if !self.at(TokenKind::Colon) {
+                self.parse_declarator(&mut declarator);
+            } else {
+                declarator.name_place = self.token.site;
+            }
+            if self.unsupported.is_some() {
+                return;
+            }
+            let mut width = None;
+            if self.try_consume(TokenKind::Colon).is_some() {
+                match self.parse_constant_expression() {
+                    Some(expression) => width = Some(expression),
+                    None => {
+                        self.skip_until(&[TokenKind::Comma], true, true);
+                    }
+                }
+            }
+            if self.is_keyword("__attribute") {
+                self.unsupported("attributes on struct member");
+                return;
+            }
+            self.act_on_field(
+                tag,
+                &mut specifiers,
+                &mut declarator,
+                width,
+                fields,
+                field_names,
+            );
+            if self.try_consume(TokenKind::Comma).is_none() {
+                break;
+            }
+        }
+    }
+
+    fn act_on_free_standing_member(
+        &mut self,
+        tag: usize,
+        specifiers: &DeclarationSpecifiers,
+        fields: &mut Vec<Field>,
+        field_names: &mut HashMap<Rc<[u8]>, Place>,
+        start: Place,
+    ) {
+        if let (Some(inner), true) = (
+            specifiers.tag,
+            matches!(
+                specifiers.specifier,
+                TypeSpecifier::Struct | TypeSpecifier::Union
+            ),
+        ) {
+            if self.tags[inner].information.name.is_none() && specifiers.tag_defined {
+                if !self.language().at_least(CStandard::C11) {
+                    let which = if specifiers.specifier == TypeSpecifier::Union {
+                        1
+                    } else {
+                        0
+                    };
+                    self.diagnose(
+                        "ext_c11_anonymous_struct",
+                        start,
+                        vec![Argument::number(which)],
+                    );
+                }
+                for field in self.tags[inner].fields.clone() {
+                    if let Some(name) = &field.name {
+                        if let Some(previous) = field_names.get(name) {
+                            let previous = *previous;
+                            self.diagnose(
+                                "err_anonymous_record_member_redecl",
+                                field.place,
+                                vec![Argument::Name(name.clone())],
+                            );
+                            self.diagnose("note_previous_declaration", previous, Vec::new());
+                        } else {
+                            field_names.insert(name.clone(), field.place);
+                        }
+                    }
+                }
+                let kind = self.tags[inner].information.kind;
+                let ty = QualifiedType::new(TypeNode::Tag {
+                    declaration: inner,
+                    kind,
+                    keyword: true,
+                })
+                .with_qualifiers(specifiers.qualifiers);
+                let declaration = self.add_declaration(Declaration::new(
+                    DeclarationKind::Field,
+                    None,
+                    start,
+                    ty.clone(),
+                ));
+                fields.push(Field {
+                    name: None,
+                    ty,
+                    place: start,
+                    bit_width: None,
+                    declaration,
+                });
+                let _ = tag;
+                return;
+            }
+        }
+        if specifiers.specifier == TypeSpecifier::Error {
+            return;
+        }
+        self.diagnose("ext_no_declarators", specifiers.start, Vec::new());
+    }
+
+    fn act_on_field(
+        &mut self,
+        tag: usize,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+        width: Option<Expression>,
+        fields: &mut Vec<Field>,
+        field_names: &mut HashMap<Rc<[u8]>, Place>,
+    ) {
+        let ty = self.type_for_declarator(specifiers, declarator);
+        if self.unsupported.is_some() {
+            return;
+        }
+        let name = declarator.name.clone();
+        let place = declarator.name_place;
+        let mut invalid = declarator.invalid;
+        if let Some(name) = &name {
+            if let Some(previous) = field_names.get(name).copied() {
+                self.diagnose(
+                    "err_duplicate_member",
+                    place,
+                    vec![Argument::Name(name.clone())],
+                );
+                self.diagnose("note_previous_declaration", previous, Vec::new());
+                invalid = true;
+            }
+        }
+        if !invalid && ty.is_variably_modified() {
+            if ty.is_variable_array() {
+                self.diagnose("err_typecheck_field_variable_size", place, Vec::new());
+            } else {
+                self.diagnose("err_typecheck_negative_array_size", place, Vec::new());
+            }
+            invalid = true;
+        }
+        let mut bit_width = None;
+        if let Some(width) = width {
+            match self.verify_bit_field(&name, place, &ty, width) {
+                Some(value) => bit_width = Some(value),
+                None => invalid = true,
+            }
+        } else if name.is_none() && !invalid {
+            self.diagnose("err_declarator_need_ident", declarator.start, Vec::new());
+            return;
+        }
+        let mut declaration =
+            Declaration::new(DeclarationKind::Field, name.clone(), place, ty.clone());
+        declaration.invalid = invalid;
+        let index = self.add_declaration(declaration);
+        if let Some(name) = &name {
+            field_names.entry(name.clone()).or_insert(place);
+        }
+        let _ = tag;
+        fields.push(Field {
+            name,
+            ty,
+            place,
+            bit_width,
+            declaration: index,
+        });
+    }
+
+    fn verify_bit_field(
+        &mut self,
+        name: &Option<Rc<[u8]>>,
+        place: Place,
+        ty: &QualifiedType,
+        width: Expression,
+    ) -> Option<u32> {
+        if !ty.is_integer() {
+            match name {
+                Some(name) => self.diagnose(
+                    "err_not_integral_type_bitfield",
+                    place,
+                    vec![Argument::Name(name.clone()), Argument::Type(ty.clone())],
+                ),
+                None => self.diagnose(
+                    "err_not_integral_type_anon_bitfield",
+                    place,
+                    vec![Argument::Type(ty.clone())],
+                ),
+            }
+            return None;
+        }
+        let width = self.default_lvalue_conversion(width);
+        if width.contains_error() {
+            return None;
+        }
+        if !width.ty.is_integer() {
+            self.diagnose("err_expr_not_ice", width.start, vec![Argument::number(0)]);
+            return None;
+        }
+        let value = match self.verify_integer_constant_expression(&width) {
+            ConstantCheck::Constant(value, _) => value,
+            ConstantCheck::NotConstant(_) => {
+                self.unsupported("non-constant bit-field width");
+                return None;
+            }
+        };
+        if value < 0 && self.is_signed_integer(&width.ty) {
+            match name {
+                Some(name) => self.diagnose(
+                    "err_bitfield_has_negative_width",
+                    place,
+                    vec![
+                        Argument::Name(name.clone()),
+                        Argument::Text(value.to_string()),
+                    ],
+                ),
+                None => self.diagnose(
+                    "err_anon_bitfield_has_negative_width",
+                    place,
+                    vec![Argument::Text(value.to_string())],
+                ),
+            }
+            return None;
+        }
+        if value == 0 {
+            if let Some(name) = name {
+                self.diagnose(
+                    "err_bitfield_has_zero_width",
+                    place,
+                    vec![Argument::Name(name.clone())],
+                );
+                return None;
+            }
+            return Some(0);
+        }
+        let type_width = if ty.is_bool() {
+            1
+        } else {
+            self.integer_width(ty)
+        };
+        if value > i128::from(type_width) {
+            let shown_name = name
+                .clone()
+                .map(Argument::Name)
+                .unwrap_or_else(|| Argument::text(""));
+            self.diagnose(
+                "err_bitfield_width_exceeds_type_width",
+                place,
+                vec![
+                    Argument::number(i128::from(name.is_some())),
+                    shown_name,
+                    Argument::Text(value.to_string()),
+                    Argument::number(i128::from(type_width)),
+                ],
+            );
+            return None;
+        }
+        Some(value as u32)
+    }
+
+    fn act_on_fields(&mut self, tag: usize, keyword_place: Place, mut fields: Vec<Field>) {
+        let union = self.tags[tag].information.kind == TagKind::Union;
+        let named_members = fields.iter().filter(|field| field.name.is_some()).count();
+        let count = fields.len();
+        let mut flexible = false;
+        let mut index = 0;
+        let mut keep: Vec<bool> = vec![true; count];
+        while index < count {
+            let field = fields[index].clone();
+            let last = index + 1 == count;
+            let invalid = self.declarations[field.declaration].invalid;
+            if invalid {
+                self.tags[tag].invalid = true;
+                index += 1;
+                continue;
+            }
+            if field.ty.is_function() {
+                let name = field.name.clone().unwrap_or_else(|| Rc::from(&b""[..]));
+                self.diagnose(
+                    "err_field_declared_as_function",
+                    field.place,
+                    vec![Argument::Name(name)],
+                );
+                self.tags[tag].invalid = true;
+                keep[index] = false;
+                index += 1;
+                continue;
+            }
+            if field.ty.is_incomplete_array() {
+                let element = field.ty.array_element().unwrap_or_else(Parser::int_type);
+                if !self.is_complete_type(&element) {
+                    self.require_complete_type(
+                        field.place,
+                        &field.ty,
+                        "err_field_incomplete_or_sizeless",
+                        vec![Argument::number(0)],
+                    );
+                    self.tags[tag].invalid = true;
+                    index += 1;
+                    continue;
+                }
+                let name = field.name.clone().unwrap_or_else(|| Rc::from(&b""[..]));
+                let kind_index = if union { 2 } else { 0 };
+                if !union && !last {
+                    self.diagnose(
+                        "err_flexible_array_not_at_end",
+                        field.place,
+                        vec![
+                            Argument::Name(name),
+                            Argument::Type(field.ty.clone()),
+                            Argument::number(kind_index),
+                        ],
+                    );
+                    let next_place = fields[index + 1].place;
+                    self.diagnose("note_next_field_declaration", next_place, Vec::new());
+                    self.tags[tag].invalid = true;
+                    keep[index] = false;
+                    index += 1;
+                    continue;
+                }
+                if union {
+                    self.diagnose(
+                        "ext_flexible_array_union_gnu",
+                        field.place,
+                        vec![Argument::Name(name.clone()), Argument::number(kind_index)],
+                    );
+                } else if named_members < 2 {
+                    self.diagnose(
+                        "ext_flexible_array_empty_aggregate_gnu",
+                        field.place,
+                        vec![Argument::Name(name.clone()), Argument::number(kind_index)],
+                    );
+                }
+                if !self.language().at_least(CStandard::C99) {
+                    self.diagnose(
+                        "ext_c99_flexible_array_member",
+                        field.place,
+                        vec![Argument::Name(name), Argument::number(kind_index)],
+                    );
+                }
+                flexible = true;
+                index += 1;
+                continue;
+            }
+            if !self.is_complete_type(&field.ty) {
+                self.require_complete_type(
+                    field.place,
+                    &field.ty,
+                    "err_field_incomplete_or_sizeless",
+                    vec![Argument::number(0)],
+                );
+                self.tags[tag].invalid = true;
+                keep[index] = false;
+                index += 1;
+                continue;
+            }
+            if let Some((inner, inner_kind)) = field.ty.tag() {
+                if inner_kind != TagKind::Enum && self.tags[inner].flexible_array {
+                    flexible = true;
+                    if !union {
+                        let name = field.name.clone().unwrap_or_else(|| Rc::from(&b""[..]));
+                        if !last {
+                            self.diagnose(
+                                "ext_variable_sized_type_in_struct",
+                                field.place,
+                                vec![Argument::Name(name), Argument::Type(field.ty.clone())],
+                            );
+                        } else {
+                            self.diagnose(
+                                "ext_flexible_array_in_struct",
+                                field.place,
+                                vec![Argument::Name(name)],
+                            );
+                        }
+                    }
+                }
+            }
+            index += 1;
+        }
+        let mut position = 0;
+        fields.retain(|_| {
+            let keep_this = keep[position];
+            position += 1;
+            keep_this
+        });
+        let named_non_bit = fields
+            .iter()
+            .filter(|field| !(field.name.is_none() && field.bit_width.is_some()))
+            .count();
+        let empty = fields.is_empty();
+        if named_non_bit == 0 && !self.language().at_least(CStandard::C2y) {
+            let message = if empty {
+                "ext_empty_struct_union"
+            } else {
+                "ext_no_named_members_in_struct_union"
+            };
+            self.diagnose(
+                message,
+                keyword_place,
+                vec![Argument::number(i128::from(union))],
+            );
+        }
+        let information = &mut self.tags[tag];
+        information.fields = fields;
+        information.flexible_array = flexible;
+        information.being_defined = false;
+        information.complete = true;
+        information.definition_place = Some(information.place);
+        information.layout = None;
+        let layout = self.record_layout(tag);
+        self.tags[tag].layout = layout;
+    }
+
+    fn parse_enum_specifier(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        keyword_place: Place,
+        context: SpecifierContext,
+    ) {
+        if matches!(
+            self.keyword(),
+            Some("__attribute" | "__declspec" | "alignas" | "_Alignas")
+        ) || self.at(TokenKind::LeftSquare)
+        {
+            self.unsupported("attributes on enum");
+            return;
+        }
+        let name = if self.is_identifier() {
+            let name = self.token.spelling.clone();
+            let place = self.consume();
+            Some((name, place))
+        } else {
+            None
+        };
+        if self.at(TokenKind::Colon) {
+            self.unsupported("enum with fixed underlying type");
+            return;
+        }
+        let usage = if self.at(TokenKind::LeftBrace) {
+            TagUse::Definition
+        } else if self.at(TokenKind::Semi) && context != SpecifierContext::TypeSpecifier {
+            TagUse::Declaration
+        } else {
+            TagUse::Reference
+        };
+        if name.is_none() && usage != TagUse::Definition {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_either",
+                place,
+                vec![Argument::text("identifier"), Argument::text("'{'")],
+            );
+            specifiers.specifier = TypeSpecifier::Error;
+            return;
+        }
+        let Some(tag) = self.act_on_tag(TagKind::Enum, keyword_place, name, usage) else {
+            specifiers.specifier = TypeSpecifier::Error;
+            return;
+        };
+        if usage == TagUse::Definition {
+            self.parse_enum_body(tag);
+            specifiers.tag_defined = true;
+        }
+        if self.set_type_specifier(specifiers, TypeSpecifier::Enum, keyword_place) {
+            specifiers.tag = Some(tag);
+        }
+        specifiers.end = self.previous_place;
+    }
+
+    fn parse_enum_body(&mut self, tag: usize) {
+        let open = self.consume();
+        self.tags[tag].being_defined = true;
+        if self.at(TokenKind::RightBrace) {
+            let place = self.token.site;
+            self.diagnose("err_empty_enum", place, Vec::new());
+        }
+        let depth = self.tag_scope_depth();
+        let mut enumerators: Vec<usize> = Vec::new();
+        let mut last_value: Option<(i128, QualifiedType)> = None;
+        let mut comma_place: Option<Place> = None;
+        while self.is_identifier() {
+            let name = self.token.spelling.clone();
+            let place = self.consume();
+            if self.is_keyword("__attribute") || self.at(TokenKind::LeftSquare) {
+                self.unsupported("attributes on enumerator");
+                return;
+            }
+            let mut value_expression = None;
+            if self.try_consume(TokenKind::Equal).is_some() {
+                match self.parse_constant_expression() {
+                    Some(expression) => value_expression = Some(expression),
+                    None => {
+                        self.skip_until(&[TokenKind::Comma, TokenKind::RightBrace], true, true);
+                    }
+                }
+            }
+            let (value, ty) =
+                match self.check_enumerator_value(place, value_expression, &last_value) {
+                    Some(result) => result,
+                    None => (
+                        last_value.as_ref().map(|(value, _)| value + 1).unwrap_or(0),
+                        Parser::int_type(),
+                    ),
+                };
+            last_value = Some((value, ty.clone()));
+            if let Some(previous) = self.scopes[depth].ordinary.get(&name).copied() {
+                let kind = self.declarations[previous].kind;
+                if matches!(
+                    kind,
+                    DeclarationKind::EnumConstant
+                        | DeclarationKind::Variable
+                        | DeclarationKind::Function
+                        | DeclarationKind::Parameter
+                ) {
+                    if kind == DeclarationKind::EnumConstant {
+                        self.diagnose(
+                            "err_redefinition_of_enumerator",
+                            place,
+                            vec![Argument::Name(name.clone())],
+                        );
+                    } else {
+                        self.diagnose(
+                            "err_redefinition",
+                            place,
+                            vec![Argument::Name(name.clone())],
+                        );
+                    }
+                    self.note_previous_definition(previous);
+                    if self.try_consume(TokenKind::Comma).is_none() {
+                        break;
+                    }
+                    continue;
+                }
+            }
+            let mut declaration =
+                Declaration::new(DeclarationKind::EnumConstant, Some(name), place, ty);
+            declaration.value = value;
+            declaration.tag = Some(tag);
+            declaration.file_scope = depth == 0;
+            let index = self.add_declaration(declaration);
+            self.push_on_scope_at(index, depth);
+            enumerators.push(index);
+            comma_place = None;
+            match self.try_consume(TokenKind::Comma) {
+                Some(place) => comma_place = Some(place),
+                None => {
+                    if self.is_identifier() {
+                        let here = self.previous_end.unwrap_or(self.token.site);
+                        self.diagnose("err_enumerator_list_missing_comma", here, Vec::new());
+                        continue;
+                    }
+                    break;
+                }
+            }
+        }
+        if let Some(comma) = comma_place {
+            if self.at(TokenKind::RightBrace) && !self.language().at_least(CStandard::C99) {
+                self.diagnose("ext_enumerator_list_comma_c", comma, Vec::new());
+            }
+        }
+        if !self.expect_closing(TokenKind::RightBrace, open) {
+            self.unsupported("malformed enum body");
+            return;
+        }
+        if self.is_keyword("__attribute") {
+            self.unsupported("attributes after enum body");
+            return;
+        }
+        self.act_on_enum_body(tag, enumerators);
+    }
+
+    fn check_enumerator_value(
+        &mut self,
+        place: Place,
+        value: Option<Expression>,
+        last: &Option<(i128, QualifiedType)>,
+    ) -> Option<(i128, QualifiedType)> {
+        let int_type = Parser::int_type();
+        match value {
+            Some(expression) => {
+                if expression.contains_error() {
+                    return None;
+                }
+                let expression = self.default_lvalue_conversion(expression);
+                if !expression.ty.is_integer() {
+                    self.diagnose(
+                        "err_expr_not_ice",
+                        expression.start,
+                        vec![Argument::number(0)],
+                    );
+                    return None;
+                }
+                let value = match self.verify_integer_constant_expression(&expression) {
+                    ConstantCheck::Constant(value, _) => value,
+                    ConstantCheck::NotConstant(_) => {
+                        self.unsupported("non-constant enumerator value");
+                        return None;
+                    }
+                };
+                let expression_type = if self.is_promotable_integer(&expression.ty) {
+                    self.promoted_integer_type(&expression.ty)
+                } else {
+                    expression.ty.clone()
+                };
+                let representable = self.integer_fits(value, &int_type);
+                if !representable {
+                    let name = if self.language().at_least(CStandard::C23) {
+                        "warn_c17_compat_enum_value_not_int"
+                    } else {
+                        "ext_c23_enum_value_not_int"
+                    };
+                    self.diagnose(
+                        name,
+                        place,
+                        vec![
+                            Argument::number(0),
+                            Argument::Text(value.to_string()),
+                            Argument::number(i128::from(value >= 0)),
+                        ],
+                    );
+                    return Some((value, expression_type));
+                }
+                Some((value, int_type))
+            }
+            None => match last {
+                None => Some((0, int_type)),
+                Some((previous, previous_type)) => {
+                    let width = self.integer_width(previous_type);
+                    let signed = self.is_signed_integer(previous_type);
+                    let next = adjust_integer(previous + 1, width, signed);
+                    if next >= *previous {
+                        if !self.integer_fits(next, previous_type) {
+                            let name = if self.language().at_least(CStandard::C23) {
+                                "warn_c17_compat_enum_value_not_int"
+                            } else {
+                                "ext_c23_enum_value_not_int"
+                            };
+                            self.diagnose(
+                                name,
+                                place,
+                                vec![
+                                    Argument::number(1),
+                                    Argument::Text(next.to_string()),
+                                    Argument::number(1),
+                                ],
+                            );
+                        }
+                        return Some((next, previous_type.clone()));
+                    }
+                    let candidates = if signed {
+                        [
+                            BuiltinType::Short,
+                            BuiltinType::Int,
+                            BuiltinType::Long,
+                            BuiltinType::LongLong,
+                        ]
+                    } else {
+                        [
+                            BuiltinType::UnsignedShort,
+                            BuiltinType::UnsignedInt,
+                            BuiltinType::UnsignedLong,
+                            BuiltinType::UnsignedLongLong,
+                        ]
+                    };
+                    let larger = candidates
+                        .into_iter()
+                        .map(QualifiedType::builtin)
+                        .find(|ty| self.integer_width(ty) > width);
+                    match larger {
+                        None => {
+                            self.diagnose(
+                                "ext_enumerator_increment_too_large",
+                                place,
+                                vec![Argument::Text((previous + 1).to_string())],
+                            );
+                            Some((next, previous_type.clone()))
+                        }
+                        Some(ty) => {
+                            let value = previous + 1;
+                            let name = if self.language().at_least(CStandard::C23) {
+                                "warn_c17_compat_enum_value_not_int"
+                            } else {
+                                "ext_c23_enum_value_not_int"
+                            };
+                            self.diagnose(
+                                name,
+                                place,
+                                vec![
+                                    Argument::number(1),
+                                    Argument::Text(value.to_string()),
+                                    Argument::number(1),
+                                ],
+                            );
+                            Some((value, ty))
+                        }
+                    }
+                }
+            },
+        }
+    }
+
+    fn act_on_enum_body(&mut self, tag: usize, enumerators: Vec<usize>) {
+        let int_type = Parser::int_type();
+        let mut negative_bits = 0u32;
+        let mut positive_bits = 0u32;
+        let mut representable_by_int = true;
+        for &enumerator in &enumerators {
+            let value = self.declarations[enumerator].value;
+            if value >= 0 {
+                let bits = 128 - value.leading_zeros();
+                positive_bits = positive_bits.max(bits);
+            } else {
+                let bits = 129 - (!value).leading_zeros();
+                negative_bits = negative_bits.max(bits);
+            }
+            if !self.integer_fits(value, &int_type) {
+                representable_by_int = false;
+            }
+        }
+        let target = self.target().clone();
+        let int_width = target.int_width;
+        let (best, promotion) = if negative_bits > 0 {
+            if negative_bits <= int_width && positive_bits < int_width {
+                (int_type.clone(), int_type.clone())
+            } else if negative_bits <= target.long_width && positive_bits < target.long_width {
+                let long = QualifiedType::builtin(BuiltinType::Long);
+                (long.clone(), long)
+            } else {
+                if negative_bits > target.long_long_width || positive_bits >= target.long_long_width
+                {
+                    let place = self.tags[tag].place;
+                    self.diagnose("ext_enum_too_large", place, Vec::new());
+                }
+                let long_long = QualifiedType::builtin(BuiltinType::LongLong);
+                (long_long.clone(), long_long)
+            }
+        } else if positive_bits <= int_width {
+            let unsigned = QualifiedType::builtin(BuiltinType::UnsignedInt);
+            (unsigned.clone(), unsigned)
+        } else if positive_bits <= target.long_width {
+            let unsigned = QualifiedType::builtin(BuiltinType::UnsignedLong);
+            (unsigned.clone(), unsigned)
+        } else {
+            if positive_bits > target.long_long_width {
+                let place = self.tags[tag].place;
+                self.diagnose("ext_enum_too_large", place, Vec::new());
+            }
+            let unsigned = QualifiedType::builtin(BuiltinType::UnsignedLongLong);
+            (unsigned.clone(), unsigned)
+        };
+        for &enumerator in &enumerators {
+            let new_type = if representable_by_int {
+                int_type.clone()
+            } else {
+                best.clone()
+            };
+            let value = self.declarations[enumerator].value;
+            self.declarations[enumerator].value = self.normalize_integer(value, &new_type);
+            self.declarations[enumerator].ty = new_type;
+        }
+        let information = &mut self.tags[tag];
+        information.integer_type = Some(best);
+        information.promotion_type = Some(promotion);
+        information.enumerators = enumerators;
+        information.being_defined = false;
+        information.complete = true;
+        information.definition_place = Some(information.place);
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum DesignatorPart {
+    Field(Rc<[u8]>, Place),
+    Index(Box<Expression>, Place),
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    fn parse_initializer(&mut self) -> Option<Expression> {
+        if self.at(TokenKind::LeftBrace) {
+            return self.parse_braced_initializer();
+        }
+        self.parse_assignment_expression()
+    }
+
+    fn parse_braced_initializer(&mut self) -> Option<Expression> {
+        let open = self.consume();
+        let mut elements = Vec::new();
+        if self.at(TokenKind::RightBrace) {
+            if self.language().at_least(CStandard::C23) {
+                self.diagnose("warn_c23_compat_empty_initializer", open, Vec::new());
+            } else {
+                self.diagnose("ext_c_empty_initializer", open, Vec::new());
+            }
+            let close = self.consume();
+            return Some(Expression::new(
+                ExpressionKind::InitializerList {
+                    elements,
+                    filler: false,
+                },
+                QualifiedType::builtin(BuiltinType::Void),
+                ValueCategory::RValue,
+                open,
+                open,
+                close,
+            ));
+        }
+        let mut invalid = false;
+        loop {
+            if self.at(TokenKind::Period) || self.at(TokenKind::LeftSquare) {
+                match self.parse_designated_initializer() {
+                    Some(element) => elements.push(element),
+                    None => invalid = true,
+                }
+            } else if self.is_identifier() && self.peek(1).kind == TokenKind::Colon {
+                self.unsupported("GNU old-style field designator");
+                return None;
+            } else {
+                match self.parse_initializer() {
+                    Some(element) => elements.push(element),
+                    None => invalid = true,
+                }
+            }
+            if invalid {
+                self.skip_until(&[TokenKind::RightBrace], true, true);
+                break;
+            }
+            if self.try_consume(TokenKind::Comma).is_none() {
+                break;
+            }
+            if self.at(TokenKind::RightBrace) {
+                break;
+            }
+        }
+        let close = self.token.site;
+        if !self.expect_closing(TokenKind::RightBrace, open) {
+            return None;
+        }
+        if invalid {
+            return None;
+        }
+        Some(Expression::new(
+            ExpressionKind::InitializerList {
+                elements,
+                filler: false,
+            },
+            QualifiedType::builtin(BuiltinType::Void),
+            ValueCategory::RValue,
+            open,
+            open,
+            close,
+        ))
+    }
+
+    fn parse_designated_initializer(&mut self) -> Option<Expression> {
+        let start = self.token.site;
+        let mut parts = Vec::new();
+        loop {
+            if self.at(TokenKind::Period) {
+                self.consume();
+                if !self.is_identifier() {
+                    let place = self.token.site;
+                    self.diagnose("err_expected_field_designator", place, Vec::new());
+                    return None;
+                }
+                let name = self.token.spelling.clone();
+                let place = self.consume();
+                parts.push(DesignatorPart::Field(name, place));
+            } else if self.at(TokenKind::LeftSquare) {
+                let open = self.consume();
+                let index = self.parse_constant_expression()?;
+                if self.at(TokenKind::Ellipsis) {
+                    self.unsupported("GNU array range designator");
+                    return None;
+                }
+                if !self.expect_closing(TokenKind::RightSquare, open) {
+                    return None;
+                }
+                parts.push(DesignatorPart::Index(Box::new(index), open));
+            } else {
+                break;
+            }
+        }
+        if !self.language().at_least(CStandard::C99) {
+            self.diagnose("ext_designated_init", start, Vec::new());
+        }
+        if self.try_consume(TokenKind::Equal).is_none() {
+            if matches!(parts.last(), Some(DesignatorPart::Index(..))) && parts.len() == 1 {
+                let place = self.token.site;
+                self.diagnose("ext_gnu_missing_equal_designator", place, Vec::new());
+            } else {
+                let place = self.token.site;
+                self.diagnose("err_expected_equal_designator", place, Vec::new());
+                return None;
+            }
+        }
+        let value = self.parse_initializer()?;
+        let end = value.end;
+        Some(Expression::new(
+            ExpressionKind::Designated {
+                parts,
+                value: Box::new(value),
+            },
+            QualifiedType::builtin(BuiltinType::Void),
+            ValueCategory::RValue,
+            start,
+            start,
+            end,
+        ))
+    }
+
+    fn is_character_array(&self, ty: &QualifiedType) -> Option<(QualifiedType, u32)> {
+        let element = ty.array_element()?;
+        let canonical = element.canonical().unqualified();
+        let width = match canonical.builtin_kind() {
+            Some(
+                BuiltinType::CharSigned
+                | BuiltinType::CharUnsigned
+                | BuiltinType::SignedChar
+                | BuiltinType::UnsignedChar,
+            ) => 8,
+            Some(kind) if kind.is_integer() => self.builtin_width(kind),
+            _ => return None,
+        };
+        Some((element, width))
+    }
+
+    fn string_literal_of<'expression>(
+        &self,
+        expression: &'expression Expression,
+    ) -> Option<&'expression Expression> {
+        let inner = expression.ignore_parentheses();
+        match inner.kind {
+            ExpressionKind::String { .. } | ExpressionKind::Predefined { .. } => Some(inner),
+            _ => None,
+        }
+    }
+
+    fn check_string_initialization(
+        &mut self,
+        target: &mut QualifiedType,
+        literal: &Expression,
+    ) -> Option<Expression> {
+        let (element, _) = self.is_character_array(target)?;
+        let ExpressionKind::String { units, prefix } = &literal.kind else {
+            if let ExpressionKind::Predefined { units, .. } = &literal.kind {
+                let count = units.len() as u64;
+                if target.is_incomplete_array() {
+                    *target = self.complete_array_type(target, count);
+                }
+                return Some(literal.clone());
+            }
+            return None;
+        };
+        let element_kind = element.canonical().unqualified().builtin_kind();
+        let plain_char = matches!(
+            element_kind,
+            Some(
+                BuiltinType::CharSigned
+                    | BuiltinType::CharUnsigned
+                    | BuiltinType::SignedChar
+                    | BuiltinType::UnsignedChar
+            )
+        );
+        match prefix {
+            LiteralPrefix::Plain | LiteralPrefix::Utf8 => {
+                if !plain_char {
+                    let wide =
+                        element.canonical().unqualified() == self.wide_character_type().canonical();
+                    let message = if wide {
+                        "err_array_init_narrow_string_into_wchar"
+                    } else {
+                        "err_array_init_incompat_wide_string_into_wchar"
+                    };
+                    self.diagnose(message, literal.start, Vec::new());
+                    return Some(Expression::error(literal.start));
+                }
+            }
+            _ => {
+                if plain_char {
+                    self.diagnose(
+                        "err_array_init_wide_string_into_char",
+                        literal.start,
+                        Vec::new(),
+                    );
+                    return Some(Expression::error(literal.start));
+                }
+                let literal_element = literal
+                    .ty
+                    .array_element()
+                    .unwrap_or_else(Parser::int_type)
+                    .canonical()
+                    .unqualified();
+                if !self.types_compatible(&literal_element, &element.canonical().unqualified()) {
+                    self.diagnose(
+                        "err_array_init_incompat_wide_string_into_wchar",
+                        literal.start,
+                        Vec::new(),
+                    );
+                    return Some(Expression::error(literal.start));
+                }
+            }
+        }
+        let length = units.len() as u64;
+        if target.is_incomplete_array() {
+            *target = self.complete_array_type(target, length);
+            return Some(literal.clone());
+        }
+        if let TypeNode::ConstantArray { size, .. } = &*target.desugared().node {
+            if length - 1 > *size {
+                self.diagnose(
+                    "ext_initializer_string_for_char_array_too_long",
+                    literal.start,
+                    Vec::new(),
+                );
+            }
+        }
+        if target.is_variable_array() {
+            self.diagnose("err_variable_object_no_init", literal.start, Vec::new());
+            return Some(Expression::error(literal.start));
+        }
+        Some(literal.clone())
+    }
+
+    fn complete_array_type(&self, ty: &QualifiedType, size: u64) -> QualifiedType {
+        let top = ty.desugared();
+        let element = match &*top.node {
+            TypeNode::IncompleteArray { element, .. } => element.clone(),
+            _ => return ty.clone(),
+        };
+        QualifiedType::new(TypeNode::ConstantArray {
+            element,
+            size,
+            modifier: ArrayModifier::Normal,
+            index_qualifiers: 0,
+        })
+        .with_qualifiers(top.qualifiers)
+    }
+
+    fn perform_initialization(
+        &mut self,
+        target: &mut QualifiedType,
+        initializer: Expression,
+        static_storage: bool,
+        place: Option<Place>,
+    ) -> Option<Expression> {
+        let _ = static_storage;
+        if initializer.contains_error() {
+            return None;
+        }
+        if let ExpressionKind::InitializerList { .. } = &initializer.kind {
+            let mut checker = InitializationState { had_error: false };
+            let result = self.check_initializer_list(target, &initializer, &mut checker, true);
+            if checker.had_error {
+                return None;
+            }
+            return Some(result);
+        }
+        if target.is_array() {
+            if let Some(literal) = self.string_literal_of(&initializer) {
+                let literal = literal.clone();
+                if self.is_character_array(target).is_some() {
+                    let result = self.check_string_initialization(target, &literal)?;
+                    if result.is_error() {
+                        return None;
+                    }
+                    return Some(result);
+                }
+            }
+            let is_string = self.string_literal_of(&initializer).is_some();
+            self.diagnose(
+                "err_array_init_not_init_list",
+                initializer.start,
+                vec![Argument::number(i128::from(
+                    self.is_character_array(target).is_some() && !is_string,
+                ))],
+            );
+            return None;
+        }
+        let initializer_place = place.unwrap_or(initializer.start);
+        let (result, (value, source_type)) =
+            self.check_single_assignment_constraints(target, initializer);
+        if self.diagnose_assignment_result(
+            result,
+            initializer_place,
+            target,
+            &source_type,
+            &value,
+            AssignmentAction::Initializing,
+        ) {
+            return None;
+        }
+        self.check_implicit_conversion(&value, target, initializer_place);
+        Some(value)
+    }
+
+    fn initializer_list(
+        &self,
+        elements: Vec<Expression>,
+        ty: QualifiedType,
+        start: Place,
+        end: Place,
+    ) -> Expression {
+        Expression::new(
+            ExpressionKind::InitializerList {
+                elements,
+                filler: false,
+            },
+            ty,
+            ValueCategory::RValue,
+            start,
+            start,
+            end,
+        )
+    }
+
+    fn check_initializer_list(
+        &mut self,
+        target: &mut QualifiedType,
+        list: &Expression,
+        state: &mut InitializationState,
+        top: bool,
+    ) -> Expression {
+        let ExpressionKind::InitializerList { elements, .. } = &list.kind else {
+            unreachable!()
+        };
+        let elements = elements.clone();
+        if target.is_scalar() {
+            if elements.is_empty() {
+                if !self.language().at_least(CStandard::C23) {
+                    self.diagnose("err_empty_scalar_initializer", list.start, Vec::new());
+                    state.had_error = true;
+                }
+                return self.initializer_list(Vec::new(), target.clone(), list.start, list.end);
+            }
+            let first = elements[0].clone();
+            if let ExpressionKind::Designated { .. } = first.kind {
+                self.diagnose(
+                    "err_designator_for_scalar_or_sizeless_init",
+                    first.start,
+                    vec![Argument::number(0), Argument::Type(target.clone())],
+                );
+                state.had_error = true;
+                return Expression::error(list.start);
+            }
+            let value = if let ExpressionKind::InitializerList {
+                elements: inner, ..
+            } = &first.kind
+            {
+                if inner.is_empty() || !top {
+                    self.unsupported("nested braces around scalar initializer");
+                    return Expression::error(list.start);
+                }
+                self.diagnose(
+                    "ext_many_braces_around_init",
+                    first.start,
+                    vec![Argument::number(1)],
+                );
+                let mut nested_type = target.clone();
+
+                self.check_initializer_list(&mut nested_type, &first, state, false)
+            } else {
+                match self.perform_initialization(
+                    &mut target.clone(),
+                    first,
+                    false,
+                    Some(list.start),
+                ) {
+                    Some(value) => value,
+                    None => {
+                        state.had_error = true;
+                        Expression::error(list.start)
+                    }
+                }
+            };
+            if elements.len() > 1 {
+                self.diagnose(
+                    "ext_excess_initializers",
+                    elements[1].start,
+                    vec![Argument::number(3)],
+                );
+            }
+            return self.initializer_list(vec![value], target.clone(), list.start, list.end);
+        }
+        if target.is_variable_array() {
+            if !elements.is_empty() || !self.language().at_least(CStandard::C23) {
+                self.diagnose("err_variable_object_no_init", list.start, Vec::new());
+                state.had_error = true;
+                return Expression::error(list.start);
+            }
+            return self.initializer_list(Vec::new(), target.clone(), list.start, list.end);
+        }
+        let mut position = 0usize;
+        let result = self.check_aggregate(target, &elements, &mut position, state, true);
+        if position < elements.len() && !state.had_error {
+            let kind = if target.is_array() {
+                0
+            } else if matches!(target.tag(), Some((_, TagKind::Union))) {
+                4
+            } else {
+                5
+            };
+            self.diagnose(
+                "ext_excess_initializers",
+                elements[position].start,
+                vec![Argument::number(kind)],
+            );
+        }
+        let mut result = result;
+        result.start = list.start;
+        result.end = list.end;
+        result
+    }
+
+    fn check_aggregate(
+        &mut self,
+        target: &mut QualifiedType,
+        elements: &[Expression],
+        position: &mut usize,
+        state: &mut InitializationState,
+        explicit_braces: bool,
+    ) -> Expression {
+        if target.is_array() {
+            return self.check_array_elements(target, elements, position, state, explicit_braces);
+        }
+        if let Some((tag, kind)) = target.tag() {
+            if kind != TagKind::Enum {
+                return self.check_record_elements(
+                    target.clone(),
+                    tag,
+                    elements,
+                    position,
+                    state,
+                    explicit_braces,
+                );
+            }
+        }
+        if *position < elements.len() {
+            let element = elements[*position].clone();
+            *position += 1;
+            return match self.perform_initialization(target, element, false, None) {
+                Some(value) => value,
+                None => {
+                    state.had_error = true;
+                    Expression::error(Place::default())
+                }
+            };
+        }
+        Expression::error(Place::default())
+    }
+
+    fn check_subobject(
+        &mut self,
+        ty: &mut QualifiedType,
+        elements: &[Expression],
+        position: &mut usize,
+        state: &mut InitializationState,
+    ) -> Expression {
+        let element = elements[*position].clone();
+        if let ExpressionKind::InitializerList { .. } = element.kind {
+            *position += 1;
+            if ty.is_scalar() {
+                let ExpressionKind::InitializerList {
+                    elements: inner, ..
+                } = &element.kind
+                else {
+                    unreachable!()
+                };
+                if inner.len() == 1
+                    && !matches!(
+                        inner[0].kind,
+                        ExpressionKind::InitializerList { .. } | ExpressionKind::Designated { .. }
+                    )
+                {
+                    self.diagnose(
+                        "warn_braces_around_init",
+                        element.start,
+                        vec![Argument::number(0)],
+                    );
+                }
+            }
+            return self.check_initializer_list(ty, &element, state, false);
+        }
+        if ty.is_aggregate() {
+            if ty.is_array() {
+                if let Some(literal) = self.string_literal_of(&element) {
+                    if self.is_character_array(ty).is_some() {
+                        let literal = literal.clone();
+                        *position += 1;
+                        return match self.check_string_initialization(ty, &literal) {
+                            Some(result) if !result.is_error() => result,
+                            _ => {
+                                state.had_error = true;
+                                Expression::error(element.start)
+                            }
+                        };
+                    }
+                }
+            }
+            if ty.is_record() {
+                let probe = self.default_function_array_lvalue_conversion(element.clone());
+                if self.types_compatible(
+                    &probe.ty.canonical().unqualified(),
+                    &ty.canonical().unqualified(),
+                ) {
+                    *position += 1;
+                    return match self.perform_initialization(ty, element, false, None) {
+                        Some(value) => value,
+                        None => {
+                            state.had_error = true;
+                            Expression::error(probe.start)
+                        }
+                    };
+                }
+            }
+            if ty.is_incomplete_array() {
+                self.unsupported("brace elision into incomplete array");
+                return Expression::error(element.start);
+            }
+            let start = element.start;
+            let mut result = self.check_aggregate(ty, elements, position, state, false);
+            result.start = start;
+            return result;
+        }
+        *position += 1;
+        match self.perform_initialization(ty, element, false, None) {
+            Some(value) => value,
+            None => {
+                state.had_error = true;
+                Expression::error(Place::default())
+            }
+        }
+    }
+
+    fn check_array_elements(
+        &mut self,
+        target: &mut QualifiedType,
+        elements: &[Expression],
+        position: &mut usize,
+        state: &mut InitializationState,
+        explicit_braces: bool,
+    ) -> Expression {
+        if let Some(element) = elements.get(*position) {
+            if let Some(literal) = self.string_literal_of(element) {
+                if self.is_character_array(target).is_some() {
+                    let literal = literal.clone();
+                    let start = element.start;
+                    *position += 1;
+                    return match self.check_string_initialization(target, &literal) {
+                        Some(result) if !result.is_error() => result,
+                        _ => {
+                            state.had_error = true;
+                            Expression::error(start)
+                        }
+                    };
+                }
+            }
+        }
+        let element_type = target.array_element().unwrap_or_else(Parser::int_type);
+        let maximum = match &*target.desugared().node {
+            TypeNode::ConstantArray { size, .. } => Some(*size),
+            _ => None,
+        };
+        let mut index: u64 = 0;
+        let mut highest: u64 = 0;
+        let mut values: Vec<Expression> = Vec::new();
+        let start = elements
+            .get(*position)
+            .map(|element| element.start)
+            .unwrap_or_default();
+        while *position < elements.len() {
+            if state.had_error || self.unsupported.is_some() {
+                break;
+            }
+            let element = elements[*position].clone();
+            if let ExpressionKind::Designated { parts, value } = &element.kind {
+                if !explicit_braces {
+                    break;
+                }
+                let Some(DesignatorPart::Index(index_expression, bracket)) = parts.first() else {
+                    if let Some(DesignatorPart::Field(name, place)) = parts.first() {
+                        self.diagnose(
+                            "err_field_designator_non_aggr",
+                            *place,
+                            vec![Argument::number(0), Argument::Type(target.clone())],
+                        );
+                        let _ = name;
+                    }
+                    state.had_error = true;
+                    break;
+                };
+                if parts.len() > 1 {
+                    self.unsupported("nested designators");
+                    break;
+                }
+                let index_value = match self.designator_index(index_expression, *bracket) {
+                    Some(value) => value,
+                    None => {
+                        state.had_error = true;
+                        break;
+                    }
+                };
+                if let Some(maximum) = maximum {
+                    if index_value >= maximum {
+                        self.diagnose(
+                            "err_array_designator_too_large",
+                            index_expression.start,
+                            vec![
+                                Argument::Text(index_value.to_string()),
+                                Argument::Text(maximum.to_string()),
+                            ],
+                        );
+                        state.had_error = true;
+                        break;
+                    }
+                }
+                index = index_value;
+                let inner = (**value).clone();
+                let single = [inner];
+                let mut inner_position = 0;
+                let mut element_ty = element_type.clone();
+                let converted =
+                    self.check_subobject(&mut element_ty, &single, &mut inner_position, state);
+                *position += 1;
+                values.push(converted);
+                index += 1;
+                highest = highest.max(index);
+                continue;
+            }
+            if let Some(maximum) = maximum {
+                if index >= maximum {
+                    break;
+                }
+            }
+            let mut element_ty = element_type.clone();
+            let converted = self.check_subobject(&mut element_ty, elements, position, state);
+            values.push(converted);
+            index += 1;
+            highest = highest.max(index);
+        }
+        if target.is_incomplete_array() {
+            if highest == 0 {
+                self.diagnose(
+                    "ext_typecheck_zero_array_size",
+                    start,
+                    vec![Argument::number(0)],
+                );
+            }
+            *target = self.complete_array_type(target, highest);
+        }
+        let end = elements
+            .get(position.saturating_sub(1))
+            .map(|element| element.end)
+            .unwrap_or(start);
+        self.initializer_list(values, target.clone(), start, end)
+    }
+
+    fn designator_index(&mut self, expression: &Expression, bracket: Place) -> Option<u64> {
+        let _ = bracket;
+        let converted = self.default_lvalue_conversion(expression.clone());
+        if !converted.ty.is_integer() {
+            self.diagnose(
+                "err_array_designator_non_array",
+                converted.start,
+                vec![Argument::Type(converted.ty.clone())],
+            );
+            return None;
+        }
+        match self.verify_integer_constant_expression(&converted) {
+            ConstantCheck::Constant(value, _) => {
+                if value < 0 && self.is_signed_integer(&converted.ty) {
+                    self.diagnose(
+                        "err_array_designator_negative",
+                        converted.start,
+                        vec![Argument::Text(value.to_string())],
+                    );
+                    return None;
+                }
+                Some(value as u64)
+            }
+            ConstantCheck::NotConstant(_) => {
+                self.unsupported("non-constant array designator");
+                None
+            }
+        }
+    }
+
+    fn check_record_elements(
+        &mut self,
+        target: QualifiedType,
+        tag: usize,
+        elements: &[Expression],
+        position: &mut usize,
+        state: &mut InitializationState,
+        explicit_braces: bool,
+    ) -> Expression {
+        self.guard_warning_groups(&["missing-field-initializers"]);
+        let fields = self.tags[tag].fields.clone();
+        let union = self.tags[tag].information.kind == TagKind::Union;
+        let start = elements
+            .get(*position)
+            .map(|element| element.start)
+            .unwrap_or_default();
+        let mut field_index = 0usize;
+        let mut values = Vec::new();
+        let mut initialized_union = false;
+        while *position < elements.len() {
+            if state.had_error || self.unsupported.is_some() {
+                break;
+            }
+            let element = elements[*position].clone();
+            if let ExpressionKind::Designated { parts, value } = &element.kind {
+                if !explicit_braces {
+                    break;
+                }
+                let Some(DesignatorPart::Field(name, place)) = parts.first() else {
+                    if let Some(DesignatorPart::Index(_, bracket)) = parts.first() {
+                        self.diagnose(
+                            "err_array_designator_non_array",
+                            *bracket,
+                            vec![Argument::Type(target.clone())],
+                        );
+                    }
+                    state.had_error = true;
+                    break;
+                };
+                if parts.len() > 1 {
+                    self.unsupported("nested designators");
+                    break;
+                }
+                let Some(found) = fields
+                    .iter()
+                    .position(|field| field.name.as_deref() == Some(&name[..]))
+                else {
+                    if self.find_field_path(tag, name).is_some() {
+                        self.unsupported("designator into anonymous member");
+                        break;
+                    }
+                    self.diagnose(
+                        "err_field_designator_unknown",
+                        *place,
+                        vec![Argument::Name(name.clone()), Argument::Type(target.clone())],
+                    );
+                    state.had_error = true;
+                    break;
+                };
+                field_index = found;
+                let inner = (**value).clone();
+                let single = [inner];
+                let mut inner_position = 0;
+                let mut field_type = fields[field_index].ty.clone();
+                if field_type.is_incomplete_array() {
+                    self.unsupported("initialization of flexible array member");
+                    break;
+                }
+                let converted =
+                    self.check_subobject(&mut field_type, &single, &mut inner_position, state);
+                *position += 1;
+                values.push(converted);
+                field_index += 1;
+                if union {
+                    initialized_union = true;
+                }
+                continue;
+            }
+            if union && initialized_union {
+                break;
+            }
+            while field_index < fields.len()
+                && fields[field_index].name.is_none()
+                && fields[field_index].bit_width.is_some()
+            {
+                field_index += 1;
+            }
+            if field_index >= fields.len() {
+                break;
+            }
+            let mut field_type = fields[field_index].ty.clone();
+            if field_type.is_incomplete_array() {
+                self.unsupported("initialization of flexible array member");
+                break;
+            }
+            let converted = self.check_subobject(&mut field_type, elements, position, state);
+            values.push(converted);
+            field_index += 1;
+            if union {
+                initialized_union = true;
+            }
+        }
+        let end = elements
+            .get(position.saturating_sub(1))
+            .map(|element| element.end)
+            .unwrap_or(start);
+        self.initializer_list(values, target, start, end)
+    }
+
+    fn check_constant_initializer(&self, expression: &Expression) -> Option<Place> {
+        match &expression.kind {
+            ExpressionKind::String { .. } | ExpressionKind::Predefined { .. } => None,
+            ExpressionKind::CompoundLiteral { initializer, .. } => {
+                self.check_constant_initializer(initializer)
+            }
+            ExpressionKind::InitializerList { elements, .. } => {
+                for element in elements {
+                    if let Some(place) = self.check_constant_initializer(element) {
+                        return Some(place);
+                    }
+                }
+                None
+            }
+            ExpressionKind::ImplicitValue => None,
+            ExpressionKind::Parenthesized(inner) | ExpressionKind::Generic { selected: inner } => {
+                self.check_constant_initializer(inner)
+            }
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Extension,
+                operand,
+            } => self.check_constant_initializer(operand),
+            ExpressionKind::Cast {
+                kind:
+                    CastKind::NoOp
+                    | CastKind::LValueToRValue
+                    | CastKind::ToUnion
+                    | CastKind::NonAtomicToAtomic
+                    | CastKind::AtomicToNonAtomic
+                    | CastKind::NullToPointer,
+                operand,
+                ..
+            } => self.check_constant_initializer(operand),
+            _ => {
+                let mut state = EvaluationState::default();
+                if self.evaluate(expression, &mut state).is_some() && !state.side_effects {
+                    return None;
+                }
+                if matches!(expression.kind, ExpressionKind::Cast { .. }) {
+                    return Some(expression.start);
+                }
+                Some(expression.place)
+            }
+        }
+    }
+
+    fn add_initializer_to_declaration(
+        &mut self,
+        declaration: usize,
+        initializer: Expression,
+        equal: Place,
+        initializer_start: Place,
+    ) {
+        let _ = (equal, initializer_start);
+        let kind = self.declarations[declaration].kind;
+        if kind != DeclarationKind::Variable {
+            let place = self.declarations[declaration].place;
+            self.diagnose("err_illegal_initializer", place, Vec::new());
+            self.declarations[declaration].invalid = true;
+            return;
+        }
+        if self.declarations[declaration].invalid {
+            return;
+        }
+        self.guard_variable_declaration(declaration, Some(&initializer));
+        let place = self.declarations[declaration].place;
+        let file_scope = self.declarations[declaration].file_scope;
+        let external = self.has_external_storage(declaration);
+        if external && !file_scope {
+            self.diagnose("err_block_extern_cant_init", place, Vec::new());
+            self.declarations[declaration].invalid = true;
+            return;
+        }
+        if let Some(previous) = self.previous_definition_with_initializer(declaration) {
+            let name = self.declarations[declaration]
+                .name
+                .clone()
+                .unwrap_or_else(|| Rc::from(&b""[..]));
+            self.diagnose("err_redefinition", place, vec![Argument::Name(name)]);
+            let previous_place = self.declarations[previous].place;
+            self.diagnose("note_previous_definition", previous_place, Vec::new());
+            self.declarations[declaration].invalid = true;
+            return;
+        }
+        let mut ty = self.declarations[declaration].ty.clone();
+        if ty.is_variable_array() {
+            let empty_list = matches!(&initializer.kind, ExpressionKind::InitializerList { elements, .. } if elements.is_empty());
+            if !(empty_list && self.language().at_least(CStandard::C23)) {
+                self.diagnose("err_variable_object_no_init", initializer.start, Vec::new());
+                self.declarations[declaration].invalid = true;
+                return;
+            }
+        }
+        if !ty.is_incomplete_array() && !self.is_complete_type(&ty) {
+            self.require_complete_type(
+                place,
+                &ty,
+                "err_typecheck_decl_incomplete_type",
+                Vec::new(),
+            );
+            self.declarations[declaration].invalid = true;
+            return;
+        }
+        let static_storage = file_scope
+            || matches!(
+                self.declarations[declaration].storage,
+                StorageClass::Static | StorageClass::Extern
+            );
+        let converted =
+            self.perform_initialization(&mut ty, initializer, static_storage, Some(place));
+        let Some(converted) = converted else {
+            self.declarations[declaration].invalid = true;
+            return;
+        };
+        self.declarations[declaration].ty = ty;
+        self.declarations[declaration].has_initializer = true;
+        if static_storage {
+            if let Some(culprit) = self.check_constant_initializer(&converted) {
+                self.diagnose("err_init_element_not_constant", culprit, Vec::new());
+            }
+        }
+        if external && file_scope {
+            self.diagnose("warn_extern_init", place, Vec::new());
+        }
+        self.check_self_initialization(declaration, &converted);
+    }
+
+    fn check_self_initialization(&mut self, declaration: usize, initializer: &Expression) {
+        let _ = (declaration, initializer);
+    }
+
+    fn previous_definition_with_initializer(&self, declaration: usize) -> Option<usize> {
+        let mut current = self.declarations[declaration].previous;
+        while let Some(previous) = current {
+            if self.declarations[previous].has_initializer
+                && self.declarations[previous].kind == DeclarationKind::Variable
+            {
+                return Some(previous);
+            }
+            current = self.declarations[previous].previous;
+        }
+        None
+    }
+
+    fn act_on_uninitialized_declaration(&mut self, declaration: usize) {
+        if self.declarations[declaration].kind != DeclarationKind::Variable
+            || self.declarations[declaration].invalid
+        {
+            return;
+        }
+        self.guard_variable_declaration(declaration, None);
+        let ty = self.declarations[declaration].ty.clone();
+        let place = self.declarations[declaration].place;
+        let file_scope = self.declarations[declaration].file_scope;
+        let external = self.has_external_storage(declaration);
+        if external {
+            return;
+        }
+        if file_scope {
+            if let Some(element) = ty.array_element() {
+                if ty.is_incomplete_array() && !self.is_complete_type(&element) {
+                    self.require_complete_type(
+                        place,
+                        &element,
+                        "err_array_incomplete_or_sizeless_type",
+                        vec![Argument::number(0)],
+                    );
+                    self.declarations[declaration].invalid = true;
+                }
+            }
+            if self.declarations[declaration].storage == StorageClass::Static
+                && self.declarations[declaration].previous.is_none()
+                && !self.is_complete_type(&ty)
+            {
+                self.diagnose(
+                    "ext_typecheck_decl_incomplete_type",
+                    place,
+                    vec![
+                        Argument::number(i128::from(ty.is_array())),
+                        Argument::Type(ty.clone()),
+                    ],
+                );
+                self.note_incomplete_type(&ty);
+            }
+            if !self.declarations[declaration].invalid {
+                self.tentative_definitions.push(declaration);
+            }
+            return;
+        }
+        if ty.is_incomplete_array() {
+            self.diagnose(
+                "err_typecheck_incomplete_array_needs_initializer",
+                place,
+                Vec::new(),
+            );
+            self.declarations[declaration].invalid = true;
+            return;
+        }
+        if !self.is_complete_type(&ty.base_element()) {
+            self.require_complete_type(
+                place,
+                &ty.base_element(),
+                "err_typecheck_decl_incomplete_type",
+                Vec::new(),
+            );
+            self.declarations[declaration].invalid = true;
+            return;
+        }
+        if ty.is_const() {
+            let static_duration = self.declarations[declaration].storage == StorageClass::Static
+                || self.declarations[declaration].thread != ThreadStorage::None;
+            let message = if static_duration {
+                "warn_default_init_const"
+            } else {
+                "warn_default_init_const_unsafe"
+            };
+            self.diagnose(
+                message,
+                place,
+                vec![Argument::Type(ty.clone()), Argument::number(0)],
+            );
+        } else if let Some((tag, TagKind::Struct | TagKind::Union)) = ty.base_element().tag() {
+            if self.record_has_const_fields(tag) {
+                let static_duration =
+                    self.declarations[declaration].storage == StorageClass::Static;
+                if !static_duration {
+                    self.unsupported("default initialization of record with const member");
+                }
+            }
+        }
+    }
+
+    fn act_on_end_of_translation_unit(&mut self) {
+        let tentative = std::mem::take(&mut self.tentative_definitions);
+        let mut seen: Vec<usize> = Vec::new();
+        for declaration in tentative {
+            if self.declarations[declaration].invalid {
+                continue;
+            }
+            let first = self.first_declaration(declaration);
+            if seen.contains(&first) {
+                continue;
+            }
+            if self.has_definition_in_chain(declaration) {
+                continue;
+            }
+            seen.push(first);
+            let latest = self.latest_declaration(declaration);
+            let ty = self.declarations[latest].ty.clone();
+            let place = self.declarations[latest].place;
+            if ty.is_incomplete_array() {
+                self.diagnose("warn_tentative_incomplete_array", place, Vec::new());
+                continue;
+            }
+            if !self.is_complete_type(&ty) {
+                self.require_complete_type(
+                    place,
+                    &ty,
+                    "err_tentative_def_incomplete_type",
+                    Vec::new(),
+                );
+            }
+        }
+    }
+
+    fn first_declaration(&self, declaration: usize) -> usize {
+        let mut current = declaration;
+        while let Some(previous) = self.declarations[current].previous {
+            current = previous;
+        }
+        current
+    }
+
+    fn latest_declaration(&self, declaration: usize) -> usize {
+        let first = self.first_declaration(declaration);
+        let mut latest = declaration;
+        for (index, candidate) in self.declarations.iter().enumerate() {
+            if candidate.kind == DeclarationKind::Variable
+                && index > latest
+                && self.first_declaration(index) == first
+            {
+                latest = index;
+            }
+        }
+        latest
+    }
+
+    fn has_definition_in_chain(&self, declaration: usize) -> bool {
+        let first = self.first_declaration(declaration);
+        self.declarations
+            .iter()
+            .enumerate()
+            .any(|(index, candidate)| {
+                candidate.kind == DeclarationKind::Variable
+                    && candidate.has_initializer
+                    && self.first_declaration(index) == first
+            })
+    }
+}
+
+pub struct InitializationState {
+    pub had_error: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Reachability {
+    Reachable,
+    Unreachable,
+    Unknown,
+}
+
+impl Reachability {
+    fn join(self, other: Reachability) -> Reachability {
+        match (self, other) {
+            (Reachability::Reachable, _) | (_, Reachability::Reachable) => Reachability::Reachable,
+            (Reachability::Unreachable, Reachability::Unreachable) => Reachability::Unreachable,
+            _ => Reachability::Unknown,
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct DeferredDiagnostic {
+    pub name: String,
+    pub place: Place,
+    pub arguments: Vec<Argument>,
+    pub reachability: Reachability,
+}
+
+#[derive(Clone, Debug)]
+pub struct JumpTarget {
+    pub is_loop: bool,
+    pub break_reachability: Reachability,
+    pub continue_reachability: Reachability,
+}
+
+#[derive(Clone, Debug)]
+pub struct CaseEntry {
+    pub low: i128,
+    pub high: Option<i128>,
+    pub low_start: Place,
+    pub low_place: Place,
+    pub high_start: Place,
+    pub high_place: Place,
+    pub low_name: Option<Rc<[u8]>>,
+    pub low_type: QualifiedType,
+    pub high_type: Option<QualifiedType>,
+    pub low_unpromoted: (u32, bool),
+    pub high_unpromoted: (u32, bool),
+    pub low_global_const_of_enum: bool,
+    pub high_global_const_of_enum: bool,
+    pub case_place: Place,
+}
+
+#[derive(Clone, Debug)]
+pub struct SwitchState {
+    pub place: Place,
+    pub condition: Option<Expression>,
+    pub condition_end: Place,
+    pub cases: Vec<CaseEntry>,
+    pub defaults: Vec<Place>,
+    pub incomplete: bool,
+    pub constant: Option<i128>,
+    pub reachability: Reachability,
+}
+
+#[derive(Clone, Debug)]
+pub struct LabelState {
+    pub place: Place,
+    pub defined: Option<Place>,
+    pub definition_reachability: Reachability,
+    pub jump_reachability: Reachability,
+}
+
+pub struct FunctionState {
+    pub declaration: Option<usize>,
+    pub result: QualifiedType,
+    pub labels: HashMap<Rc<[u8]>, LabelState>,
+    pub has_return_value: bool,
+    pub has_vla: bool,
+    pub switches: Vec<SwitchState>,
+    pub targets: Vec<JumpTarget>,
+    pub reachability: Reachability,
+    pub analysis_valid: bool,
+    pub live_return: Reachability,
+    pub abnormal_exit: Reachability,
+    pub branch_into_scope: bool,
+    pub deferred: Vec<DeferredDiagnostic>,
+    pub implicit_return_zero: bool,
+    pub noreturn: bool,
+    pub conditional_depth: u32,
+    pub unconditional_noreturn_call: bool,
+    pub conditional_noreturn_call: bool,
+    pub compound_empty_loop_bodies: Vec<bool>,
+}
+
+impl FunctionState {
+    fn new(declaration: Option<usize>, result: QualifiedType) -> FunctionState {
+        FunctionState {
+            declaration,
+            result,
+            labels: HashMap::new(),
+            has_return_value: false,
+            has_vla: false,
+            switches: Vec::new(),
+            targets: Vec::new(),
+            reachability: Reachability::Reachable,
+            analysis_valid: true,
+            live_return: Reachability::Unreachable,
+            abnormal_exit: Reachability::Unreachable,
+            branch_into_scope: false,
+            deferred: Vec::new(),
+            implicit_return_zero: false,
+            noreturn: false,
+            conditional_depth: 0,
+            unconditional_noreturn_call: false,
+            conditional_noreturn_call: false,
+            compound_empty_loop_bodies: Vec::new(),
+        }
+    }
+}
+
+#[derive(Clone, Debug)]
+pub enum StatementKind {
+    Null {
+        semicolon: Place,
+        leading_empty_macro: bool,
+    },
+    Compound,
+    Declaration {
+        place: Option<Place>,
+    },
+    Expression,
+    Loop {
+        right_paren: Place,
+        start: Place,
+        null_body: Option<(Place, bool)>,
+        is_for: bool,
+    },
+    Other,
+}
+
+#[derive(Clone, Debug)]
+pub struct Statement {
+    pub kind: StatementKind,
+    pub start: Place,
+}
+
+impl Statement {
+    fn new(kind: StatementKind, start: Place) -> Statement {
+        Statement { kind, start }
+    }
+
+    fn null(semicolon: Place) -> Statement {
+        Statement::new(
+            StatementKind::Null {
+                semicolon,
+                leading_empty_macro: false,
+            },
+            semicolon,
+        )
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BranchValue {
+    Constant(bool),
+    NotConstant,
+    Uncertain,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum ConditionKind {
+    Boolean,
+    Switch,
+}
+
+impl<'session, 'files> Parser<'session, 'files> {
+    fn current_reachability(&self) -> Reachability {
+        self.function
+            .as_ref()
+            .map(|function| function.reachability)
+            .unwrap_or(Reachability::Reachable)
+    }
+
+    fn set_reachability(&mut self, reachability: Reachability) {
+        if let Some(function) = self.function.as_mut() {
+            function.reachability = reachability;
+        }
+    }
+
+    fn invalidate_analysis(&mut self) {
+        if let Some(function) = self.function.as_mut() {
+            function.analysis_valid = false;
+        }
+    }
+
+    pub fn diagnose_if_reachable(&mut self, name: &str, place: Place, arguments: Vec<Argument>) {
+        if self.unevaluated_depth > 0 {
+            return;
+        }
+        if self.constant_context_depth > 0 || self.function.is_none() {
+            self.diagnose(name, place, arguments);
+            return;
+        }
+        let reachability = self.current_reachability();
+        if let Some(function) = self.function.as_mut() {
+            function.deferred.push(DeferredDiagnostic {
+                name: name.to_string(),
+                place,
+                arguments,
+                reachability,
+            });
+        }
+    }
+
+    pub fn note_call_for_reachability(&mut self, callee_noreturn: bool) {
+        if !callee_noreturn || self.unevaluated_depth > 0 {
+            return;
+        }
+        if let Some(function) = self.function.as_mut() {
+            if function.conditional_depth > 0 {
+                function.conditional_noreturn_call = true;
+            } else {
+                function.unconditional_noreturn_call = true;
+            }
+        }
+    }
+
+    pub fn enter_conditional_operand(
+        &mut self,
+        pruned: Option<bool>,
+    ) -> Option<(Reachability, u32)> {
+        let function = self.function.as_mut()?;
+        let saved = (function.reachability, function.conditional_depth);
+        function.conditional_depth += 1;
+        if pruned == Some(true) {
+            function.reachability = Reachability::Unreachable;
+        } else if pruned.is_none() && function.reachability != Reachability::Unreachable {
+            function.reachability = Reachability::Unknown;
+        }
+        Some(saved)
+    }
+
+    pub fn leave_conditional_operand(&mut self, saved: Option<(Reachability, u32)>) {
+        if let (Some(function), Some((reachability, depth))) = (self.function.as_mut(), saved) {
+            function.reachability = reachability;
+            function.conditional_depth = depth;
+        }
+    }
+
+    fn apply_noreturn_calls(&mut self) {
+        let Some(function) = self.function.as_mut() else {
+            return;
+        };
+        let reachability = function.reachability;
+        if function.unconditional_noreturn_call || function.conditional_noreturn_call {
+            function.abnormal_exit = function.abnormal_exit.join(reachability);
+            if reachability == Reachability::Unknown
+                && function.abnormal_exit != Reachability::Reachable
+            {
+                function.abnormal_exit = Reachability::Unknown;
+            }
+        }
+        if function.unconditional_noreturn_call {
+            function.reachability = Reachability::Unreachable;
+        }
+        function.unconditional_noreturn_call = false;
+        function.conditional_noreturn_call = false;
+    }
+
+    fn raise_reachability_at_label(&mut self, incoming: Reachability, nested_in_loop: bool) {
+        let current = self.current_reachability();
+        let raised = current.join(incoming);
+        if raised != current && nested_in_loop {
+            self.invalidate_analysis();
+        }
+        self.set_reachability(raised);
+    }
+
+    fn is_macro_place(&self, place: Place) -> bool {
+        self.macro_sites.contains(&place)
+    }
+
+    fn spelling_line(&self, place: Place) -> u32 {
+        self.preprocessor
+            .sources
+            .buffer(place.buffer)
+            .physical_line(place.offset)
+    }
+
+    fn presumed_line(&self, place: Place) -> u32 {
+        self.preprocessor.sources.presumed(place).line
+    }
+
+    fn presumed_column(&self, place: Place) -> u32 {
+        self.preprocessor.sources.presumed(place).column
+    }
+
+    pub fn parse_function_definition(
+        &mut self,
+        specifiers: &mut DeclarationSpecifiers,
+        declarator: &mut Declarator,
+    ) {
+        if !self.language().at_least(CStandard::C99) && !specifiers.parsed_anything {
+            self.diagnose(
+                "warn_missing_type_specifier",
+                declarator.name_place,
+                Vec::new(),
+            );
+            specifiers.specifier = TypeSpecifier::Int;
+            specifiers.specifier_place = declarator.name_place;
+        }
+        let function_chunk = declarator
+            .chunks
+            .iter()
+            .position(|chunk| !matches!(chunk, DeclaratorChunk::Paren));
+        let is_identifier_list = matches!(
+            function_chunk.map(|index| &declarator.chunks[index]),
+            Some(DeclaratorChunk::Function { has_prototype: false, parameters, .. })
+                if !parameters.is_empty() && parameters[0].declaration.is_none()
+        );
+        if is_identifier_list {
+            if let Some(index) = function_chunk {
+                self.parse_knr_parameter_declarations(declarator, index);
+            }
+            if self.unsupported.is_some() {
+                return;
+            }
+        }
+        if !self.at(TokenKind::LeftBrace) {
+            let place = self.token.site;
+            self.diagnose("err_expected_fn_body", place, Vec::new());
+            self.skip_until(&[TokenKind::LeftBrace], true, true);
+            if !self.at(TokenKind::LeftBrace) {
+                return;
+            }
+        }
+        declarator.function_definition = true;
+        let declaration = self.act_on_declarator(specifiers, declarator);
+        if self.unsupported.is_some() {
+            return;
+        }
+        let declaration =
+            declaration.filter(|index| self.declarations[*index].kind == DeclarationKind::Function);
+        let result = declaration
+            .and_then(|index| self.declarations[index].ty.function_result())
+            .unwrap_or_else(Parser::int_type);
+        if let Some(index) = declaration {
+            self.check_for_function_redefinition(index);
+            self.declarations[index].defined = true;
+        }
+        let mut state = FunctionState::new(declaration, result.clone());
+        if let Some(index) = declaration {
+            state.noreturn = self.declarations[index].noreturn
+                || function_type_is_noreturn(&self.declarations[index].ty);
+            state.implicit_return_zero = self.has_implicit_return_zero(index);
+        }
+        let outer = self.function.replace(state);
+        if outer.is_some() {
+            self.unsupported("nested function definition");
+            return;
+        }
+        if let Some(index) = declaration {
+            let place = self.declarations[index].place;
+            if !result.is_void()
+                && !self.declarations[index].invalid
+                && !self.is_complete_type(&result)
+            {
+                self.require_complete_type(
+                    place,
+                    &result,
+                    "err_func_def_incomplete_result",
+                    Vec::new(),
+                );
+                self.declarations[index].invalid = true;
+            }
+        }
+        self.push_scope(SCOPE_FUNCTION | SCOPE_BLOCK);
+        let parameters = self.definition_parameters(declarator, function_chunk);
+        self.check_parameters_for_function_definition(&parameters);
+        for parameter in &parameters {
+            if self.declarations[*parameter].name.is_some() {
+                self.push_on_scope(*parameter);
+            }
+        }
+        if self.unsupported.is_some() {
+            self.function = None;
+            return;
+        }
+        let open = self.token.site;
+        let close = self.parse_compound_statement_body(true);
+        if self.unsupported.is_some() {
+            self.function = None;
+            return;
+        }
+        self.pop_function_scope();
+        self.act_on_finish_function_body(declaration, open, close, &parameters);
+        self.function = None;
+    }
+
+    fn has_implicit_return_zero(&self, index: usize) -> bool {
+        let declaration = &self.declarations[index];
+        if declaration.name.as_deref() != Some(&b"main"[..])
+            || self.preprocessor.options.freestanding
+        {
+            return false;
+        }
+        let Some(result) = declaration.ty.function_result() else {
+            return false;
+        };
+        if self.language().gnu {
+            result.canonical().unqualified() == Parser::int_type().canonical()
+        } else {
+            result.canonical() == Parser::int_type().canonical()
+        }
+    }
+
+    fn check_for_function_redefinition(&mut self, index: usize) {
+        let Some(definition) = self.declarations[index].defined_earlier else {
+            return;
+        };
+        let gnu_inline = self
+            .preprocessor
+            .options
+            .gnu_inline
+            .unwrap_or(!self.language().at_least(CStandard::C99));
+        let definition_inline = self.declarations[definition].inline;
+        let definition_extern = self.declarations[definition].storage == StorageClass::Extern;
+        if gnu_inline && definition_inline && definition_extern {
+            return;
+        }
+        let name = self.declarations[index]
+            .name
+            .clone()
+            .unwrap_or_else(|| Rc::from(&b""[..]));
+        let place = self.declarations[index].place;
+        if self.language().gnu && definition_inline && definition_extern {
+            self.diagnose(
+                "err_redefinition_extern_inline",
+                place,
+                vec![Argument::Name(name), Argument::number(0)],
+            );
+        } else {
+            self.diagnose("err_redefinition", place, vec![Argument::Name(name)]);
+        }
+        let definition_place = self.declarations[definition].place;
+        self.diagnose("note_previous_definition", definition_place, Vec::new());
+        self.declarations[index].invalid = true;
+    }
+
+    fn definition_parameters(
+        &self,
+        declarator: &Declarator,
+        function_chunk: Option<usize>,
+    ) -> Vec<usize> {
+        let Some(index) = function_chunk else {
+            return Vec::new();
+        };
+        let DeclaratorChunk::Function { parameters, .. } = &declarator.chunks[index] else {
+            return Vec::new();
+        };
+        let declarations: Vec<usize> = parameters
+            .iter()
+            .filter_map(|parameter| parameter.declaration)
+            .collect();
+        if declarations.len() == 1 {
+            let only = &self.declarations[declarations[0]];
+            if only.name.is_none() && only.ty.is_void() && only.ty.qualifiers == 0 {
+                return Vec::new();
+            }
+        }
+        declarations
+    }
+
+    fn check_parameters_for_function_definition(&mut self, parameters: &[usize]) {
+        for parameter in parameters {
+            let parameter = *parameter;
+            let place = self.declarations[parameter].place;
+            let ty = self.declarations[parameter].ty.clone();
+            if !self.declarations[parameter].invalid && !ty.is_void() && !self.is_complete_type(&ty)
+            {
+                self.require_complete_type(
+                    place,
+                    &ty,
+                    "err_typecheck_decl_incomplete_type",
+                    Vec::new(),
+                );
+                self.declarations[parameter].invalid = true;
+            }
+            if self.declarations[parameter].name.is_none()
+                && !self.language().at_least(CStandard::C23)
+            {
+                self.diagnose("ext_parameter_name_omitted_c23", place, Vec::new());
+            }
+            let original = self.declarations[parameter]
+                .original_type
+                .clone()
+                .unwrap_or(ty);
+            if type_contains_star_array(&original) {
+                self.unsupported("[*] array in function definition parameter");
+                return;
+            }
+        }
+    }
+
+    fn parse_knr_parameter_declarations(&mut self, declarator: &mut Declarator, chunk: usize) {
+        self.push_scope(SCOPE_PROTOTYPE | SCOPE_FUNCTION_DECLARATION);
+        while self.is_declaration_specifier() && self.unsupported.is_none() {
+            let start = self.token.site;
+            let mut specifiers = DeclarationSpecifiers::new(start);
+            self.parse_declaration_specifiers(&mut specifiers, SpecifierContext::Normal);
+            if self.unsupported.is_some() {
+                break;
+            }
+            if self.try_consume(TokenKind::Semi).is_some() {
+                self.diagnose("err_declaration_does_not_declare_param", start, Vec::new());
+                continue;
+            }
+            if specifiers.storage != StorageClass::None
+                && specifiers.storage != StorageClass::Register
+            {
+                self.diagnose(
+                    "err_invalid_storage_class_in_func_decl",
+                    specifiers.storage_place,
+                    Vec::new(),
+                );
+                specifiers.storage = StorageClass::None;
+                specifiers.thread = ThreadStorage::None;
+            }
+            if specifiers.thread != ThreadStorage::None {
+                self.diagnose(
+                    "err_invalid_storage_class_in_func_decl",
+                    specifiers.thread_place,
+                    Vec::new(),
+                );
+                specifiers.storage = StorageClass::None;
+                specifiers.thread = ThreadStorage::None;
+            }
+            let mut parameter = Declarator::new(DeclaratorContext::KnrTypeList, self.token.site);
+            self.parse_declarator(&mut parameter);
+            loop {
+                if self.unsupported.is_some() {
+                    break;
+                }
+                if self.is_keyword("__attribute") {
+                    self.unsupported("GNU attributes on K&R parameter");
+                    break;
+                }
+                let declaration = self.act_on_parameter_declarator(&mut specifiers, &mut parameter);
+                if self.unsupported.is_some() {
+                    break;
+                }
+                if let Some(name) = self.declarations[declaration].name.clone() {
+                    let DeclaratorChunk::Function { parameters, .. } =
+                        &mut declarator.chunks[chunk]
+                    else {
+                        unreachable!()
+                    };
+                    match parameters
+                        .iter_mut()
+                        .find(|entry| entry.name.as_deref() == Some(&*name))
+                    {
+                        Some(entry) => {
+                            if entry.declaration.is_some() {
+                                self.diagnose(
+                                    "err_param_redefinition",
+                                    parameter.name_place,
+                                    vec![Argument::Name(name)],
+                                );
+                            } else {
+                                entry.declaration = Some(declaration);
+                            }
+                        }
+                        None => self.diagnose(
+                            "err_no_matching_param",
+                            parameter.name_place,
+                            vec![Argument::Name(name)],
+                        ),
+                    }
+                }
+                if !self.at(TokenKind::Comma) {
+                    break;
+                }
+                self.consume();
+                parameter = Declarator::new(DeclaratorContext::KnrTypeList, self.token.site);
+                parameter.first = false;
+                self.parse_declarator(&mut parameter);
+            }
+            if self.unsupported.is_some() {
+                break;
+            }
+            if self.expect_and_consume_semicolon("err_expected_semi_declaration", Vec::new()) {
+                continue;
+            }
+            if self.skip_until(&[TokenKind::LeftBrace], true, true) {
+                break;
+            }
+            self.try_consume(TokenKind::Semi);
+        }
+        if self.unsupported.is_none() {
+            self.act_on_finish_knr_parameter_declarations(declarator, chunk);
+        }
+        self.pop_scope();
+    }
+
+    fn act_on_finish_knr_parameter_declarations(
+        &mut self,
+        declarator: &mut Declarator,
+        chunk: usize,
+    ) {
+        let DeclaratorChunk::Function { parameters, .. } = &declarator.chunks[chunk] else {
+            return;
+        };
+        let missing: Vec<(usize, Rc<[u8]>, Place)> = parameters
+            .iter()
+            .enumerate()
+            .filter(|(_, parameter)| parameter.declaration.is_none())
+            .filter_map(|(index, parameter)| {
+                parameter
+                    .name
+                    .clone()
+                    .map(|name| (index, name, parameter.place))
+            })
+            .collect();
+        for (index, name, place) in missing.into_iter().rev() {
+            if self.language().at_least(CStandard::C99) {
+                self.diagnose(
+                    "ext_param_not_declared",
+                    place,
+                    vec![Argument::Name(name.clone())],
+                );
+            }
+            let declaration = Declaration::new(
+                DeclarationKind::Parameter,
+                Some(name),
+                place,
+                Parser::int_type(),
+            );
+            let declaration = self.add_declaration(declaration);
+            self.push_on_scope(declaration);
+            if let DeclaratorChunk::Function { parameters, .. } = &mut declarator.chunks[chunk] {
+                parameters[index].declaration = Some(declaration);
+            }
+        }
+    }
+
+    fn pop_function_scope(&mut self) {
+        let mut undeclared: Vec<(Place, Rc<[u8]>)> = Vec::new();
+        if let Some(function) = self.function.as_ref() {
+            for (name, label) in &function.labels {
+                if label.defined.is_none() {
+                    undeclared.push((label.place, name.clone()));
+                }
+            }
+        }
+        undeclared.sort_by_key(|(place, _)| (place.buffer, place.offset));
+        self.check_unused_declarations_in_scope();
+        for (place, name) in undeclared {
+            self.diagnose(
+                "err_undeclared_label_use",
+                place,
+                vec![Argument::Name(name)],
+            );
+        }
+        self.pop_scope();
+    }
+
+    fn check_unused_declarations_in_scope(&mut self) {
+        let Some(scope) = self.scopes.last() else {
+            return;
+        };
+        let place = scope
+            .declarations
+            .first()
+            .map(|index| self.declarations[*index].place)
+            .unwrap_or_default();
+        let has_unused_variable = scope.declarations.iter().any(|index| {
+            let declaration = &self.declarations[*index];
+            declaration.kind == DeclarationKind::Variable
+                && !declaration.referenced
+                && !declaration.used
+        });
+        let has_unused_parameter = scope.declarations.iter().any(|index| {
+            let declaration = &self.declarations[*index];
+            declaration.kind == DeclarationKind::Parameter
+                && !declaration.referenced
+                && !declaration.used
+        });
+        let has_typedef = scope
+            .declarations
+            .iter()
+            .any(|index| self.declarations[*index].kind == DeclarationKind::Typedef);
+        if has_unused_variable
+            && (!self.message_ignored("warn_unused_variable", place)
+                || !self.message_ignored("warn_unused_but_set_variable", place))
+        {
+            self.unsupported("unused variable warnings");
+        }
+        if has_unused_parameter && !self.message_ignored("warn_unused_parameter", place) {
+            self.unsupported("unused parameter warnings");
+        }
+        if has_typedef && !self.message_ignored("warn_unused_local_typedef", place) {
+            self.unsupported("unused local typedef warnings");
+        }
+    }
+
+    fn act_on_finish_function_body(
+        &mut self,
+        declaration: Option<usize>,
+        open: Place,
+        close: Place,
+        parameters: &[usize],
+    ) {
+        let Some(index) = declaration else {
+            return;
+        };
+        let place = self.declarations[index].place;
+        if !self.message_ignored("warn_missing_prototype", place) {
+            self.unsupported("missing prototype warnings");
+            return;
+        }
+        let possible_prototype = self.possible_prototype(index);
+        let written = self.declarations[index].has_prototype_written;
+        if !written && !parameters.is_empty() {
+            let warn = match possible_prototype {
+                None => true,
+                Some(previous) => {
+                    !self.declarations[previous].has_prototype_written
+                        && !self.declarations[previous].implicit
+                }
+            };
+            if warn {
+                self.diagnose(
+                    "warn_non_prototype_changes_behavior",
+                    place,
+                    vec![
+                        Argument::number(1),
+                        Argument::number(0),
+                        Argument::number(0),
+                        Argument::number(0),
+                    ],
+                );
+                if let Some(previous) = possible_prototype {
+                    let previous_place = self.declarations[previous].place;
+                    self.diagnose(
+                        "warn_non_prototype_changes_behavior",
+                        previous_place,
+                        vec![
+                            Argument::number(0),
+                            Argument::number(1),
+                            Argument::number(1),
+                            Argument::number(1),
+                        ],
+                    );
+                }
+            }
+        }
+        let Some(function) = self.function.as_ref() else {
+            return;
+        };
+        if function.has_vla && function.branch_into_scope {
+            self.unsupported("jump into scope of variably modified type checking");
+            return;
+        }
+        self.issue_analysis_warnings(index, open, close);
+    }
+
+    fn possible_prototype(&self, index: usize) -> Option<usize> {
+        let mut previous = self.declarations[index].previous;
+        while let Some(candidate) = previous {
+            if self.declarations[candidate].file_scope || self.declarations[candidate].implicit {
+                return Some(candidate);
+            }
+            previous = self.declarations[candidate].previous;
+        }
+        None
+    }
+
+    fn issue_analysis_warnings(&mut self, index: usize, open: Place, close: Place) {
+        let Some(function) = self.function.as_mut() else {
+            return;
+        };
+        let deferred = std::mem::take(&mut function.deferred);
+        let end = function.reachability;
+        let live_return = function.live_return;
+        let abnormal = function.abnormal_exit;
+        let valid = function.analysis_valid;
+        let noreturn = function.noreturn;
+        let implicit_return_zero = function.implicit_return_zero;
+        let result = function.result.clone();
+        if self.preprocessor.engine.uncompilable_error {
+            for diagnostic in deferred {
+                self.diagnose(&diagnostic.name, diagnostic.place, diagnostic.arguments);
+            }
+            return;
+        }
+        if self.declarations[index].invalid {
+            return;
+        }
+        if !self.message_ignored("warn_unreachable", open) {
+            self.unsupported("unreachable code warnings");
+            return;
+        }
+        for diagnostic in deferred {
+            let reachability = if valid {
+                diagnostic.reachability
+            } else {
+                Reachability::Unknown
+            };
+            match reachability {
+                Reachability::Reachable => {
+                    self.diagnose(&diagnostic.name, diagnostic.place, diagnostic.arguments)
+                }
+                Reachability::Unreachable => {}
+                Reachability::Unknown => {
+                    self.unsupported("reachability of a deferred diagnostic");
+                    return;
+                }
+            }
+        }
+        let is_main = self.declarations[index].name.as_deref() == Some(&b"main"[..])
+            && !self.preprocessor.options.freestanding;
+        if implicit_return_zero && (self.language().at_least(CStandard::C99) || !is_main) {
+            return;
+        }
+        let returns_void = result.is_void();
+        let falloff_ignored =
+            self.message_ignored("warn_falloff_nonvoid", self.declarations[index].place);
+        let noreturn_ignored = self.message_ignored(
+            "warn_noreturn_has_return_expr",
+            self.declarations[index].place,
+        );
+        let suggest_ignored = self.message_ignored(
+            "warn_suggest_noreturn_block",
+            self.declarations[index].place,
+        );
+        if (returns_void || falloff_ignored)
+            && (!noreturn || noreturn_ignored)
+            && (!returns_void || suggest_ignored)
+        {
+            return;
+        }
+        if !self.message_ignored(
+            "warn_suggest_noreturn_function",
+            self.declarations[index].place,
+        ) {
+            self.unsupported("missing noreturn suggestions");
+            return;
+        }
+        if !valid
+            || end == Reachability::Unknown
+            || live_return == Reachability::Unknown
+            || abnormal == Reachability::Unknown
+        {
+            self.unsupported("fall-off analysis with uncertain control flow");
+            return;
+        }
+        if end != Reachability::Reachable {
+            return;
+        }
+        let maybe = live_return == Reachability::Reachable || abnormal == Reachability::Reachable;
+        if noreturn {
+            self.diagnose(
+                "warn_noreturn_has_return_expr",
+                close,
+                vec![Argument::number(0)],
+            );
+        } else if !returns_void {
+            let name = if !self.language().at_least(CStandard::C99) && is_main {
+                "ext_main_no_return"
+            } else {
+                "warn_falloff_nonvoid"
+            };
+            self.diagnose(
+                name,
+                close,
+                vec![Argument::number(0), Argument::number(i128::from(maybe))],
+            );
+        }
+    }
+
+    fn parse_compound_statement(&mut self) -> Option<Statement> {
+        let start = self.token.site;
+        self.push_scope(SCOPE_BLOCK);
+        self.parse_compound_statement_body(false);
+        if self.unsupported.is_none() {
+            self.check_unused_declarations_in_scope();
+        }
+        self.pop_scope();
+        Some(Statement::new(StatementKind::Compound, start))
+    }
+
+    fn parse_compound_statement_body(&mut self, function_body: bool) -> Place {
+        let open = self.consume();
+        let _ = function_body;
+        if let Some(function) = self.function.as_mut() {
+            function.compound_empty_loop_bodies.push(false);
+        }
+        while self.at(TokenKind::PragmaAnnotation) && self.unsupported.is_none() {
+            self.handle_pragma_annotation();
+        }
+        let mut statements: Vec<Statement> = Vec::new();
+        if self.is_keyword("__label__") {
+            self.unsupported("local labels");
+            return open;
+        }
+        while !self.at(TokenKind::RightBrace)
+            && !self.at(TokenKind::EndOfFile)
+            && self.unsupported.is_none()
+        {
+            if self.at(TokenKind::Semi) {
+                let first = self.token.site;
+                let mut consumed = false;
+                while self.at(TokenKind::Semi)
+                    && !self.token.has(LEADING_EMPTY_MACRO)
+                    && !self.token.has(MACRO_ARGUMENT)
+                {
+                    let place = self.consume();
+                    statements.push(Statement::null(place));
+                    consumed = true;
+                }
+                if consumed {
+                    self.diagnose("warn_null_statement", first, Vec::new());
+                    continue;
+                }
+            }
+            let statement = if self.is_keyword("__extension__") {
+                self.parse_extension_statement()
+            } else {
+                self.parse_statement_or_declaration(true, None)
+            };
+            if let Some(statement) = statement {
+                statements.push(statement);
+            }
+        }
+        if self.unsupported.is_some() {
+            return open;
+        }
+        let close_place = self.token.site;
+        let close = if self.at(TokenKind::RightBrace) {
+            self.consume()
+        } else {
+            self.diagnose("err_expected", close_place, vec![Argument::text("'}'")]);
+            self.diagnose("note_matching", open, vec![Argument::text("'{'")]);
+            close_place
+        };
+        self.act_on_compound_statement(open, &statements);
+        close
+    }
+
+    fn act_on_compound_statement(&mut self, open: Place, statements: &[Statement]) {
+        let mixed = if self.language().at_least(CStandard::C99) {
+            "warn_mixed_decls_code"
+        } else {
+            "ext_mixed_decls_code"
+        };
+        if !self.message_ignored(mixed, open) {
+            let mut index = 0;
+            while index < statements.len()
+                && matches!(statements[index].kind, StatementKind::Declaration { .. })
+            {
+                index += 1;
+            }
+            while index < statements.len()
+                && !matches!(statements[index].kind, StatementKind::Declaration { .. })
+            {
+                index += 1;
+            }
+            if index < statements.len() {
+                match statements[index].kind {
+                    StatementKind::Declaration { place: Some(place) } => {
+                        self.diagnose(mixed, place, Vec::new())
+                    }
+                    _ => {
+                        self.unsupported("mixed declaration diagnostic without a declaration");
+                        return;
+                    }
+                }
+            }
+        }
+        let has_empty_loop_bodies = self
+            .function
+            .as_mut()
+            .and_then(|function| function.compound_empty_loop_bodies.pop())
+            .unwrap_or(false);
+        if has_empty_loop_bodies && statements.len() > 1 {
+            for index in 0..statements.len() - 1 {
+                self.diagnose_empty_loop_body(&statements[index], &statements[index + 1]);
+            }
+        }
+    }
+
+    fn diagnose_empty_loop_body(&mut self, statement: &Statement, possible_body: &Statement) {
+        let StatementKind::Loop {
+            right_paren,
+            start,
+            null_body: Some((semicolon, leading_empty_macro)),
+            is_for,
+        } = statement.kind
+        else {
+            return;
+        };
+        let name = if is_for {
+            "warn_empty_for_body"
+        } else {
+            "warn_empty_while_body"
+        };
+        if self.message_ignored(name, semicolon) {
+            return;
+        }
+        if leading_empty_macro || self.presumed_line(right_paren) != self.spelling_line(semicolon) {
+            return;
+        }
+        let mut probable_typo = matches!(possible_body.kind, StatementKind::Compound);
+        if !probable_typo && self.presumed_column(possible_body.start) > self.presumed_column(start)
+        {
+            probable_typo = true;
+        }
+        if probable_typo {
+            self.diagnose(name, semicolon, Vec::new());
+            self.diagnose("note_empty_body_on_separate_line", semicolon, Vec::new());
+        }
+    }
+
+    fn parse_extension_statement(&mut self) -> Option<Statement> {
+        let start = self.token.site;
+        let extension = self.consume();
+        while self.try_consume_keyword("__extension__").is_some() {}
+        if self.is_declaration_specifier() {
+            self.extension_depth += 1;
+            let result = self.parse_block_declaration(start);
+            self.extension_depth -= 1;
+            return result;
+        }
+        let operand = {
+            self.extension_depth += 1;
+            let operand = self.parse_cast_expression(false, false);
+            self.extension_depth -= 1;
+            operand
+        };
+        let left =
+            operand.map(|operand| self.act_on_unary(UnaryOperator::Extension, operand, extension));
+        let expression = self.parse_rhs_of_binary_expression(left, 1);
+        let Some(expression) = expression else {
+            self.skip_until(&[TokenKind::Semi], false, false);
+            return None;
+        };
+        self.expect_and_consume_semicolon("err_expected_semi_after_expr", Vec::new());
+        self.act_on_expression_statement(expression);
+        Some(Statement::new(StatementKind::Expression, start))
+    }
+
+    fn parse_statement(&mut self, trailing_else: Option<&mut Option<Place>>) -> Option<Statement> {
+        let mut trailing_else = trailing_else;
+        loop {
+            let before = (self.token.site, self.token.kind);
+            let result = self.parse_statement_or_declaration(false, trailing_else.as_deref_mut());
+            if result.is_some() || self.unsupported.is_some() {
+                return result;
+            }
+            if self.pending_empty_statement {
+                self.pending_empty_statement = false;
+                if (self.token.site, self.token.kind) != before {
+                    continue;
+                }
+            }
+            return None;
+        }
+    }
+
+    fn parse_statement_or_declaration(
+        &mut self,
+        allow_declarations: bool,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        let saved = self.save_balance();
+        let result = self.parse_statement_or_declaration_inner(allow_declarations, trailing_else);
+        self.restore_balance(saved);
+        result
+    }
+
+    fn parse_statement_or_declaration_inner(
+        &mut self,
+        allow_declarations: bool,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        self.pending_empty_statement = false;
+        let start = self.token.site;
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if self.at(TokenKind::LeftSquare) && self.peek(1).kind == TokenKind::LeftSquare {
+            self.unsupported("standard attributes on statements");
+            return None;
+        }
+        if self.is_identifier() {
+            let next = self.peek(1);
+            if next.kind == TokenKind::Colon {
+                return self.parse_labeled_statement(allow_declarations);
+            }
+            let name = self.token.spelling.clone();
+            if self.lookup_ordinary(&name).is_none() && next.kind != TokenKind::LeftParen {
+                if self.lookup_tag(&name).is_some() {
+                    self.unsupported("tag name used without its tag keyword");
+                    return None;
+                }
+                if self.has_typo_candidates(&name) {
+                    self.unsupported("typo correction for statement-initial identifier");
+                    return None;
+                }
+            }
+        }
+        match self.token.kind {
+            TokenKind::PragmaAnnotation => return self.parse_pragma_in_statement(),
+            TokenKind::LeftBrace => return self.parse_compound_statement(),
+            TokenKind::Semi => {
+                let leading_empty_macro = self.token.has(LEADING_EMPTY_MACRO);
+                let place = self.consume();
+                return Some(Statement::new(
+                    StatementKind::Null {
+                        semicolon: place,
+                        leading_empty_macro,
+                    },
+                    place,
+                ));
+            }
+            _ => {}
+        }
+        match self.keyword() {
+            Some("case") => return self.parse_case_statement(allow_declarations),
+            Some("default") => return self.parse_default_statement(allow_declarations),
+            Some("if") => return self.parse_if_statement(trailing_else),
+            Some("switch") => return self.parse_switch_statement(trailing_else),
+            Some("while") => return self.parse_while_statement(trailing_else),
+            Some("for") => return self.parse_for_statement(trailing_else),
+            Some("do") => {
+                let result = self.parse_do_statement();
+                return self.finish_jump_statement(result, "do/while", start);
+            }
+            Some("goto") => {
+                let result = self.parse_goto_statement();
+                return self.finish_jump_statement(result, "goto", start);
+            }
+            Some("continue") => {
+                let result = self.parse_break_or_continue_statement(true);
+                return self.finish_jump_statement(result, "continue", start);
+            }
+            Some("break") => {
+                let result = self.parse_break_or_continue_statement(false);
+                return self.finish_jump_statement(result, "break", start);
+            }
+            Some("return") => {
+                let result = self.parse_return_statement();
+                return self.finish_jump_statement(result, "return", start);
+            }
+            Some("asm" | "__asm" | "__asm__") => {
+                self.unsupported("asm statement");
+                return None;
+            }
+            Some("__attribute") => {
+                self.unsupported("GNU attributes on statements");
+                return None;
+            }
+            Some("_Defer") => {
+                self.unsupported("defer statement");
+                return None;
+            }
+            _ => {}
+        }
+        if allow_declarations && self.is_declaration_specifier() {
+            return self.parse_block_declaration(start);
+        }
+        if self.at(TokenKind::RightBrace) {
+            let place = self.token.site;
+            self.diagnose("err_expected_statement", place, Vec::new());
+            return None;
+        }
+        self.parse_expression_statement()
+    }
+
+    fn finish_jump_statement(
+        &mut self,
+        result: Option<Statement>,
+        what: &str,
+        start: Place,
+    ) -> Option<Statement> {
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if self.try_consume(TokenKind::Semi).is_none() && result.is_some() {
+            self.expect_semicolon_after_statement(what);
+            self.skip_until(&[TokenKind::RightBrace], true, true);
+        }
+        let _ = start;
+        result
+    }
+
+    fn expect_semicolon_after_statement(&mut self, what: &str) {
+        if matches!(self.token.kind, TokenKind::Colon | TokenKind::Comma) {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_semi_after_stmt",
+                place,
+                vec![Argument::text(what)],
+            );
+            self.consume();
+            return;
+        }
+        let place = self.previous_end.unwrap_or(self.token.site);
+        self.diagnose(
+            "err_expected_semi_after_stmt",
+            place,
+            vec![Argument::text(what)],
+        );
+    }
+
+    fn parse_pragma_in_statement(&mut self) -> Option<Statement> {
+        let value = String::from_utf8_lossy(&self.token.spelling).into_owned();
+        let place = self.token.site;
+        let name = value.split(' ').next().unwrap_or("");
+        let (text, empty) = match name {
+            "fp_contract" => ("fp_contract", false),
+            "fenv_access" => ("STDC FENV_ACCESS", true),
+            "fenv_round" => ("STDC FENV_ROUND", false),
+            "cx_limited_range" => ("STDC CX_LIMITED_RANGE", false),
+            _ => {
+                self.unsupported(value);
+                return None;
+            }
+        };
+        self.diagnose(
+            "err_pragma_file_or_compound_scope",
+            place,
+            vec![Argument::text(text)],
+        );
+        self.consume();
+        if empty {
+            self.pending_empty_statement = true;
+        }
+        None
+    }
+
+    fn parse_block_declaration(&mut self, start: Place) -> Option<Statement> {
+        if matches!(self.keyword(), Some("_Static_assert" | "static_assert")) {
+            self.parse_static_assert();
+            return Some(Statement::new(
+                StatementKind::Declaration { place: None },
+                start,
+            ));
+        }
+        let mut specifiers = DeclarationSpecifiers::new(start);
+        self.parse_declaration_specifiers(&mut specifiers, SpecifierContext::Normal);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if self.at(TokenKind::Semi) {
+            self.consume();
+            self.act_on_free_standing_specifiers(&specifiers, start);
+            self.apply_noreturn_calls();
+            let place = specifiers.tag.map(|tag| self.tags[tag].place);
+            return Some(Statement::new(StatementKind::Declaration { place }, start));
+        }
+        let declarations =
+            self.parse_declaration_group(&mut specifiers, DeclaratorContext::Block, start);
+        self.apply_noreturn_calls();
+        if self.unsupported.is_some() {
+            return None;
+        }
+        let place = declarations
+            .first()
+            .map(|index| self.declarations[*index].place);
+        if declarations.is_empty() {
+            return None;
+        }
+        Some(Statement::new(StatementKind::Declaration { place }, start))
+    }
+
+    fn parse_expression_statement(&mut self) -> Option<Statement> {
+        let start = self.token.site;
+        let expression = self.parse_expression();
+        let Some(expression) = expression else {
+            self.skip_until(&[TokenKind::RightBrace], true, true);
+            self.try_consume(TokenKind::Semi);
+            self.apply_noreturn_calls();
+            return None;
+        };
+        if self.at(TokenKind::Colon)
+            && self.innermost_switch_is_breakable()
+            && self.check_case_expression(&expression)
+        {
+            self.diagnose("err_expected_case_before_expression", start, Vec::new());
+            self.unsupported("recovery from a case label written without 'case'");
+            return None;
+        }
+        self.expect_and_consume_semicolon("err_expected_semi_after_expr", Vec::new());
+        if self.unsupported.is_some() {
+            return None;
+        }
+        self.act_on_expression_statement(expression)
+            .then(|| Statement::new(StatementKind::Expression, start))
+    }
+
+    fn innermost_switch_is_breakable(&self) -> bool {
+        self.function
+            .as_ref()
+            .and_then(|function| function.targets.last())
+            .is_some_and(|target| !target.is_loop)
+    }
+
+    fn check_case_expression(&self, expression: &Expression) -> bool {
+        expression.ty.is_integer() || expression.ty.is_enumeration()
+    }
+
+    fn act_on_expression_statement(&mut self, expression: Expression) -> bool {
+        if expression.is_error() {
+            self.apply_noreturn_calls();
+            return false;
+        }
+        let converted = self.ignored_value_conversions_for_statement(expression);
+        self.check_completed_expression(&converted);
+        self.diagnose_unused_expression_result(&converted);
+        self.apply_noreturn_calls();
+        true
+    }
+
+    fn ignored_value_conversions_for_statement(&mut self, expression: Expression) -> Expression {
+        if !expression.is_lvalue() {
+            if expression.ty.is_function() {
+                return self.default_function_array_conversion(expression);
+            }
+            return expression;
+        }
+        if let Some((tag, _)) = expression.ty.canonical().tag() {
+            if expression.ty.is_enumeration() && !self.tags[tag].complete {
+                let ty = QualifiedType::new(TypeNode::Builtin(BuiltinType::Void));
+                return self.implicit_cast(expression, ty, CastKind::ToVoid);
+            }
+        }
+        let converted = self.default_function_array_lvalue_conversion(expression);
+        if !converted.ty.is_void() && !self.is_complete_type(&converted.ty) {
+            let place = converted.place;
+            let ty = converted.ty.clone();
+            self.require_complete_type(place, &ty, "err_incomplete_type", Vec::new());
+        }
+        converted
+    }
+
+    fn check_completed_expression(&mut self, expression: &Expression) {
+        self.check_for_integer_overflow(expression);
+        self.check_unsequenced_operations(expression);
+    }
+
+    fn check_for_integer_overflow(&mut self, expression: &Expression) {
+        let mut pending = vec![expression];
+        while let Some(original) = pending.pop() {
+            let inner = original.ignore_parentheses_and_casts();
+            match &inner.kind {
+                ExpressionKind::Binary { .. } | ExpressionKind::Unary { .. } => {
+                    let mut state = EvaluationState::default();
+                    let value = self.evaluate(inner, &mut state);
+                    if let Some((place, text, ty)) = state.overflow.clone() {
+                        if value.is_some() {
+                            self.diagnose(
+                                "warn_integer_constant_overflow",
+                                place,
+                                vec![Argument::Text(text), Argument::Type(ty)],
+                            );
+                        } else {
+                            self.unsupported("integer overflow in a partially constant expression");
+                            return;
+                        }
+                    } else if value.is_none() && self.contains_overflowing_constant(inner) {
+                        self.unsupported("integer overflow in a partially constant expression");
+                        return;
+                    }
+                }
+                ExpressionKind::InitializerList { elements, .. } => pending.extend(elements.iter()),
+                ExpressionKind::Call { arguments, .. } => pending.extend(arguments.iter()),
+                ExpressionKind::Subscript { index, .. } => pending.push(index),
+                ExpressionKind::CompoundLiteral { initializer, .. } => pending.push(initializer),
+                _ => {}
+            }
+        }
+    }
+
+    fn contains_overflowing_constant(&self, expression: &Expression) -> bool {
+        let mut state = EvaluationState::default();
+        if self.evaluate(expression, &mut state).is_some() {
+            return state.overflow.is_some();
+        }
+        if state.overflow.is_some() {
+            return true;
+        }
+        match &expression.kind {
+            ExpressionKind::Parenthesized(inner) => self.contains_overflowing_constant(inner),
+            ExpressionKind::Unary { operand, .. } => self.contains_overflowing_constant(operand),
+            ExpressionKind::Binary { left, right, .. } => {
+                self.contains_overflowing_constant(left)
+                    || self.contains_overflowing_constant(right)
+            }
+            ExpressionKind::Cast { operand, .. } => self.contains_overflowing_constant(operand),
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                self.contains_overflowing_constant(condition)
+                    || then
+                        .as_ref()
+                        .is_some_and(|then| self.contains_overflowing_constant(then))
+                    || self.contains_overflowing_constant(otherwise)
+            }
+            _ => false,
+        }
+    }
+
+    fn check_unsequenced_operations(&mut self, expression: &Expression) {
+        let mut conflict = false;
+        unsequenced_accesses(expression, &mut conflict);
+        if !conflict {
+            return;
+        }
+        let place = expression.start;
+        if !self.message_ignored("warn_unsequenced_mod_mod", place)
+            || !self.message_ignored("warn_unsequenced_mod_use", place)
+        {
+            self.unsupported("unsequenced modification analysis");
+        }
+    }
+
+    fn diagnose_binary_operator_precedence(
+        &mut self,
+        operator: BinaryOperator,
+        left: &Expression,
+        right: &Expression,
+        place: Place,
+    ) {
+        let bitwise_rank = |operator: BinaryOperator| match operator {
+            BinaryOperator::BitAnd => Some(0),
+            BinaryOperator::BitXor => Some(1),
+            BinaryOperator::BitOr => Some(2),
+            _ => None,
+        };
+        let as_binary = |expression: &Expression| match &expression.kind {
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => Some((
+                *operator,
+                left.as_ref().clone(),
+                right.as_ref().clone(),
+                expression.place,
+            )),
+            _ => None,
+        };
+        if bitwise_rank(operator).is_some() {
+            let left_binary = as_binary(left);
+            let right_binary = as_binary(right);
+            let left_comparison = left_binary
+                .as_ref()
+                .is_some_and(|binary| binary.0.is_comparison());
+            let right_comparison = right_binary
+                .as_ref()
+                .is_some_and(|binary| binary.0.is_comparison());
+            let left_bitwise = left_binary
+                .as_ref()
+                .is_some_and(|binary| bitwise_rank(binary.0).is_some());
+            let right_bitwise = right_binary
+                .as_ref()
+                .is_some_and(|binary| bitwise_rank(binary.0).is_some());
+            if left_comparison != right_comparison && !left_bitwise && !right_bitwise {
+                let comparison = if left_comparison {
+                    left_binary.as_ref()
+                } else {
+                    right_binary.as_ref()
+                };
+                let comparison_spelling =
+                    comparison.map(|binary| binary.0.spelling()).unwrap_or("");
+                self.diagnose(
+                    "warn_precedence_bitwise_rel",
+                    place,
+                    vec![
+                        Argument::text(operator.spelling()),
+                        Argument::text(comparison_spelling),
+                    ],
+                );
+                self.diagnose(
+                    "note_precedence_silence",
+                    place,
+                    vec![Argument::text(comparison_spelling)],
+                );
+                self.diagnose(
+                    "note_precedence_bitwise_first",
+                    place,
+                    vec![Argument::text(operator.spelling())],
+                );
+            }
+        }
+        let macro_operator = self.is_macro_place(place);
+        if matches!(operator, BinaryOperator::BitOr | BinaryOperator::BitXor) && !macro_operator {
+            for side in [left, right] {
+                if let Some((inner, _, _, inner_place)) = as_binary(side) {
+                    if let (Some(inner_rank), Some(outer_rank)) =
+                        (bitwise_rank(inner), bitwise_rank(operator))
+                    {
+                        if inner_rank < outer_rank {
+                            self.diagnose(
+                                "warn_bitwise_op_in_bitwise_op",
+                                inner_place,
+                                vec![
+                                    Argument::text(inner.spelling()),
+                                    Argument::text(operator.spelling()),
+                                ],
+                            );
+                            self.diagnose(
+                                "note_precedence_silence",
+                                inner_place,
+                                vec![Argument::text(inner.spelling())],
+                            );
+                        }
+                    }
+                }
+            }
+        }
+        if operator == BinaryOperator::LogicalOr && !macro_operator {
+            let is_string = |expression: &Expression| {
+                matches!(
+                    expression.ignore_parentheses_and_implicit_casts().kind,
+                    ExpressionKind::String { .. }
+                )
+            };
+            if let Some((inner, inner_left, inner_right, inner_place)) = as_binary(left) {
+                if inner == BinaryOperator::LogicalAnd {
+                    if !is_string(&inner_left) {
+                        self.diagnose_logical_and_in_logical_or(inner_place);
+                    }
+                } else if inner == BinaryOperator::LogicalOr {
+                    if let Some((nested, _, nested_right, nested_place)) = as_binary(&inner_right) {
+                        if nested == BinaryOperator::LogicalAnd && is_string(&nested_right) {
+                            self.diagnose_logical_and_in_logical_or(nested_place);
+                        }
+                    }
+                }
+            }
+            if let Some((inner, _, inner_right, inner_place)) = as_binary(right) {
+                if inner == BinaryOperator::LogicalAnd && !is_string(&inner_right) {
+                    self.diagnose_logical_and_in_logical_or(inner_place);
+                }
+            }
+        }
+        if (operator == BinaryOperator::ShiftLeft && left.ty.is_integer())
+            || operator == BinaryOperator::ShiftRight
+        {
+            for side in [left, right] {
+                if let Some((inner, _, _, inner_place)) = as_binary(side) {
+                    if matches!(inner, BinaryOperator::Add | BinaryOperator::Subtract) {
+                        self.diagnose(
+                            "warn_addition_in_bitshift",
+                            inner_place,
+                            vec![
+                                Argument::text(operator.spelling()),
+                                Argument::text(inner.spelling()),
+                            ],
+                        );
+                        self.diagnose(
+                            "note_precedence_silence",
+                            inner_place,
+                            vec![Argument::text(inner.spelling())],
+                        );
+                    }
+                }
+            }
+        }
+    }
+
+    fn diagnose_logical_and_in_logical_or(&mut self, place: Place) {
+        self.diagnose("warn_logical_and_in_logical_or", place, Vec::new());
+        self.diagnose("note_precedence_silence", place, vec![Argument::text("&&")]);
+    }
+
+    fn diagnose_logical_not_on_left_of_check(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        operator: BinaryOperator,
+    ) {
+        let ExpressionKind::Unary {
+            operator: UnaryOperator::LogicalNot,
+            operand,
+        } = &left.ignore_implicit_casts().kind
+        else {
+            return;
+        };
+        if self.is_known_boolean(right) {
+            return;
+        }
+        if self.is_known_boolean(operand.ignore_implicit_casts()) {
+            return;
+        }
+        let place = left.ignore_implicit_casts().place;
+        let bitwise = i128::from(matches!(
+            operator,
+            BinaryOperator::BitAnd | BinaryOperator::BitOr | BinaryOperator::BitXor
+        ));
+        self.diagnose(
+            "warn_logical_not_on_lhs_of_check",
+            place,
+            vec![Argument::number(bitwise)],
+        );
+        self.diagnose(
+            "note_logical_not_fix",
+            place,
+            vec![Argument::number(bitwise)],
+        );
+        self.diagnose("note_logical_not_silence_with_parens", place, Vec::new());
+    }
+
+    fn enum_coerced_type(&self, expression: &Expression) -> QualifiedType {
+        if let ExpressionKind::Reference { declaration } =
+            expression.ignore_parentheses_and_implicit_casts().kind
+        {
+            let information = &self.declarations[declaration];
+            if information.kind == DeclarationKind::EnumConstant {
+                if let Some(tag) = information.tag {
+                    if self.tags[tag].complete {
+                        return QualifiedType::new(TypeNode::Tag {
+                            declaration: tag,
+                            kind: TagKind::Enum,
+                            keyword: true,
+                        });
+                    }
+                }
+            }
+        }
+        expression.ty.clone()
+    }
+
+    fn check_enum_arithmetic_conversions(
+        &mut self,
+        left: &Expression,
+        right: &Expression,
+        place: Place,
+        kind: u8,
+    ) {
+        if left.contains_error() || right.contains_error() {
+            return;
+        }
+        let left_type = self.enum_coerced_type(left);
+        let right_type = self.enum_coerced_type(right);
+        let left_enum = left_type.is_enumeration();
+        let right_enum = right_type.is_enumeration();
+        let compound = kind == 4;
+        if (!compound && left_enum && right_type.is_floating())
+            || (right_enum && left_type.is_floating())
+        {
+            self.diagnose(
+                "warn_arith_conv_enum_float",
+                place,
+                vec![
+                    Argument::number(kind),
+                    Argument::number(i128::from(left_enum)),
+                    Argument::Type(left_type),
+                    Argument::Type(right_type),
+                ],
+            );
+        } else if !compound
+            && left_enum
+            && right_enum
+            && left_type.canonical().unqualified() != right_type.canonical().unqualified()
+        {
+            let named = |parser: &Parser, ty: &QualifiedType| {
+                ty.canonical()
+                    .tag()
+                    .is_some_and(|(tag, _)| parser.enum_has_name(tag))
+            };
+            let name = if !named(self, &left_type) || !named(self, &right_type) {
+                "warn_arith_conv_mixed_anon_enum_types"
+            } else if kind == 3 {
+                "warn_conditional_mixed_enum_types"
+            } else if kind == 2 {
+                "warn_comparison_mixed_enum_types"
+            } else {
+                "warn_arith_conv_mixed_enum_types"
+            };
+            self.diagnose(
+                name,
+                place,
+                vec![
+                    Argument::number(kind),
+                    Argument::Type(left_type),
+                    Argument::Type(right_type),
+                ],
+            );
+        }
+    }
+
+    fn diagnose_string_plus_scalar(&mut self, left: &Expression, right: &Expression, place: Place) {
+        let is_string = |expression: &Expression| {
+            matches!(
+                expression.ignore_implicit_casts().kind,
+                ExpressionKind::String { .. }
+            )
+        };
+        let (string_on_left, index) = if is_string(left) {
+            (true, right)
+        } else {
+            (false, left)
+        };
+        if (is_string(left) || is_string(right))
+            && (index.ty.is_integer() || index.ty.is_enumeration())
+        {
+            let ty = index.ignore_implicit_casts().ty.clone();
+            self.diagnose("warn_string_plus_int", place, vec![Argument::Type(ty)]);
+            self.diagnose("note_string_plus_scalar_silence", place, Vec::new());
+            let _ = string_on_left;
+            return;
+        }
+        let is_character = |expression: &Expression| {
+            matches!(
+                expression.ignore_implicit_casts().kind,
+                ExpressionKind::Character { .. }
+            )
+        };
+        let (character, string_side) = if is_character(right) {
+            (right, left)
+        } else if is_character(left) {
+            (left, right)
+        } else {
+            return;
+        };
+        let Some(pointee) = string_side.ty.pointee() else {
+            return;
+        };
+        let character_type = |ty: &QualifiedType| {
+            matches!(
+                ty.canonical().builtin_kind(),
+                Some(
+                    BuiltinType::CharSigned
+                        | BuiltinType::CharUnsigned
+                        | BuiltinType::SignedChar
+                        | BuiltinType::UnsignedChar
+                )
+            )
+        };
+        if !character_type(&pointee) {
+            return;
+        }
+        let literal = character.ignore_implicit_casts();
+        let literal_type = literal.ty.clone();
+        let value = match literal.kind {
+            ExpressionKind::Character { value, .. } => value,
+            _ => 0,
+        };
+        let shown = if !character_type(&literal_type) && literal_type.is_integer() && value < 256 {
+            self.char_type()
+        } else {
+            literal_type
+        };
+        self.diagnose("warn_string_plus_char", place, vec![Argument::Type(shown)]);
+        self.diagnose("note_string_plus_scalar_silence", place, Vec::new());
+    }
+
+    fn check_array_access_guard(
+        &mut self,
+        base: &Expression,
+        index: &Expression,
+        pointer_arithmetic: bool,
+    ) {
+        let _ = pointer_arithmetic;
+        self.unsupported_if_array_access_may_warn(base, index);
+    }
+
+    fn unsupported_if_array_access_may_warn(&mut self, base: &Expression, index: &Expression) {
+        let array = base.ignore_parentheses_and_casts();
+        let size = match &*array.ty.desugared().node {
+            TypeNode::ConstantArray { size, .. } => *size as i128,
+            _ => return,
+        };
+        let mut state = EvaluationState::default();
+        let Some(ConstantValue::Integer(value)) = self.evaluate(index, &mut state) else {
+            return;
+        };
+        if (value < 0 || value >= size)
+            && !self.message_ignored("warn_array_index_exceeds_bounds", base.place)
+        {
+            self.unsupported("array bounds checking");
+        }
+    }
+
+    fn check_pointer_comparison_with_null_character(
+        &mut self,
+        expression: &Expression,
+        null_side: &Expression,
+    ) {
+        if !null_side.ty.is_pointer() || expression.ty.is_pointer() {
+            return;
+        }
+        let null_value = i128::from(!self.preprocessor.macros.contains_key(&b"NULL"[..]));
+        match &expression.kind {
+            ExpressionKind::Character { value: 0, .. } => {
+                self.diagnose(
+                    "warn_pointer_compare",
+                    expression.place,
+                    vec![Argument::number(null_value)],
+                );
+            }
+            ExpressionKind::Cast {
+                explicit: true,
+                written: Some(written),
+                operand,
+                ..
+            } if written.canonical().unqualified() == self.char_type().canonical()
+                && self.is_null_pointer_constant(expression) =>
+            {
+                let _ = operand;
+                self.diagnose(
+                    "warn_pointer_compare",
+                    expression.start,
+                    vec![Argument::number(null_value)],
+                );
+            }
+            _ => {}
+        }
+    }
+
+    fn diagnose_unused_expression_result(&mut self, expression: &Expression) {
+        self.diagnose_unused_result_with(expression, "warn_unused_expr");
+    }
+
+    fn diagnose_unused_result_with(&mut self, expression: &Expression, name: &str) {
+        if self.unevaluated_depth > 0 {
+            return;
+        }
+        let Some((warn, place)) = self.unused_result_warning(expression) else {
+            return;
+        };
+        if self.diagnose_unused_comparison(expression) {
+            return;
+        }
+        let mut target = warn;
+        if let ExpressionKind::Cast {
+            kind: CastKind::NoOp | CastKind::IntegralCast,
+            operand,
+            explicit: false,
+            ..
+        } = &target.kind
+        {
+            target = operand.ignore_implicit_casts();
+        }
+        if matches!(target.kind, ExpressionKind::Call { .. }) {
+            return;
+        }
+        let expression_place = expression.ignore_parentheses_and_implicit_casts().place;
+        if self.is_macro_place(expression_place) || self.is_macro_place(place) {
+            self.unsupported("unused result warning for a macro expansion");
+            return;
+        }
+        let warn = warn.clone();
+        if let ExpressionKind::Cast {
+            explicit: true,
+            written: Some(written),
+            ..
+        } = &warn.kind
+        {
+            let void_pointer =
+                QualifiedType::pointer_to(QualifiedType::new(TypeNode::Builtin(BuiltinType::Void)));
+            if written.canonical() == void_pointer.canonical() && written.qualifiers == 0 {
+                self.diagnose_if_reachable("warn_unused_voidptr", place, Vec::new());
+                return;
+            }
+        }
+        if warn.is_lvalue() && warn.ty.is_volatile() && !warn.ty.is_array() {
+            self.diagnose_if_reachable("warn_unused_volatile", place, Vec::new());
+            return;
+        }
+        self.diagnose_if_reachable(name, place, Vec::new());
+    }
+
+    fn diagnose_unused_comparison(&mut self, expression: &Expression) -> bool {
+        let ExpressionKind::Binary { operator, left, .. } = &expression.kind else {
+            return false;
+        };
+        let kind = match operator {
+            BinaryOperator::Equal => 0,
+            BinaryOperator::NotEqual => 1,
+            BinaryOperator::Less
+            | BinaryOperator::Greater
+            | BinaryOperator::LessEqual
+            | BinaryOperator::GreaterEqual => 2,
+            _ => return false,
+        };
+        let place = expression.place;
+        if self.is_macro_place(place) {
+            self.unsupported("unused comparison inside a macro expansion");
+            return true;
+        }
+        self.diagnose(
+            "warn_unused_comparison",
+            place,
+            vec![Argument::number(kind)],
+        );
+        let can_assign = left.ignore_parentheses_and_implicit_casts().is_lvalue();
+        if can_assign {
+            if kind == 1 {
+                self.diagnose("note_inequality_comparison_to_or_assign", place, Vec::new());
+            } else if kind == 0 {
+                self.diagnose("note_equality_comparison_to_assign", place, Vec::new());
+            }
+        }
+        true
+    }
+
+    fn unused_result_warning<'expression>(
+        &self,
+        expression: &'expression Expression,
+    ) -> Option<(&'expression Expression, Place)> {
+        match &expression.kind {
+            ExpressionKind::Error => None,
+            ExpressionKind::Parenthesized(inner) => self.unused_result_warning(inner),
+            ExpressionKind::Generic { selected } => self.unused_result_warning(selected),
+            ExpressionKind::Unary { operator, operand } => match operator {
+                UnaryOperator::PostIncrement
+                | UnaryOperator::PostDecrement
+                | UnaryOperator::PreIncrement
+                | UnaryOperator::PreDecrement => None,
+                UnaryOperator::Real | UnaryOperator::Imaginary
+                    if operand.ty.canonical().is_volatile() =>
+                {
+                    None
+                }
+                UnaryOperator::Extension => self.unused_result_warning(operand),
+                _ => Some((expression, expression.place)),
+            },
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => match operator {
+                BinaryOperator::Comma => {
+                    if let ExpressionKind::Integer { value: 0, .. } =
+                        right.ignore_parentheses().kind
+                    {
+                        return None;
+                    }
+                    self.unused_result_warning(right)
+                }
+                BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                    self.unused_result_warning(left)?;
+                    self.unused_result_warning(right)?;
+                    Some((expression, expression.place))
+                }
+                BinaryOperator::Assign
+                | BinaryOperator::MultiplyAssign
+                | BinaryOperator::DivideAssign
+                | BinaryOperator::RemainderAssign
+                | BinaryOperator::AddAssign
+                | BinaryOperator::SubtractAssign
+                | BinaryOperator::ShiftLeftAssign
+                | BinaryOperator::ShiftRightAssign
+                | BinaryOperator::BitAndAssign
+                | BinaryOperator::BitXorAssign
+                | BinaryOperator::BitOrAssign => None,
+                _ => Some((expression, expression.place)),
+            },
+            ExpressionKind::Conditional {
+                then, otherwise, ..
+            } => match then {
+                Some(then) => {
+                    self.unused_result_warning(then)?;
+                    self.unused_result_warning(otherwise)
+                }
+                None => self.unused_result_warning(otherwise),
+            },
+            ExpressionKind::Member { .. } => Some((expression, expression.place)),
+            ExpressionKind::Subscript { .. } => Some((expression, expression.end)),
+            ExpressionKind::Call { .. } => None,
+            ExpressionKind::Cast {
+                kind,
+                explicit: true,
+                ..
+            } => {
+                if *kind == CastKind::ToVoid {
+                    return None;
+                }
+                Some((expression, expression.start))
+            }
+            ExpressionKind::Cast {
+                kind,
+                operand,
+                explicit: false,
+                ..
+            } => {
+                if *kind == CastKind::LValueToRValue && operand.ty.is_volatile() {
+                    return None;
+                }
+                self.unused_result_warning(operand)
+            }
+            _ => {
+                if expression.ty.is_void() {
+                    return None;
+                }
+                Some((expression, expression.place))
+            }
+        }
+    }
+
+    fn parse_labeled_statement(&mut self, allow_declarations: bool) -> Option<Statement> {
+        let name = self.token.spelling.clone();
+        let place = self.consume();
+        let colon = self.consume();
+        let (nested_in_loop, previous) = {
+            let function = self.function.as_mut()?;
+            let nested = function.targets.iter().any(|target| target.is_loop);
+            let entry = function.labels.entry(name.clone()).or_insert(LabelState {
+                place,
+                defined: None,
+                definition_reachability: Reachability::Unreachable,
+                jump_reachability: Reachability::Unreachable,
+            });
+            (nested, entry.clone())
+        };
+        let already_defined = previous.defined.is_some();
+        if !already_defined {
+            self.raise_reachability_at_label(previous.jump_reachability, nested_in_loop);
+            let reachability = self.current_reachability();
+            if let Some(label) = self
+                .function
+                .as_mut()
+                .and_then(|function| function.labels.get_mut(&name))
+            {
+                label.defined = Some(place);
+                label.definition_reachability = reachability;
+                label.place = place;
+            }
+        }
+        if self.is_keyword("__attribute") {
+            self.unsupported("GNU attributes on labels");
+            return None;
+        }
+        let substatement = if self.at(TokenKind::RightBrace) {
+            self.diagnose_label_at_end_of_compound_statement();
+            Some(Statement::null(colon))
+        } else {
+            self.parse_labeled_substatement(allow_declarations)
+        };
+        let substatement = substatement.unwrap_or_else(|| Statement::null(colon));
+        self.diagnose_label_followed_by_declaration(&substatement);
+        if already_defined {
+            self.diagnose(
+                "err_redefinition_of_label",
+                place,
+                vec![Argument::Name(name)],
+            );
+            let previous_place = previous.defined.unwrap_or(previous.place);
+            self.diagnose("note_previous_definition", previous_place, Vec::new());
+            return Some(substatement);
+        }
+        if (name.starts_with(b"__")
+            || (name.len() > 1 && name[0] == b'_' && name[1].is_ascii_uppercase()))
+            && !self.message_ignored("warn_reserved_extern_symbol", place)
+        {
+            self.unsupported("reserved identifier warning for a label");
+            return None;
+        }
+        Some(Statement::new(StatementKind::Other, place))
+    }
+
+    fn parse_labeled_substatement(&mut self, allow_declarations: bool) -> Option<Statement> {
+        loop {
+            let before = (self.token.site, self.token.kind);
+            let result = self.parse_statement_or_declaration(allow_declarations, None);
+            if result.is_some() || self.unsupported.is_some() {
+                return result;
+            }
+            if self.pending_empty_statement {
+                self.pending_empty_statement = false;
+                if (self.token.site, self.token.kind) != before {
+                    continue;
+                }
+            }
+            return None;
+        }
+    }
+
+    fn diagnose_label_at_end_of_compound_statement(&mut self) {
+        let place = self.token.site;
+        self.diagnose_compatibility(
+            "c_label_at_end_of_compound_statement",
+            CStandard::C23,
+            place,
+            Vec::new(),
+        );
+    }
+
+    fn diagnose_label_followed_by_declaration(&mut self, statement: &Statement) {
+        if let StatementKind::Declaration { .. } = statement.kind {
+            self.diagnose_compatibility(
+                "label_followed_by_declaration",
+                CStandard::C23,
+                statement.start,
+                Vec::new(),
+            );
+        }
+    }
+
+    fn verify_case_value(&mut self, expression: &Expression) -> Option<i128> {
+        if !expression.ty.is_integer() && !expression.ty.is_enumeration() {
+            let ty = expression.ty.clone();
+            self.diagnose(
+                "err_ice_not_integral",
+                expression.start,
+                vec![Argument::Type(ty), Argument::number(0)],
+            );
+            return None;
+        }
+        match self.verify_integer_constant_expression(expression) {
+            ConstantCheck::Constant(value, _) => Some(value),
+            ConstantCheck::NotConstant(place) => {
+                let mut state = EvaluationState::default();
+                match self.evaluate(expression, &mut state) {
+                    Some(ConstantValue::Integer(value)) if !state.side_effects => {
+                        self.diagnose("ext_expr_not_ice", place, vec![Argument::number(0)]);
+                        if state.overflow.is_some() {
+                            self.unsupported("overflow notes in a folded case value");
+                        }
+                        Some(value)
+                    }
+                    _ => {
+                        self.diagnose("err_expr_not_ice", place, vec![Argument::number(0)]);
+                        None
+                    }
+                }
+            }
+        }
+    }
+
+    fn parse_case_expression(&mut self) -> Option<(Expression, Option<i128>)> {
+        let expression = self.parse_constant_expression()?;
+        if expression.contains_error() {
+            return Some((expression, None));
+        }
+        let in_switch = self
+            .function
+            .as_ref()
+            .is_some_and(|function| !function.switches.is_empty());
+        if !in_switch {
+            return Some((expression, None));
+        }
+        let has_condition = self
+            .function
+            .as_ref()
+            .and_then(|function| function.switches.last())
+            .is_some_and(|switch| switch.condition.is_some());
+        if !has_condition {
+            return None;
+        }
+        let value = self.verify_case_value(&expression);
+        value.map(|value| (expression, Some(value)))
+    }
+
+    fn case_entry_details(&self, expression: &Expression) -> (Option<Rc<[u8]>>, (u32, bool), bool) {
+        let stripped = expression.ignore_parentheses_and_casts();
+        let name = match stripped.kind {
+            ExpressionKind::Reference { declaration } => {
+                self.declarations[declaration].name.clone()
+            }
+            _ => None,
+        };
+        let unpromoted = (
+            self.integer_width(&expression.ty),
+            self.is_signed_integer(&expression.ty),
+        );
+        let global_const_of_enum = match expression.ignore_parentheses_and_implicit_casts().kind {
+            ExpressionKind::Reference { declaration } => {
+                let declaration = &self.declarations[declaration];
+                declaration.kind == DeclarationKind::Variable
+                    && (declaration.file_scope
+                        || declaration.storage == StorageClass::Static
+                        || declaration.storage == StorageClass::Extern)
+                    && declaration.ty.is_const()
+                    && declaration.ty.is_enumeration()
+            }
+            _ => false,
+        };
+        (name, unpromoted, global_const_of_enum)
+    }
+
+    fn parse_case_statement(&mut self, allow_declarations: bool) -> Option<Statement> {
+        let mut top_level: Option<Statement> = None;
+        let mut colon;
+        let mut any_valid = false;
+        self.guard_warning_groups(&["implicit-fallthrough"]);
+        loop {
+            let case_place = self.consume();
+            let low = self.parse_case_expression();
+            if low.is_none()
+                && !self.skip_until(&[TokenKind::Colon, TokenKind::RightBrace], true, true)
+            {
+                return None;
+            }
+            let mut high = None;
+            let mut high_failed = false;
+            if let Some(ellipsis) = self.try_consume(TokenKind::Ellipsis) {
+                if self.language().at_least(CStandard::C2y) {
+                    self.diagnose("warn_c23_compat_case_range", ellipsis, Vec::new());
+                } else {
+                    self.diagnose("ext_c2y_case_range", ellipsis, Vec::new());
+                }
+                high = self.parse_case_expression();
+                if high.is_none() {
+                    high_failed = true;
+                    if !self.skip_until(&[TokenKind::Colon, TokenKind::RightBrace], true, true) {
+                        return None;
+                    }
+                }
+            }
+            if let Some(place) = self.try_consume(TokenKind::Colon) {
+                colon = place;
+            } else if let Some(place) = self.try_consume(TokenKind::Semi) {
+                self.diagnose(
+                    "err_expected_after",
+                    place,
+                    vec![Argument::text("'case'"), Argument::text("':'")],
+                );
+                colon = place;
+            } else {
+                let place = self.previous_end.unwrap_or(self.token.site);
+                self.diagnose(
+                    "err_expected_after",
+                    place,
+                    vec![Argument::text("'case'"), Argument::text("':'")],
+                );
+                colon = place;
+            }
+            let valid = self.act_on_case_statement(case_place, low, high, high_failed);
+            if valid {
+                any_valid = true;
+                if top_level.is_none() {
+                    top_level = Some(Statement::new(StatementKind::Other, case_place));
+                }
+            } else if top_level.is_none() && !self.is_keyword("case") {
+                return self.parse_statement(None);
+            }
+            if !self.is_keyword("case") {
+                break;
+            }
+        }
+        let substatement = if self.at(TokenKind::RightBrace) {
+            self.diagnose_label_at_end_of_compound_statement();
+            Some(Statement::null(colon))
+        } else {
+            self.parse_labeled_substatement(allow_declarations)
+        };
+        if any_valid {
+            let substatement = substatement.unwrap_or_else(|| Statement::null(colon));
+            self.diagnose_label_followed_by_declaration(&substatement);
+        }
+        top_level
+    }
+
+    fn act_on_case_statement(
+        &mut self,
+        case_place: Place,
+        low: Option<(Expression, Option<i128>)>,
+        high: Option<(Expression, Option<i128>)>,
+        high_failed: bool,
+    ) -> bool {
+        let in_switch = self
+            .function
+            .as_ref()
+            .is_some_and(|function| !function.switches.is_empty());
+        if !in_switch {
+            self.diagnose("err_case_not_in_switch", case_place, Vec::new());
+            return false;
+        }
+        let low_value = low.as_ref().and_then(|(_, value)| *value);
+        let high_value = high.as_ref().and_then(|(_, value)| *value);
+        if low_value.is_none() || high_failed || (high.is_some() && high_value.is_none()) {
+            if let Some(switch) = self
+                .function
+                .as_mut()
+                .and_then(|function| function.switches.last_mut())
+            {
+                switch.incomplete = true;
+            }
+            return false;
+        }
+        let (low_expression, _) = low.unwrap();
+        let (low_name, low_unpromoted, low_global) = self.case_entry_details(&low_expression);
+        let (high_start, high_place, high_type, high_unpromoted, high_global) = match &high {
+            Some((expression, _)) => {
+                let (_, unpromoted, global) = self.case_entry_details(expression);
+                (
+                    expression.start,
+                    expression.place,
+                    Some(expression.ty.clone()),
+                    unpromoted,
+                    global,
+                )
+            }
+            None => (Place::default(), Place::default(), None, (0, false), false),
+        };
+        let entry = CaseEntry {
+            low: low_value.unwrap(),
+            high: high_value,
+            low_start: low_expression.start,
+            low_place: low_expression.place,
+            high_start,
+            high_place,
+            low_name,
+            low_type: low_expression.ty.clone(),
+            high_type,
+            low_unpromoted,
+            high_unpromoted,
+            low_global_const_of_enum: low_global,
+            high_global_const_of_enum: high_global,
+            case_place,
+        };
+        let (switch_reachability, constant, nested_in_loop) = {
+            let function = self.function.as_ref().unwrap();
+            let switch = function.switches.last().unwrap();
+            let nested = function
+                .targets
+                .iter()
+                .rev()
+                .take_while(|target| target.is_loop)
+                .count()
+                > 0;
+            (switch.reachability, switch.constant, nested)
+        };
+        let incoming = match constant {
+            Some(value) => {
+                let matches = match entry.high {
+                    Some(high) => entry.low <= value && value <= high,
+                    None => entry.low == value,
+                };
+                if matches {
+                    switch_reachability
+                } else {
+                    Reachability::Unreachable
+                }
+            }
+            None => switch_reachability,
+        };
+        self.raise_reachability_at_label(incoming, nested_in_loop);
+        if let Some(switch) = self
+            .function
+            .as_mut()
+            .and_then(|function| function.switches.last_mut())
+        {
+            switch.cases.push(entry);
+        }
+        true
+    }
+
+    fn parse_default_statement(&mut self, allow_declarations: bool) -> Option<Statement> {
+        self.guard_warning_groups(&["implicit-fallthrough"]);
+        let default_place = self.consume();
+        let colon = if let Some(place) = self.try_consume(TokenKind::Colon) {
+            place
+        } else if let Some(place) = self.try_consume(TokenKind::Semi) {
+            self.diagnose(
+                "err_expected_after",
+                place,
+                vec![Argument::text("'default'"), Argument::text("':'")],
+            );
+            place
+        } else {
+            let place = self.previous_end.unwrap_or(self.token.site);
+            self.diagnose(
+                "err_expected_after",
+                place,
+                vec![Argument::text("'default'"), Argument::text("':'")],
+            );
+            place
+        };
+        let in_switch = self
+            .function
+            .as_ref()
+            .is_some_and(|function| !function.switches.is_empty());
+        if in_switch {
+            let (switch_reachability, constant, nested_in_loop) = {
+                let function = self.function.as_ref().unwrap();
+                let switch = function.switches.last().unwrap();
+                let nested = function
+                    .targets
+                    .iter()
+                    .rev()
+                    .take_while(|target| target.is_loop)
+                    .count()
+                    > 0;
+                (switch.reachability, switch.constant, nested)
+            };
+            let incoming = if constant.is_some() && switch_reachability != Reachability::Unreachable
+            {
+                Reachability::Unknown
+            } else {
+                switch_reachability
+            };
+            self.raise_reachability_at_label(incoming, nested_in_loop);
+        }
+        let substatement = if self.at(TokenKind::RightBrace) {
+            self.diagnose_label_at_end_of_compound_statement();
+            Some(Statement::null(colon))
+        } else {
+            self.parse_labeled_substatement(allow_declarations)
+        };
+        let substatement = substatement.unwrap_or_else(|| Statement::null(colon));
+        self.diagnose_label_followed_by_declaration(&substatement);
+        if !in_switch {
+            self.diagnose("err_default_not_in_switch", default_place, Vec::new());
+            return Some(substatement);
+        }
+        if let Some(switch) = self
+            .function
+            .as_mut()
+            .and_then(|function| function.switches.last_mut())
+        {
+            switch.defaults.push(default_place);
+        }
+        Some(Statement::new(StatementKind::Other, default_place))
+    }
+
+    fn parse_parenthesized_condition(
+        &mut self,
+        keyword_place: Place,
+        kind: ConditionKind,
+    ) -> Option<(Option<Expression>, Place, Place)> {
+        let open = self.consume();
+        let start = self.token.site;
+        let condition = self.parse_condition(keyword_place, kind);
+        if condition.is_none() && !self.at(TokenKind::RightParen) {
+            self.skip_until(&[TokenKind::Semi], false, false);
+            if !self.at(TokenKind::RightParen) {
+                return None;
+            }
+        }
+        let _ = start;
+        if self.at(TokenKind::Comma) {
+            let place = self.token.site;
+            self.diagnose("err_c2y_multiple_declarations", place, Vec::new());
+            while !self.at(TokenKind::RightParen) && !self.at(TokenKind::EndOfFile) {
+                self.consume();
+            }
+        }
+        let close = self.token.site;
+        self.expect_closing(TokenKind::RightParen, open);
+        while self.at(TokenKind::RightParen) {
+            let place = self.token.site;
+            self.diagnose("err_extraneous_rparen_in_condition", place, Vec::new());
+            self.consume();
+        }
+        Some((condition, open, close))
+    }
+
+    fn parse_condition(&mut self, keyword_place: Place, kind: ConditionKind) -> Option<Expression> {
+        let saved = self.save_balance();
+        let result = self.parse_condition_inner(keyword_place, kind);
+        self.restore_balance(saved);
+        result
+    }
+
+    fn parse_condition_inner(
+        &mut self,
+        keyword_place: Place,
+        kind: ConditionKind,
+    ) -> Option<Expression> {
+        if self.is_keyword("__extension__") {
+            self.unsupported("__extension__ in a condition");
+            return None;
+        }
+        if self.is_declaration_specifier() {
+            self.unsupported("declaration in a condition");
+            return None;
+        }
+        if self.at(TokenKind::Semi) {
+            self.unsupported("empty first clause in a condition");
+            return None;
+        }
+        let expression = self.parse_expression()?;
+        if self.at(TokenKind::Semi) {
+            self.unsupported("init statement in a condition");
+            return None;
+        }
+        self.act_on_condition(keyword_place, expression, kind)
+    }
+
+    fn act_on_condition(
+        &mut self,
+        keyword_place: Place,
+        expression: Expression,
+        kind: ConditionKind,
+    ) -> Option<Expression> {
+        if expression.is_error() {
+            return Some(expression);
+        }
+        let checked = match kind {
+            ConditionKind::Boolean => self.check_boolean_condition(keyword_place, expression),
+            ConditionKind::Switch => self.check_switch_condition(keyword_place, expression),
+        };
+        match checked {
+            Some(checked) => {
+                self.check_completed_expression(&checked);
+                Some(checked)
+            }
+            None => Some(Expression::error(keyword_place)),
+        }
+    }
+
+    fn check_boolean_condition(
+        &mut self,
+        place: Place,
+        expression: Expression,
+    ) -> Option<Expression> {
+        self.diagnose_assignment_as_condition(&expression);
+        if let ExpressionKind::Parenthesized(_) = expression.kind {
+            self.diagnose_equality_with_extra_parentheses(&expression);
+        }
+        let converted = self.default_function_array_lvalue_conversion(expression);
+        if !converted.ty.is_scalar() {
+            let ty = converted.ty.clone();
+            self.diagnose(
+                "err_typecheck_statement_requires_scalar",
+                place,
+                vec![Argument::Type(ty)],
+            );
+            return None;
+        }
+        self.check_bool_like_conversion(&converted);
+        Some(converted)
+    }
+
+    fn diagnose_assignment_as_condition(&mut self, expression: &Expression) {
+        let ExpressionKind::Binary { operator, .. } = &expression.kind else {
+            return;
+        };
+        if !matches!(
+            operator,
+            BinaryOperator::Assign | BinaryOperator::BitOrAssign
+        ) {
+            return;
+        }
+        let place = expression.place;
+        self.diagnose("warn_condition_is_assignment", place, Vec::new());
+        self.diagnose("note_condition_assign_silence", place, Vec::new());
+        if *operator == BinaryOperator::BitOrAssign {
+            self.diagnose("note_condition_or_assign_to_comparison", place, Vec::new());
+        } else {
+            self.diagnose("note_condition_assign_to_comparison", place, Vec::new());
+        }
+    }
+
+    fn diagnose_equality_with_extra_parentheses(&mut self, parenthesized: &Expression) {
+        if self.is_macro_place(parenthesized.start) {
+            return;
+        }
+        let inner = parenthesized.ignore_parentheses();
+        let ExpressionKind::Binary {
+            operator: BinaryOperator::Equal,
+            left,
+            ..
+        } = &inner.kind
+        else {
+            return;
+        };
+        if !self.is_modifiable_lvalue(left.ignore_parentheses_and_implicit_casts()) {
+            return;
+        }
+        let place = inner.place;
+        self.diagnose("warn_equality_with_extra_parens", place, Vec::new());
+        self.diagnose("note_equality_comparison_silence", place, Vec::new());
+        self.diagnose("note_equality_comparison_to_assign", place, Vec::new());
+    }
+
+    fn is_modifiable_lvalue(&self, expression: &Expression) -> bool {
+        if !expression.is_lvalue() {
+            return false;
+        }
+        let ty = &expression.ty;
+        if ty.is_const() || ty.is_array() || ty.is_function() || ty.is_void() {
+            return false;
+        }
+        if !self.is_complete_type(ty) {
+            return false;
+        }
+        if let Some((tag, _)) = ty.canonical().tag() {
+            if ty.is_record() && self.record_has_const_fields(tag) {
+                return false;
+            }
+        }
+        true
+    }
+
+    fn check_bool_like_conversion(&mut self, expression: &Expression) {
+        let inner = expression.ignore_parentheses_and_implicit_casts();
+        if inner.ty.is_atomic() {
+            return;
+        }
+        let negated = match &inner.kind {
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Minus,
+                operand,
+            } => matches!(operand.kind, ExpressionKind::Floating { .. }),
+            _ => false,
+        };
+        if matches!(inner.kind, ExpressionKind::Floating { .. }) || negated {
+            let value = match &inner.kind {
+                ExpressionKind::Floating { value } => *value,
+                ExpressionKind::Unary { operand, .. } => match operand.kind {
+                    ExpressionKind::Floating { value } => -value,
+                    _ => 0.0,
+                },
+                _ => 0.0,
+            };
+            if value == 0.0 || value == 1.0 {
+                return;
+            }
+            let source = inner.ty.clone();
+            let bool_type = QualifiedType::new(TypeNode::Builtin(BuiltinType::Bool));
+            let text = format_floating_value(
+                value,
+                source.canonical().builtin_kind() == Some(BuiltinType::Float),
+            );
+            self.diagnose(
+                "warn_impcast_literal_float_to_integer",
+                inner.place,
+                vec![
+                    Argument::Type(source),
+                    Argument::Type(bool_type),
+                    Argument::Text(text),
+                    Argument::text("true"),
+                ],
+            );
+            return;
+        }
+        if inner.ty.is_floating() {
+            if !self.message_ignored("warn_impcast_float_integer", inner.place) {
+                self.unsupported("floating to boolean conversion warning");
+            }
+            return;
+        }
+        if matches!(inner.kind, ExpressionKind::String { .. }) {
+            if !self.message_ignored("warn_impcast_string_literal_to_bool", inner.place) {
+                self.unsupported("string literal to boolean conversion warning");
+            }
+            return;
+        }
+        self.diagnose_always_non_null_pointer(inner);
+    }
+
+    fn diagnose_always_non_null_pointer(&mut self, expression: &Expression) {
+        let mut target = expression.ignore_implicit_casts();
+        let mut address_of = false;
+        if let ExpressionKind::Unary { operator, operand } = &target.ignore_parentheses().kind {
+            if *operator != UnaryOperator::AddressOf {
+                return;
+            }
+            address_of = true;
+            target = operand;
+        }
+        let declaration_type = match &target.kind {
+            ExpressionKind::Reference { declaration } => {
+                let declaration = &self.declarations[*declaration];
+                if !matches!(
+                    declaration.kind,
+                    DeclarationKind::Variable
+                        | DeclarationKind::Parameter
+                        | DeclarationKind::Function
+                ) {
+                    return;
+                }
+                declaration.ty.clone()
+            }
+            ExpressionKind::Member { tag, field, .. } => self.tags[*tag].fields[*field].ty.clone(),
+            _ => return,
+        };
+        if let ExpressionKind::Reference { declaration } = &target.kind {
+            if self.declarations[*declaration].kind == DeclarationKind::Parameter {
+                let _ = declaration;
+            }
+        }
+        let is_array = declaration_type.is_array();
+        let is_function = declaration_type.is_function();
+        if address_of && is_function {
+            return;
+        }
+        if !address_of && !is_function && !is_array {
+            return;
+        }
+        if self.is_macro_place(target.place) {
+            self.unsupported("pointer to boolean warning inside a macro expansion");
+            return;
+        }
+        let printed = self.print_expression(target);
+        let kind = if address_of {
+            0
+        } else if is_function {
+            1
+        } else {
+            2
+        };
+        self.diagnose(
+            "warn_impcast_pointer_to_bool",
+            target.place,
+            vec![
+                Argument::number(kind),
+                Argument::Text(printed),
+                Argument::number(1),
+            ],
+        );
+        if is_function {
+            self.diagnose("note_function_warning_silence", target.place, Vec::new());
+            if let Some(result) = declaration_type.function_result() {
+                if result.canonical().builtin_kind() == Some(BuiltinType::Bool) {
+                    self.unsupported("function to function call note");
+                }
+            }
+        }
+    }
+
+    fn check_switch_condition(
+        &mut self,
+        place: Place,
+        expression: Expression,
+    ) -> Option<Expression> {
+        let converted = self.default_function_array_lvalue_conversion(expression);
+        if !converted.ty.is_integer() && !converted.ty.is_enumeration() {
+            if converted.ty.is_record() && !self.is_complete_type(&converted.ty) {
+                self.unsupported("switch on incomplete type");
+                return None;
+            }
+            let ty = converted.ty.clone();
+            self.diagnose(
+                "err_typecheck_statement_requires_integer",
+                place,
+                vec![Argument::Type(ty)],
+            );
+            return None;
+        }
+        Some(self.usual_unary_conversions(converted))
+    }
+
+    fn branch_value(&self, expression: &Expression) -> BranchValue {
+        let inner = expression.ignore_parentheses();
+        if let ExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } = &inner.kind
+        {
+            match operator {
+                BinaryOperator::Comma => return self.branch_value(right),
+                BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                    let is_or = *operator == BinaryOperator::LogicalOr;
+                    let left_value = self.branch_value(left);
+                    let right_value = self.branch_value(right);
+                    if left_value == BranchValue::Uncertain || right_value == BranchValue::Uncertain
+                    {
+                        return BranchValue::Uncertain;
+                    }
+                    if let BranchValue::Constant(value) = left_value {
+                        if value == is_or {
+                            return BranchValue::Constant(value);
+                        }
+                        if let BranchValue::Constant(right) = right_value {
+                            return BranchValue::Constant(if is_or {
+                                value || right
+                            } else {
+                                value && right
+                            });
+                        }
+                        return BranchValue::NotConstant;
+                    }
+                    if let BranchValue::Constant(value) = right_value {
+                        if value == is_or {
+                            return BranchValue::Constant(value);
+                        }
+                        return BranchValue::NotConstant;
+                    }
+                    if is_comparison_with_constant(left) && is_comparison_with_constant(right) {
+                        return BranchValue::Uncertain;
+                    }
+                    return BranchValue::NotConstant;
+                }
+                BinaryOperator::Equal | BinaryOperator::NotEqual => {
+                    if is_bitwise_with_constant(left) || is_bitwise_with_constant(right) {
+                        return BranchValue::Uncertain;
+                    }
+                }
+                BinaryOperator::BitOr | BinaryOperator::BitAnd => {
+                    let mut state = EvaluationState::default();
+                    let constant_side = |side: &Expression, state: &mut EvaluationState| match self
+                        .evaluate(side, state)
+                    {
+                        Some(ConstantValue::Integer(value)) => Some(value),
+                        _ => None,
+                    };
+                    for side in [left, right] {
+                        if let Some(value) = constant_side(side, &mut state) {
+                            if *operator == BinaryOperator::BitOr && value != 0 {
+                                return BranchValue::Constant(true);
+                            }
+                            if *operator == BinaryOperator::BitAnd && value == 0 {
+                                return BranchValue::Constant(false);
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+        let mut state = EvaluationState::default();
+        match self.evaluate(inner, &mut state) {
+            Some(ConstantValue::Integer(value)) => BranchValue::Constant(value != 0),
+            Some(ConstantValue::Floating(value)) => BranchValue::Constant(value != 0.0),
+            Some(ConstantValue::Address {
+                base: AddressBase::Null,
+                offset,
+            }) => BranchValue::Constant(offset != 0),
+            Some(ConstantValue::Address { .. }) => BranchValue::Constant(true),
+            None => {
+                if self.references_constant_variable(inner) || contains_comma_or_conditional(inner)
+                {
+                    BranchValue::Uncertain
+                } else {
+                    BranchValue::NotConstant
+                }
+            }
+        }
+    }
+
+    fn references_constant_variable(&self, expression: &Expression) -> bool {
+        match &expression.kind {
+            ExpressionKind::Reference { declaration } => {
+                let declaration = &self.declarations[*declaration];
+                matches!(
+                    declaration.kind,
+                    DeclarationKind::Variable | DeclarationKind::Parameter
+                ) && declaration.ty.is_const()
+                    && !declaration.ty.is_volatile()
+            }
+            ExpressionKind::Parenthesized(inner) => self.references_constant_variable(inner),
+            ExpressionKind::Unary { operand, .. } => self.references_constant_variable(operand),
+            ExpressionKind::Binary { left, right, .. } => {
+                self.references_constant_variable(left) || self.references_constant_variable(right)
+            }
+            ExpressionKind::Cast { operand, .. } => self.references_constant_variable(operand),
+            ExpressionKind::Conditional {
+                condition,
+                then,
+                otherwise,
+            } => {
+                self.references_constant_variable(condition)
+                    || then
+                        .as_ref()
+                        .is_some_and(|then| self.references_constant_variable(then))
+                    || self.references_constant_variable(otherwise)
+            }
+            ExpressionKind::Member { base, .. } => self.references_constant_variable(base),
+            ExpressionKind::Subscript { base, index } => {
+                self.references_constant_variable(base) || self.references_constant_variable(index)
+            }
+            _ => false,
+        }
+    }
+
+    pub fn conditional_operand_pruning(
+        &self,
+        condition: &Expression,
+        operator: BinaryOperator,
+        then_arm: bool,
+    ) -> Option<bool> {
+        self.function.as_ref()?;
+        let value = self.branch_value(condition);
+        match (operator, value) {
+            (BinaryOperator::LogicalAnd, BranchValue::Constant(value)) => Some(!value),
+            (BinaryOperator::LogicalOr, BranchValue::Constant(value)) => Some(value),
+            (BinaryOperator::Comma, BranchValue::Constant(value)) => {
+                Some(if then_arm { !value } else { value })
+            }
+            (_, BranchValue::Uncertain) => {
+                if self.current_reachability() != Reachability::Unreachable {
+                    None
+                } else {
+                    Some(false)
+                }
+            }
+            _ => Some(false),
+        }
+    }
+
+    fn reachability_after_condition(&self, value: BranchValue, taken: bool) -> Reachability {
+        let current = self.current_reachability();
+        if current == Reachability::Unreachable {
+            return Reachability::Unreachable;
+        }
+        match value {
+            BranchValue::Constant(constant) => {
+                if constant == taken {
+                    current
+                } else {
+                    Reachability::Unreachable
+                }
+            }
+            BranchValue::NotConstant => current,
+            BranchValue::Uncertain => Reachability::Unknown,
+        }
+    }
+
+    fn diagnose_empty_statement_body(
+        &mut self,
+        statement_place: Place,
+        body: &Option<Statement>,
+        name: &str,
+    ) {
+        let Some(Statement {
+            kind:
+                StatementKind::Null {
+                    semicolon,
+                    leading_empty_macro,
+                },
+            ..
+        }) = body
+        else {
+            return;
+        };
+        if *leading_empty_macro {
+            return;
+        }
+        if self.presumed_line(statement_place) != self.spelling_line(*semicolon) {
+            return;
+        }
+        let semicolon = *semicolon;
+        self.diagnose(name, semicolon, Vec::new());
+        self.diagnose("note_empty_body_on_separate_line", semicolon, Vec::new());
+    }
+
+    fn check_misleading_indentation(&mut self) {
+        let place = self.token.site;
+        if !self.message_ignored("warn_misleading_indentation", place) {
+            self.unsupported("misleading indentation warnings");
+        }
+    }
+
+    fn check_comma_in_condition(&mut self, condition: &Option<Expression>) {
+        if let Some(condition) = condition {
+            if contains_comma(condition)
+                && !self.message_ignored("warn_comma_operator", condition.place)
+            {
+                self.unsupported("comma operator warnings");
+            }
+        }
+    }
+
+    fn parse_secondary_statement(
+        &mut self,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        let braced = self.at(TokenKind::LeftBrace);
+        let c99 = self.language().at_least(CStandard::C99);
+        if c99 && !braced {
+            self.push_scope(SCOPE_BLOCK);
+        }
+        let body = self.parse_statement(trailing_else);
+        if c99 && !braced {
+            if self.unsupported.is_none() {
+                self.check_unused_declarations_in_scope();
+            }
+            self.pop_scope();
+        }
+        body
+    }
+
+    fn parse_if_statement(
+        &mut self,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        let if_place = self.consume();
+        if self.at(TokenKind::Exclaim) || !self.at(TokenKind::LeftParen) {
+            if self.at(TokenKind::Exclaim) && self.peek_keyword(1) == Some("consteval") {
+                self.unsupported("consteval if");
+                return None;
+            }
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_lparen_after",
+                place,
+                vec![Argument::text("if")],
+            );
+            self.skip_until(&[TokenKind::Semi], false, false);
+            return None;
+        }
+        let c99 = self.language().at_least(CStandard::C99);
+        if c99 {
+            self.push_scope(SCOPE_BLOCK | SCOPE_CONTROL);
+        }
+        let parsed = self.parse_parenthesized_condition(if_place, ConditionKind::Boolean);
+        let Some((condition, _open, close)) = parsed else {
+            if c99 {
+                self.pop_scope();
+            }
+            return None;
+        };
+        self.apply_noreturn_calls();
+        let value = condition
+            .as_ref()
+            .map(|condition| {
+                if condition.is_error() {
+                    BranchValue::NotConstant
+                } else {
+                    self.branch_value(condition)
+                }
+            })
+            .unwrap_or(BranchValue::NotConstant);
+        let entry = self.current_reachability();
+        self.set_reachability(self.reachability_after_condition(value, true));
+        let mut inner_trailing_else = None;
+        let then_start = self.token.site;
+        let then_statement = self.parse_secondary_statement(Some(&mut inner_trailing_else));
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if !self.is_keyword("else") {
+            self.check_misleading_indentation();
+        }
+        let after_then = self.current_reachability();
+        let mut else_statement = None;
+        let mut has_else = false;
+        self.set_reachability(entry);
+        let else_entry = self.reachability_after_condition(value, false);
+        if self.is_keyword("else") {
+            if let Some(trailing) = trailing_else {
+                *trailing = Some(self.token.site);
+            }
+            has_else = true;
+            self.consume();
+            self.set_reachability(else_entry);
+            else_statement = self.parse_secondary_statement(None);
+            if self.unsupported.is_some() {
+                return None;
+            }
+            if else_statement.is_some() {
+                self.check_misleading_indentation();
+            }
+            let after_else = self.current_reachability();
+            self.set_reachability(after_then.join(after_else));
+        } else {
+            if let Some(place) = inner_trailing_else {
+                self.diagnose("warn_dangling_else", place, Vec::new());
+            }
+            self.set_reachability(after_then.join(else_entry));
+        }
+        if c99 {
+            if self.unsupported.is_none() {
+                self.check_unused_declarations_in_scope();
+            }
+            self.pop_scope();
+        }
+        if (then_statement.is_none() && (!has_else || else_statement.is_none()))
+            || (then_statement.is_none() && !has_else)
+        {
+            return None;
+        }
+        if c99 {
+            self.check_comma_in_condition(&condition);
+        }
+        if !has_else {
+            let body = then_statement
+                .clone()
+                .or_else(|| Some(Statement::null(then_start)));
+            self.diagnose_empty_statement_body(close, &body, "warn_empty_if_body");
+        }
+        Some(Statement::new(StatementKind::Other, if_place))
+    }
+
+    fn parse_switch_statement(
+        &mut self,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        let switch_place = self.consume();
+        if !self.at(TokenKind::LeftParen) {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_lparen_after",
+                place,
+                vec![Argument::text("switch")],
+            );
+            self.skip_until(&[TokenKind::Semi], false, false);
+            return None;
+        }
+        let c99 = self.language().at_least(CStandard::C99);
+        self.push_scope(if c99 {
+            SCOPE_SWITCH | SCOPE_BLOCK | SCOPE_CONTROL
+        } else {
+            SCOPE_SWITCH
+        });
+        let parsed = self.parse_parenthesized_condition(switch_place, ConditionKind::Switch);
+        let Some((condition, _open, close)) = parsed else {
+            self.pop_scope();
+            return None;
+        };
+        self.apply_noreturn_calls();
+        let condition = condition.unwrap_or_else(|| Expression::error(close));
+        if !condition.is_error() && self.is_known_boolean(&condition) {
+            self.diagnose("warn_bool_switch_condition", switch_place, Vec::new());
+        }
+        let constant = if condition.is_error() {
+            None
+        } else {
+            let mut state = EvaluationState::default();
+            match self.evaluate(&condition, &mut state) {
+                Some(ConstantValue::Integer(value)) => Some(value),
+                _ => None,
+            }
+        };
+        if !condition.is_error()
+            && constant.is_none()
+            && self.references_constant_variable(&condition)
+        {
+            self.unsupported("switch on a possibly constant variable");
+            return None;
+        }
+        let entry = self.current_reachability();
+        if let Some(function) = self.function.as_mut() {
+            function.branch_into_scope = true;
+            function.switches.push(SwitchState {
+                place: switch_place,
+                condition: Some(condition.clone()),
+                condition_end: close,
+                cases: Vec::new(),
+                defaults: Vec::new(),
+                incomplete: false,
+                constant,
+                reachability: entry,
+            });
+            function.targets.push(JumpTarget {
+                is_loop: false,
+                break_reachability: Reachability::Unreachable,
+                continue_reachability: Reachability::Unreachable,
+            });
+            function.reachability = Reachability::Unreachable;
+        }
+        let body = self.parse_secondary_statement(trailing_else);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        self.pop_scope();
+        let end = self.current_reachability();
+        let (switch, target) = {
+            let function = self.function.as_mut()?;
+            (function.switches.pop()?, function.targets.pop()?)
+        };
+        self.act_on_finish_switch_statement(switch, body, end, target, entry)
+    }
+
+    fn is_known_boolean(&self, expression: &Expression) -> bool {
+        let inner = expression.ignore_parentheses();
+        if inner.ty.is_bool() {
+            return true;
+        }
+        if !inner.ty.is_integer() && !inner.ty.is_enumeration() {
+            return false;
+        }
+        match &inner.kind {
+            ExpressionKind::Unary {
+                operator: UnaryOperator::Plus,
+                operand,
+            } => self.is_known_boolean(operand),
+            ExpressionKind::Unary {
+                operator: UnaryOperator::LogicalNot,
+                ..
+            } => true,
+            ExpressionKind::Unary { .. } => false,
+            ExpressionKind::Cast {
+                operand,
+                explicit: false,
+                ..
+            } => self.is_known_boolean(operand),
+            ExpressionKind::Binary {
+                operator,
+                left,
+                right,
+            } => match operator {
+                BinaryOperator::Less
+                | BinaryOperator::Greater
+                | BinaryOperator::LessEqual
+                | BinaryOperator::GreaterEqual
+                | BinaryOperator::Equal
+                | BinaryOperator::NotEqual
+                | BinaryOperator::LogicalAnd
+                | BinaryOperator::LogicalOr => true,
+                BinaryOperator::BitAnd | BinaryOperator::BitXor | BinaryOperator::BitOr => {
+                    self.is_known_boolean(left) && self.is_known_boolean(right)
+                }
+                BinaryOperator::Comma | BinaryOperator::Assign => self.is_known_boolean(right),
+                _ => false,
+            },
+            ExpressionKind::Conditional {
+                then: Some(then),
+                otherwise,
+                ..
+            } => self.is_known_boolean(then) && self.is_known_boolean(otherwise),
+            ExpressionKind::Member { tag, field, .. } => {
+                let field = &self.tags[*tag].fields[*field];
+                field.bit_width == Some(1) && self.is_unsigned_integer(&field.ty)
+            }
+            _ => false,
+        }
+    }
+
+    fn act_on_finish_switch_statement(
+        &mut self,
+        switch: SwitchState,
+        body: Option<Statement>,
+        end: Reachability,
+        target: JumpTarget,
+        entry: Reachability,
+    ) -> Option<Statement> {
+        let Some(body) = body else {
+            self.set_reachability(entry);
+            return None;
+        };
+        let condition = switch.condition.clone()?;
+        if condition.is_error() {
+            self.diagnose_empty_statement_body(
+                switch.condition_end,
+                &Some(body),
+                "warn_empty_switch_body",
+            );
+            self.set_reachability(end.join(target.break_reachability).join(entry));
+            return Some(Statement::new(StatementKind::Other, switch.place));
+        }
+        let condition_type = condition.ty.clone();
+        let before_promotion = strip_integral_casts(&condition);
+        let unpromoted_type = before_promotion.ty.clone();
+        let condition_width = self.integer_width(&condition_type);
+        let condition_signed = self.is_signed_integer(&condition_type)
+            || (condition_type.is_enumeration() && self.is_signed_integer(&condition_type));
+        let unpromoted_width = self.integer_width(&unpromoted_type);
+        let unpromoted_signed = self.is_signed_integer(&unpromoted_type);
+        let mut erroneous = false;
+        let mut default_place: Option<Place> = None;
+        for place in switch.defaults.iter().rev() {
+            if let Some(later) = default_place {
+                self.diagnose("err_multiple_default_labels_defined", *place, Vec::new());
+                self.diagnose("note_duplicate_case_prev", later, Vec::new());
+                erroneous = true;
+            }
+            default_place = Some(*place);
+        }
+        let mut values: Vec<(i128, usize)> = Vec::new();
+        let mut ranges: Vec<(i128, usize)> = Vec::new();
+        for (index, case) in switch.cases.iter().enumerate().rev() {
+            self.check_case_value(
+                case.low_start,
+                case.low,
+                case.low_unpromoted,
+                unpromoted_width,
+                unpromoted_signed,
+            );
+            self.check_enum_types_in_switch(&unpromoted_type, &case.low_type, case.low_place);
+            let low = adjust_integer(case.low, condition_width, condition_signed);
+            if case.high.is_some() {
+                ranges.push((low, index));
+            } else {
+                values.push((low, index));
+            }
+        }
+        let has_constant = default_place.is_none() && switch.constant.is_some();
+        let constant_value = switch
+            .constant
+            .map(|value| adjust_integer(value, condition_width, condition_signed));
+        if default_place.is_none() && !self.message_ignored("warn_switch_default", switch.place) {
+            self.diagnose("warn_switch_default", switch.place, Vec::new());
+        }
+        let mut check_constant = has_constant;
+        values.sort_by(|left, right| {
+            left.0.cmp(&right.0).then_with(|| {
+                let left_place = switch.cases[left.1].case_place;
+                let right_place = switch.cases[right.1].case_place;
+                (left_place.buffer, left_place.offset)
+                    .cmp(&(right_place.buffer, right_place.offset))
+            })
+        });
+        for index in 0..values.len() {
+            if check_constant && Some(values[index].0) == constant_value {
+                check_constant = false;
+            }
+            if index != 0 && values[index].0 == values[index - 1].0 {
+                let previous = &switch.cases[values[index - 1].1];
+                let current = &switch.cases[values[index].1];
+                let value_text = values[index - 1].0.to_string();
+                let previous_text = previous
+                    .low_name
+                    .as_ref()
+                    .map(|name| String::from_utf8_lossy(name).into_owned());
+                let current_text = current
+                    .low_name
+                    .as_ref()
+                    .map(|name| String::from_utf8_lossy(name).into_owned());
+                if previous_text == current_text {
+                    self.diagnose(
+                        "err_duplicate_case",
+                        current.low_start,
+                        vec![Argument::Text(previous_text.unwrap_or(value_text))],
+                    );
+                } else {
+                    self.diagnose(
+                        "err_duplicate_case_differing_expr",
+                        current.low_start,
+                        vec![
+                            Argument::Text(previous_text.unwrap_or_else(|| value_text.clone())),
+                            Argument::Text(current_text.unwrap_or_else(|| value_text.clone())),
+                            Argument::Text(value_text),
+                        ],
+                    );
+                }
+                self.diagnose("note_duplicate_case_prev", previous.low_start, Vec::new());
+                erroneous = true;
+            }
+        }
+        let mut high_values: Vec<i128> = Vec::new();
+        if !ranges.is_empty() {
+            ranges.sort_by_key(|left| left.0);
+            let mut index = 0;
+            while index < ranges.len() {
+                let (low, case_index) = ranges[index];
+                let case = switch.cases[case_index].clone();
+                let high_raw = case.high.unwrap_or(case.low);
+                self.check_case_value(
+                    case.high_start,
+                    high_raw,
+                    case.high_unpromoted,
+                    unpromoted_width,
+                    unpromoted_signed,
+                );
+                let high = adjust_integer(high_raw, condition_width, condition_signed);
+                if low > high {
+                    self.diagnose("warn_case_empty_range", case.low_start, Vec::new());
+                    ranges.remove(index);
+                    continue;
+                }
+                if check_constant {
+                    if let Some(value) = constant_value {
+                        if low <= value && value <= high {
+                            check_constant = false;
+                        }
+                    }
+                }
+                high_values.push(high);
+                index += 1;
+            }
+            for index in 0..ranges.len() {
+                let (low, case_index) = ranges[index];
+                let high = high_values[index];
+                let mut overlap: Option<(i128, usize)> = None;
+                let lower = values.partition_point(|entry| entry.0 < low);
+                if lower < values.len() && values[lower].0 < high {
+                    overlap = Some(values[lower]);
+                }
+                let upper = lower + values[lower..].partition_point(|entry| entry.0 <= high);
+                if upper > 0 && values[upper - 1].0 >= low {
+                    overlap = Some(values[upper - 1]);
+                }
+                if index > 0 && low <= high_values[index - 1] {
+                    overlap = Some((high_values[index - 1], ranges[index - 1].1));
+                }
+                if let Some((value, other)) = overlap {
+                    let place = switch.cases[case_index].low_start;
+                    self.diagnose(
+                        "err_duplicate_case",
+                        place,
+                        vec![Argument::Text(value.to_string())],
+                    );
+                    let other_place = switch.cases[other].low_start;
+                    self.diagnose("note_duplicate_case_prev", other_place, Vec::new());
+                    erroneous = true;
+                }
+            }
+        }
+        if !erroneous && !switch.incomplete && check_constant {
+            if let Some(value) = constant_value {
+                self.diagnose(
+                    "warn_missing_case_for_condition",
+                    condition.place,
+                    vec![Argument::Text(value.to_string())],
+                );
+            }
+        }
+        let mut all_enum_cases_covered = false;
+        if !erroneous && !switch.incomplete && !has_constant && unpromoted_type.is_enumeration() {
+            if let Some((tag, _)) = unpromoted_type.canonical().tag() {
+                if self.tags[tag].complete && !self.tags[tag].enumerators.is_empty() {
+                    all_enum_cases_covered = self.check_enum_switch_coverage(
+                        tag,
+                        &switch,
+                        &values,
+                        &ranges,
+                        &high_values,
+                        &unpromoted_type,
+                        condition_width,
+                        condition_signed,
+                        default_place,
+                        &condition,
+                    );
+                }
+            }
+        }
+        self.diagnose_empty_statement_body(
+            switch.condition_end,
+            &Some(body),
+            "warn_empty_switch_body",
+        );
+        let implicit_default = if default_place.is_some() {
+            Reachability::Unreachable
+        } else if let Some(value) = constant_value {
+            let matched = values.iter().any(|entry| entry.0 == value)
+                || ranges
+                    .iter()
+                    .zip(high_values.iter())
+                    .any(|(range, high)| range.0 <= value && value <= *high);
+            if matched {
+                Reachability::Unreachable
+            } else {
+                entry
+            }
+        } else if all_enum_cases_covered {
+            Reachability::Unreachable
+        } else {
+            entry
+        };
+        self.set_reachability(end.join(target.break_reachability).join(implicit_default));
+        if erroneous {
+            return None;
+        }
+        Some(Statement::new(StatementKind::Other, switch.place))
+    }
+
+    fn check_case_value(
+        &mut self,
+        place: Place,
+        value: i128,
+        value_type: (u32, bool),
+        unpromoted_width: u32,
+        unpromoted_signed: bool,
+    ) {
+        let (width, signed) = value_type;
+        if unpromoted_width < width {
+            let converted = adjust_integer(
+                adjust_integer(value, unpromoted_width, unpromoted_signed),
+                width,
+                signed,
+            );
+            let original = adjust_integer(value, width, signed);
+            if converted != original {
+                self.diagnose(
+                    "warn_case_value_overflow",
+                    place,
+                    vec![
+                        Argument::Text(original.to_string()),
+                        Argument::Text(converted.to_string()),
+                    ],
+                );
+            }
+        }
+    }
+
+    fn check_enum_types_in_switch(
+        &mut self,
+        condition_type: &QualifiedType,
+        case_type: &QualifiedType,
+        place: Place,
+    ) {
+        let (Some((condition_tag, _)), Some((case_tag, _))) = (
+            condition_type.canonical().tag(),
+            case_type.canonical().tag(),
+        ) else {
+            return;
+        };
+        if !condition_type.is_enumeration() || !case_type.is_enumeration() {
+            return;
+        }
+        if !self.enum_has_name(condition_tag) || !self.enum_has_name(case_tag) {
+            return;
+        }
+        if condition_type.canonical().unqualified() == case_type.canonical().unqualified() {
+            return;
+        }
+        self.diagnose(
+            "warn_comparison_of_mixed_enum_types_switch",
+            place,
+            vec![
+                Argument::Type(condition_type.clone()),
+                Argument::Type(case_type.clone()),
+            ],
+        );
+    }
+
+    fn enum_has_name(&self, tag: usize) -> bool {
+        self.tags[tag].information.name.is_some()
+            || self.tags[tag].information.typedef_for_anonymous.is_some()
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn check_enum_switch_coverage(
+        &mut self,
+        tag: usize,
+        switch: &SwitchState,
+        values: &[(i128, usize)],
+        ranges: &[(i128, usize)],
+        high_values: &[i128],
+        enum_type: &QualifiedType,
+        condition_width: u32,
+        condition_signed: bool,
+        default_place: Option<Place>,
+        condition: &Expression,
+    ) -> bool {
+        let mut enumerators: Vec<(i128, usize)> = self.tags[tag]
+            .enumerators
+            .iter()
+            .map(|declaration| {
+                (
+                    adjust_integer(
+                        self.declarations[*declaration].value,
+                        condition_width,
+                        condition_signed,
+                    ),
+                    *declaration,
+                )
+            })
+            .collect();
+        enumerators.sort_by_key(|left| left.0);
+        enumerators.dedup_by(|right, left| left.0 == right.0);
+        let unqualified = enum_type.unqualified();
+        let mut position = 0;
+        for (value, case_index) in values {
+            let case = &switch.cases[*case_index];
+            if self.should_diagnose_case_not_in_enum(
+                case.low_global_const_of_enum,
+                *value,
+                &enumerators,
+                &mut position,
+            ) {
+                self.diagnose(
+                    "warn_not_in_enum",
+                    case.low_place,
+                    vec![Argument::Type(unqualified.clone())],
+                );
+            }
+        }
+        position = 0;
+        for (index, (value, case_index)) in ranges.iter().enumerate() {
+            let case = &switch.cases[*case_index];
+            if self.should_diagnose_case_not_in_enum(
+                case.low_global_const_of_enum,
+                *value,
+                &enumerators,
+                &mut position,
+            ) {
+                self.diagnose(
+                    "warn_not_in_enum",
+                    case.low_place,
+                    vec![Argument::Type(unqualified.clone())],
+                );
+            }
+            let high = high_values[index];
+            if self.should_diagnose_case_not_in_enum(
+                case.high_global_const_of_enum,
+                high,
+                &enumerators,
+                &mut position,
+            ) {
+                self.diagnose(
+                    "warn_not_in_enum",
+                    case.high_place,
+                    vec![Argument::Type(unqualified.clone())],
+                );
+            }
+        }
+        let mut value_position = 0;
+        let mut range_position = 0;
+        let mut unhandled: Vec<Rc<[u8]>> = Vec::new();
+        for (value, declaration) in &enumerators {
+            while value_position < values.len() && values[value_position].0 < *value {
+                value_position += 1;
+            }
+            if value_position < values.len() && values[value_position].0 == *value {
+                continue;
+            }
+            while range_position < ranges.len() && high_values[range_position] < *value {
+                range_position += 1;
+            }
+            if range_position == ranges.len() || *value < ranges[range_position].0 {
+                if let Some(name) = self.declarations[*declaration].name.clone() {
+                    unhandled.push(name);
+                }
+            }
+        }
+        if let Some(place) = default_place {
+            if unhandled.is_empty() {
+                self.diagnose("warn_unreachable_default", place, Vec::new());
+            }
+        }
+        if !unhandled.is_empty() {
+            let name = if default_place.is_some() {
+                "warn_def_missing_case"
+            } else {
+                "warn_missing_case"
+            };
+            let mut arguments = vec![Argument::number(unhandled.len() as i128)];
+            for name in unhandled.iter().take(3) {
+                arguments.push(Argument::Name(name.clone()));
+            }
+            while arguments.len() < 4 {
+                arguments.push(Argument::text(""));
+            }
+            self.diagnose(name, condition.place, arguments);
+        }
+        unhandled.is_empty()
+    }
+
+    fn should_diagnose_case_not_in_enum(
+        &self,
+        global_const_of_enum: bool,
+        value: i128,
+        enumerators: &[(i128, usize)],
+        position: &mut usize,
+    ) -> bool {
+        if global_const_of_enum {
+            return false;
+        }
+        while *position < enumerators.len() && enumerators[*position].0 < value {
+            *position += 1;
+        }
+        !(*position < enumerators.len() && enumerators[*position].0 == value)
+    }
+
+    fn enter_loop(&mut self) {
+        if let Some(function) = self.function.as_mut() {
+            function.targets.push(JumpTarget {
+                is_loop: true,
+                break_reachability: Reachability::Unreachable,
+                continue_reachability: Reachability::Unreachable,
+            });
+        }
+    }
+
+    fn leave_loop(&mut self) -> JumpTarget {
+        self.function
+            .as_mut()
+            .and_then(|function| function.targets.pop())
+            .unwrap_or(JumpTarget {
+                is_loop: true,
+                break_reachability: Reachability::Unreachable,
+                continue_reachability: Reachability::Unreachable,
+            })
+    }
+
+    fn mark_empty_loop_body(&mut self, body: &Option<Statement>) {
+        if let Some(Statement {
+            kind: StatementKind::Null { .. },
+            ..
+        }) = body
+        {
+            if let Some(flag) = self
+                .function
+                .as_mut()
+                .and_then(|function| function.compound_empty_loop_bodies.last_mut())
+            {
+                *flag = true;
+            }
+        }
+    }
+
+    fn null_body(body: &Option<Statement>) -> Option<(Place, bool)> {
+        match body {
+            Some(Statement {
+                kind:
+                    StatementKind::Null {
+                        semicolon,
+                        leading_empty_macro,
+                    },
+                ..
+            }) => Some((*semicolon, *leading_empty_macro)),
+            _ => None,
+        }
+    }
+
+    fn parse_while_statement(
+        &mut self,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        let while_place = self.consume();
+        if !self.at(TokenKind::LeftParen) {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_lparen_after",
+                place,
+                vec![Argument::text("while")],
+            );
+            self.skip_until(&[TokenKind::Semi], false, false);
+            return None;
+        }
+        let c99 = self.language().at_least(CStandard::C99);
+        self.push_scope(if c99 {
+            SCOPE_CONTROL | SCOPE_BLOCK
+        } else {
+            SCOPE_CONTROL
+        });
+        let parsed = self.parse_parenthesized_condition(while_place, ConditionKind::Boolean);
+        let Some((condition, _open, close)) = parsed else {
+            self.pop_scope();
+            return None;
+        };
+        self.apply_noreturn_calls();
+        let value = condition
+            .as_ref()
+            .map(|condition| {
+                if condition.is_error() {
+                    BranchValue::NotConstant
+                } else {
+                    self.branch_value(condition)
+                }
+            })
+            .unwrap_or(BranchValue::NotConstant);
+        let entry = self.current_reachability();
+        self.set_reachability(self.reachability_after_condition(value, true));
+        self.enter_loop();
+        let body = self.parse_secondary_statement(trailing_else);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if body.is_some() {
+            self.check_misleading_indentation();
+        }
+        let target = self.leave_loop();
+        self.pop_scope();
+        self.set_reachability(entry);
+        let exit = self.reachability_after_condition(value, false);
+        self.set_reachability(exit.join(target.break_reachability));
+        let body = body?;
+        self.check_comma_in_condition(&condition);
+        let body = Some(body);
+        self.mark_empty_loop_body(&body);
+        Some(Statement::new(
+            StatementKind::Loop {
+                right_paren: close,
+                start: while_place,
+                null_body: Parser::null_body(&body),
+                is_for: false,
+            },
+            while_place,
+        ))
+    }
+
+    fn parse_do_statement(&mut self) -> Option<Statement> {
+        let do_place = self.consume();
+        let c99 = self.language().at_least(CStandard::C99);
+        self.push_scope(if c99 { SCOPE_BLOCK } else { 0 });
+        self.enter_loop();
+        let body = self.parse_secondary_statement(None);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        let target = self.leave_loop();
+        let after_body = self
+            .current_reachability()
+            .join(target.continue_reachability);
+        if !self.is_keyword("while") {
+            if body.is_some() {
+                let place = self.token.site;
+                self.diagnose("err_expected_while", place, Vec::new());
+                self.diagnose("note_matching", do_place, vec![Argument::text("'do'")]);
+                self.skip_until(&[TokenKind::Semi], false, true);
+            }
+            self.pop_scope();
+            self.set_reachability(after_body.join(target.break_reachability));
+            return None;
+        }
+        self.consume();
+        if !self.at(TokenKind::LeftParen) {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_lparen_after",
+                place,
+                vec![Argument::text("do/while")],
+            );
+            self.skip_until(&[TokenKind::Semi], false, true);
+            self.pop_scope();
+            self.set_reachability(after_body.join(target.break_reachability));
+            return None;
+        }
+        let open = self.consume();
+        self.set_reachability(after_body);
+        let condition = self.parse_expression();
+        let condition = match condition {
+            Some(condition) => Some(condition),
+            None => {
+                if !matches!(
+                    self.token.kind,
+                    TokenKind::RightParen | TokenKind::RightSquare | TokenKind::RightBrace
+                ) {
+                    self.skip_until(&[TokenKind::Semi], false, false);
+                }
+                None
+            }
+        };
+        self.expect_closing(TokenKind::RightParen, open);
+        self.pop_scope();
+        self.apply_noreturn_calls();
+        let after_condition = self.current_reachability();
+        let mut check_failed = false;
+        let checked = condition.and_then(|condition| {
+            if condition.is_error() {
+                return None;
+            }
+            match self.check_boolean_condition(do_place, condition) {
+                Some(checked) => {
+                    self.check_completed_expression(&checked);
+                    Some(checked)
+                }
+                None => {
+                    check_failed = true;
+                    None
+                }
+            }
+        });
+        let value = checked
+            .as_ref()
+            .map(|condition| self.branch_value(condition))
+            .unwrap_or(BranchValue::NotConstant);
+        self.set_reachability(after_condition);
+        let exit = self.reachability_after_condition(value, false);
+        self.set_reachability(exit.join(target.break_reachability));
+        if check_failed {
+            return None;
+        }
+        body?;
+        Some(Statement::new(StatementKind::Other, do_place))
+    }
+
+    fn parse_for_statement(
+        &mut self,
+        trailing_else: Option<&mut Option<Place>>,
+    ) -> Option<Statement> {
+        let for_place = self.consume();
+        if !self.at(TokenKind::LeftParen) {
+            let place = self.token.site;
+            self.diagnose(
+                "err_expected_lparen_after",
+                place,
+                vec![Argument::text("for")],
+            );
+            self.skip_until(&[TokenKind::Semi], false, false);
+            return None;
+        }
+        let c99 = self.language().at_least(CStandard::C99);
+        self.push_scope(if c99 {
+            SCOPE_CONTROL | SCOPE_BLOCK
+        } else {
+            SCOPE_CONTROL
+        });
+        let open = self.consume();
+        let mut first_invalid = false;
+        let mut second_invalid = false;
+        if self.at(TokenKind::Semi) {
+            self.consume();
+        } else if self.is_declaration_specifier() {
+            if !c99 {
+                let place = self.token.site;
+                self.diagnose("ext_c99_variable_decl_in_for_loop", place, Vec::new());
+                self.diagnose("warn_gcc_variable_decl_in_for_loop", place, Vec::new());
+            }
+            let start = self.token.site;
+            let saved = self.save_balance();
+            if matches!(self.keyword(), Some("_Static_assert" | "static_assert")) {
+                self.parse_static_assert();
+            } else {
+                let mut specifiers = DeclarationSpecifiers::new(start);
+                self.parse_declaration_specifiers(&mut specifiers, SpecifierContext::Normal);
+                if self.unsupported.is_some() {
+                    return None;
+                }
+                let declarations = if self.at(TokenKind::Semi) {
+                    self.act_on_free_standing_specifiers(&specifiers, start);
+                    Vec::new()
+                } else {
+                    self.parse_declaration_group(&mut specifiers, DeclaratorContext::ForInit, start)
+                };
+                self.check_for_init_declarations(&declarations, specifiers.tag);
+                if self.unsupported.is_some() {
+                    return None;
+                }
+                if self.at(TokenKind::Semi) {
+                    self.consume();
+                } else {
+                    let place = self.token.site;
+                    self.diagnose("err_expected_semi_for", place, Vec::new());
+                }
+            }
+            self.restore_balance(saved);
+            self.apply_noreturn_calls();
+        } else {
+            let value = self.parse_expression();
+            match &value {
+                Some(expression) => {
+                    self.act_on_expression_statement(expression.clone());
+                }
+                None => first_invalid = true,
+            }
+            self.apply_noreturn_calls();
+            if self.at(TokenKind::Semi) {
+                self.consume();
+            } else if value.is_some() {
+                let place = self.token.site;
+                self.diagnose("err_expected_semi_for", place, Vec::new());
+            } else {
+                self.skip_until(&[TokenKind::RightParen], true, true);
+                self.try_consume(TokenKind::Semi);
+            }
+        }
+        let _ = first_invalid;
+        let mut condition: Option<Expression> = None;
+        let mut has_condition = false;
+        if !self.at(TokenKind::Semi) && !self.at(TokenKind::RightParen) {
+            has_condition = true;
+            match self.parse_expression() {
+                Some(expression) => {
+                    condition = self.act_on_condition(for_place, expression, ConditionKind::Boolean)
+                }
+                None => second_invalid = true,
+            }
+        }
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if !self.at(TokenKind::Semi) {
+            if !second_invalid {
+                let place = self.token.site;
+                self.diagnose("err_expected_semi_for", place, Vec::new());
+            }
+            self.skip_until(&[TokenKind::RightParen], true, true);
+        }
+        self.apply_noreturn_calls();
+        let after_condition_entry = self.current_reachability();
+        let value = if !has_condition {
+            BranchValue::Constant(true)
+        } else {
+            match &condition {
+                Some(condition) if !condition.is_error() => self.branch_value(condition),
+                _ => BranchValue::NotConstant,
+            }
+        };
+        self.try_consume(TokenKind::Semi);
+        let mut increment: Option<Expression> = None;
+        if !self.at(TokenKind::RightParen) {
+            self.set_reachability(Reachability::Unknown);
+            increment = self.parse_expression();
+            self.set_reachability(after_condition_entry);
+        }
+        let close = self.token.site;
+        self.expect_closing(TokenKind::RightParen, open);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        self.set_reachability(self.reachability_after_condition(value, true));
+        self.enter_loop();
+        let body = self.parse_secondary_statement(trailing_else);
+        if self.unsupported.is_some() {
+            return None;
+        }
+        if body.is_some() {
+            self.check_misleading_indentation();
+        }
+        let target = self.leave_loop();
+        let body_end = self
+            .current_reachability()
+            .join(target.continue_reachability);
+        let increment_reachability = if body_end == Reachability::Unreachable {
+            Reachability::Unreachable
+        } else {
+            body_end
+        };
+        if let Some(increment) = increment {
+            if increment_reachability != Reachability::Reachable && self.function.is_some() {
+                self.set_reachability(increment_reachability);
+            } else {
+                self.set_reachability(Reachability::Reachable);
+            }
+            let saved_function = self
+                .function
+                .as_ref()
+                .map(|function| function.deferred.len());
+            self.act_on_full_discarded_expression(increment);
+            let _ = saved_function;
+        }
+        self.pop_scope();
+        self.set_reachability(after_condition_entry);
+        let exit = self.reachability_after_condition(value, false);
+        self.set_reachability(exit.join(target.break_reachability));
+        if second_invalid {
+            return None;
+        }
+        if !self.message_ignored("warn_variables_not_in_loop_body", for_place)
+            || !self.message_ignored("warn_redundant_loop_iteration", for_place)
+        {
+            self.unsupported("for loop analysis warnings");
+            return None;
+        }
+        if c99 {
+            self.check_comma_in_condition(&condition);
+        }
+        let body = body?;
+        let body = Some(body);
+        self.mark_empty_loop_body(&body);
+        Some(Statement::new(
+            StatementKind::Loop {
+                right_paren: close,
+                start: for_place,
+                null_body: Parser::null_body(&body),
+                is_for: true,
+            },
+            for_place,
+        ))
+    }
+
+    fn act_on_full_discarded_expression(&mut self, expression: Expression) {
+        if expression.is_error() {
+            return;
+        }
+        let converted = self.ignored_value_conversions_for_statement(expression);
+        self.check_completed_expression(&converted);
+        self.diagnose_unused_expression_result(&converted);
+        self.apply_noreturn_calls();
+    }
+
+    fn check_for_init_declarations(&mut self, declarations: &[usize], tag: Option<usize>) {
+        let mut variable_seen = false;
+        let mut non_variable: Option<Place> = None;
+        for declaration in declarations {
+            let information = &self.declarations[*declaration];
+            if information.kind == DeclarationKind::Variable {
+                variable_seen = true;
+                if matches!(
+                    information.storage,
+                    StorageClass::Static | StorageClass::Extern
+                ) || information.thread != ThreadStorage::None
+                {
+                    let place = information.place;
+                    self.diagnose_compatibility(
+                        "non_local_variable_decl_in_for",
+                        CStandard::C23,
+                        place,
+                        Vec::new(),
+                    );
+                }
+            } else if non_variable.is_none() {
+                non_variable = Some(information.place);
+            }
+        }
+        if non_variable.is_none() && declarations.is_empty() {
+            non_variable = tag.map(|tag| self.tags[tag].place);
+        }
+        if let Some(place) = non_variable {
+            if !variable_seen {
+                self.diagnose_compatibility(
+                    "non_variable_decl_in_for",
+                    CStandard::C23,
+                    place,
+                    Vec::new(),
+                );
+            }
+        }
+    }
+
+    fn parse_goto_statement(&mut self) -> Option<Statement> {
+        let goto_place = self.consume();
+        if self.is_identifier() || (self.at(TokenKind::Identifier) && self.keyword().is_none()) {
+            let name = self.token.spelling.clone();
+            let place = self.token.site;
+            let reachability = self.current_reachability();
+            let function = self.function.as_mut()?;
+            function.branch_into_scope = true;
+            let label = function.labels.entry(name).or_insert(LabelState {
+                place,
+                defined: None,
+                definition_reachability: Reachability::Unreachable,
+                jump_reachability: Reachability::Unreachable,
+            });
+            if label.defined.is_some() {
+                if label.definition_reachability != Reachability::Reachable
+                    && reachability != Reachability::Unreachable
+                {
+                    function.analysis_valid = false;
+                }
+            } else {
+                label.jump_reachability = label.jump_reachability.join(reachability);
+            }
+            function.reachability = Reachability::Unreachable;
+            self.consume();
+            return Some(Statement::new(StatementKind::Other, goto_place));
+        }
+        if self.at(TokenKind::Star) {
+            self.unsupported("indirect goto");
+            return None;
+        }
+        let place = self.token.site;
+        self.diagnose("err_expected", place, vec![Argument::text("identifier")]);
+        None
+    }
+
+    fn parse_break_or_continue_statement(&mut self, is_continue: bool) -> Option<Statement> {
+        let place = self.consume();
+        if self.is_identifier() {
+            self.unsupported("labeled break or continue");
+            return None;
+        }
+        let reachability = self.current_reachability();
+        let function = self.function.as_mut()?;
+        let target = if is_continue {
+            function
+                .targets
+                .iter_mut()
+                .rev()
+                .find(|target| target.is_loop)
+        } else {
+            function.targets.last_mut()
+        };
+        let Some(target) = target else {
+            let name = if is_continue {
+                "err_continue_not_in_loop"
+            } else {
+                "err_break_not_in_loop_or_switch"
+            };
+            self.diagnose(name, place, Vec::new());
+            return None;
+        };
+        if is_continue {
+            target.continue_reachability = target.continue_reachability.join(reachability);
+        } else {
+            target.break_reachability = target.break_reachability.join(reachability);
+        }
+        function.reachability = Reachability::Unreachable;
+        Some(Statement::new(StatementKind::Other, place))
+    }
+
+    fn parse_return_statement(&mut self) -> Option<Statement> {
+        let return_place = self.consume();
+        let mut value = None;
+        if !self.at(TokenKind::Semi) {
+            match self.parse_expression() {
+                Some(expression) => value = Some(expression),
+                None => {
+                    self.skip_until(&[TokenKind::RightBrace], true, true);
+                    self.apply_noreturn_calls();
+                    return None;
+                }
+            }
+        }
+        self.apply_noreturn_calls();
+        let result = self.act_on_return_statement(return_place, value);
+        if let Some(function) = self.function.as_mut() {
+            let reachability = function.reachability;
+            function.live_return = function.live_return.join(reachability);
+            if reachability == Reachability::Unknown
+                && function.live_return != Reachability::Reachable
+            {
+                function.live_return = Reachability::Unknown;
+            }
+            function.reachability = Reachability::Unreachable;
+        }
+        result
+    }
+
+    fn act_on_return_statement(
+        &mut self,
+        place: Place,
+        value: Option<Expression>,
+    ) -> Option<Statement> {
+        let statement = Some(Statement::new(StatementKind::Other, place));
+        let (declaration, result) = {
+            let function = self.function.as_ref()?;
+            (function.declaration, function.result.clone())
+        };
+        let declaration = declaration?;
+        let name = self.declarations[declaration]
+            .name
+            .clone()
+            .unwrap_or_else(|| Rc::from(&b""[..]));
+        let noreturn = self
+            .function
+            .as_ref()
+            .is_some_and(|function| function.noreturn);
+        if noreturn {
+            self.diagnose(
+                "warn_noreturn_function_has_return_expr",
+                place,
+                vec![Argument::Name(name.clone())],
+            );
+        }
+        if result.is_void() {
+            if let Some(value) = value {
+                if matches!(value.kind, ExpressionKind::InitializerList { .. }) {
+                    self.diagnose(
+                        "err_return_init_list",
+                        place,
+                        vec![Argument::Name(name), Argument::number(0)],
+                    );
+                    return statement;
+                }
+                if value.contains_error() {
+                    return statement;
+                }
+                let void_expression = value.ty.is_void();
+                if void_expression {
+                    if !self.language().at_least(CStandard::C2y) {
+                        self.diagnose(
+                            "ext_return_has_void_expr",
+                            place,
+                            vec![Argument::Name(name), Argument::number(0)],
+                        );
+                    }
+                    self.check_completed_expression(&value);
+                } else {
+                    let converted = self.ignored_value_conversions(value);
+                    self.diagnose(
+                        "ext_return_has_expr",
+                        place,
+                        vec![Argument::Name(name), Argument::number(0)],
+                    );
+                    self.check_completed_expression(&converted);
+                }
+            }
+            return statement;
+        }
+        let Some(value) = value else {
+            if self.declarations[declaration].invalid {
+                return statement;
+            }
+            if self.language().at_least(CStandard::C99) {
+                self.diagnose(
+                    "ext_return_missing_expr",
+                    place,
+                    vec![Argument::Name(name), Argument::number(0)],
+                );
+            } else {
+                self.diagnose(
+                    "warn_return_missing_expr",
+                    place,
+                    vec![Argument::Name(name), Argument::number(0)],
+                );
+            }
+            return statement;
+        };
+        if value.contains_error() {
+            return statement;
+        }
+        let start = value.start;
+        if self.returns_local_address(&value)
+            && !self.message_ignored("warn_ret_stack_addr_ref", start)
+        {
+            self.unsupported("returning the address of a local variable");
+            return None;
+        }
+        let mut target = result.unqualified();
+        let converted = self.perform_return_initialization(&mut target, value, start);
+        if let Some(converted) = converted {
+            self.check_completed_expression(&converted);
+        }
+        if let Some(function) = self.function.as_mut() {
+            function.has_return_value = true;
+        }
+        statement
+    }
+
+    fn perform_return_initialization(
+        &mut self,
+        target: &mut QualifiedType,
+        value: Expression,
+        start: Place,
+    ) -> Option<Expression> {
+        if target.is_array() || target.is_function() {
+            return None;
+        }
+        if !self.is_complete_type(target) {
+            return None;
+        }
+        let (result, (converted, source_type)) =
+            self.check_single_assignment_constraints(target, value);
+        if self.diagnose_assignment_result(
+            result,
+            start,
+            target,
+            &source_type,
+            &converted,
+            AssignmentAction::Returning,
+        ) {
+            return None;
+        }
+        self.check_implicit_conversion(&converted, target, start);
+        Some(converted)
+    }
+
+    fn returns_local_address(&self, expression: &Expression) -> bool {
+        let inner = expression.ignore_parentheses_and_casts();
+        let target = match &inner.kind {
+            ExpressionKind::Unary {
+                operator: UnaryOperator::AddressOf,
+                operand,
+            } => operand.ignore_parentheses(),
+            ExpressionKind::Reference { .. } if inner.ty.is_array() => inner,
+            _ => {
+                if let ExpressionKind::Cast {
+                    kind: CastKind::ArrayToPointerDecay,
+                    operand,
+                    ..
+                } = &expression.ignore_parentheses().kind
+                {
+                    operand.ignore_parentheses()
+                } else {
+                    return false;
+                }
+            }
+        };
+        let mut base = target;
+        loop {
+            match &base.kind {
+                ExpressionKind::Member {
+                    base: inner,
+                    arrow: false,
+                    ..
+                } => base = inner.ignore_parentheses(),
+                ExpressionKind::Subscript { base: inner, .. } => {
+                    base = inner.ignore_parentheses_and_implicit_casts()
+                }
+                _ => break,
+            }
+        }
+        match base.kind {
+            ExpressionKind::Reference { declaration } => {
+                let declaration = &self.declarations[declaration];
+                matches!(
+                    declaration.kind,
+                    DeclarationKind::Variable | DeclarationKind::Parameter
+                ) && !declaration.file_scope
+                    && !matches!(
+                        declaration.storage,
+                        StorageClass::Static | StorageClass::Extern
+                    )
+            }
+            ExpressionKind::CompoundLiteral {
+                file_scope: false, ..
+            } => true,
+            _ => false,
+        }
+    }
+}
+
+fn function_type_is_noreturn(ty: &QualifiedType) -> bool {
+    match &*ty.desugared().node {
+        TypeNode::FunctionPrototype { noreturn, .. }
+        | TypeNode::FunctionNoPrototype { noreturn, .. } => *noreturn,
+        _ => false,
+    }
+}
+
+fn type_contains_star_array(ty: &QualifiedType) -> bool {
+    match &*ty.node {
+        TypeNode::VariableArray {
+            modifier: ArrayModifier::Star,
+            ..
+        } => true,
+        TypeNode::VariableArray { element, .. }
+        | TypeNode::ConstantArray { element, .. }
+        | TypeNode::IncompleteArray { element, .. } => type_contains_star_array(element),
+        TypeNode::Pointer(pointee) => type_contains_star_array(pointee),
+        _ => false,
+    }
+}
+
+fn adjust_integer(value: i128, width: u32, signed: bool) -> i128 {
+    if width == 0 || width >= 128 {
+        return value;
+    }
+    let mask = (1u128 << width) - 1;
+    let truncated = (value as u128) & mask;
+    if signed && truncated & (1u128 << (width - 1)) != 0 {
+        (truncated | !mask) as i128
+    } else {
+        truncated as i128
+    }
+}
+
+fn strip_integral_casts(expression: &Expression) -> &Expression {
+    let mut current = expression;
+    while let ExpressionKind::Cast {
+        kind: CastKind::IntegralCast,
+        operand,
+        explicit: false,
+        ..
+    } = &current.kind
+    {
+        current = operand;
+    }
+    current
+}
+
+fn is_comparison_with_constant(expression: &Expression) -> bool {
+    let ExpressionKind::Binary {
+        operator,
+        left,
+        right,
+    } = &expression.ignore_parentheses().kind
+    else {
+        return false;
+    };
+    let comparison = matches!(
+        operator,
+        BinaryOperator::Less
+            | BinaryOperator::Greater
+            | BinaryOperator::LessEqual
+            | BinaryOperator::GreaterEqual
+            | BinaryOperator::Equal
+            | BinaryOperator::NotEqual
+    );
+    let literal = |side: &Expression| {
+        matches!(
+            side.ignore_parentheses_and_implicit_casts().kind,
+            ExpressionKind::Integer { .. } | ExpressionKind::Character { .. }
+        )
+    };
+    comparison && (literal(left) || literal(right))
+}
+
+fn is_bitwise_with_constant(expression: &Expression) -> bool {
+    let ExpressionKind::Binary {
+        operator,
+        left,
+        right,
+    } = &expression.ignore_parentheses_and_implicit_casts().kind
+    else {
+        return false;
+    };
+    let literal = |side: &Expression| {
+        matches!(
+            side.ignore_parentheses_and_implicit_casts().kind,
+            ExpressionKind::Integer { .. }
+        )
+    };
+    matches!(operator, BinaryOperator::BitAnd | BinaryOperator::BitOr)
+        && (literal(left) || literal(right))
+}
+
+fn contains_comma_or_conditional(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Binary {
+            operator: BinaryOperator::Comma,
+            ..
+        }
+        | ExpressionKind::Conditional { .. } => true,
+        ExpressionKind::Parenthesized(inner) => contains_comma_or_conditional(inner),
+        ExpressionKind::Unary { operand, .. } => contains_comma_or_conditional(operand),
+        ExpressionKind::Binary { left, right, .. } => {
+            contains_comma_or_conditional(left) || contains_comma_or_conditional(right)
+        }
+        ExpressionKind::Cast { operand, .. } => contains_comma_or_conditional(operand),
+        _ => false,
+    }
+}
+
+fn contains_comma(expression: &Expression) -> bool {
+    match &expression.kind {
+        ExpressionKind::Binary {
+            operator: BinaryOperator::Comma,
+            ..
+        } => true,
+        ExpressionKind::Parenthesized(inner) => contains_comma(inner),
+        ExpressionKind::Unary { operand, .. } => contains_comma(operand),
+        ExpressionKind::Binary { left, right, .. } => contains_comma(left) || contains_comma(right),
+        ExpressionKind::Cast { operand, .. } => contains_comma(operand),
+        ExpressionKind::Conditional {
+            condition,
+            then,
+            otherwise,
+        } => {
+            contains_comma(condition)
+                || then.as_deref().is_some_and(contains_comma)
+                || contains_comma(otherwise)
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            contains_comma(callee) || arguments.iter().any(contains_comma)
+        }
+        _ => false,
+    }
+}
+
+#[derive(Default)]
+struct AccessSet {
+    modified: Vec<usize>,
+    used: Vec<usize>,
+}
+
+impl AccessSet {
+    fn merge(&mut self, other: AccessSet) {
+        self.modified.extend(other.modified);
+        self.used.extend(other.used);
+    }
+
+    fn conflicts_with(&self, other: &AccessSet) -> bool {
+        self.modified.iter().any(|declaration| {
+            other.modified.contains(declaration) || other.used.contains(declaration)
+        }) || other
+            .modified
+            .iter()
+            .any(|declaration| self.used.contains(declaration))
+    }
+}
+
+fn unsequenced_parts(parts: &[&Expression], conflict: &mut bool) -> AccessSet {
+    let sets: Vec<AccessSet> = parts
+        .iter()
+        .map(|part| unsequenced_accesses(part, conflict))
+        .collect();
+    for (index, set) in sets.iter().enumerate() {
+        if sets[index + 1..]
+            .iter()
+            .any(|other| set.conflicts_with(other))
+        {
+            *conflict = true;
+        }
+    }
+    let mut result = AccessSet::default();
+    for set in sets {
+        result.merge(set);
+    }
+    result
+}
+
+fn unsequenced_accesses(expression: &Expression, conflict: &mut bool) -> AccessSet {
+    match &expression.kind {
+        ExpressionKind::Reference { declaration } => AccessSet {
+            modified: Vec::new(),
+            used: vec![*declaration],
+        },
+        ExpressionKind::Parenthesized(inner) | ExpressionKind::Generic { selected: inner } => {
+            unsequenced_accesses(inner, conflict)
+        }
+        ExpressionKind::Cast { operand, .. } => unsequenced_accesses(operand, conflict),
+        ExpressionKind::Member { base, .. } => unsequenced_accesses(base, conflict),
+        ExpressionKind::Designated { value, .. } => unsequenced_accesses(value, conflict),
+        ExpressionKind::Unary { operator, operand } => {
+            let mut set = unsequenced_accesses(operand, conflict);
+            if matches!(
+                operator,
+                UnaryOperator::PostIncrement
+                    | UnaryOperator::PostDecrement
+                    | UnaryOperator::PreIncrement
+                    | UnaryOperator::PreDecrement
+            ) {
+                if let Some(declaration) = operand.ignore_parentheses().referenced_declaration() {
+                    if set.modified.contains(&declaration) {
+                        *conflict = true;
+                    }
+                    set.modified.push(declaration);
+                }
+            }
+            set
+        }
+        ExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } => match operator {
+            BinaryOperator::Comma | BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                let mut set = unsequenced_accesses(left, conflict);
+                set.merge(unsequenced_accesses(right, conflict));
+                set
+            }
+            BinaryOperator::Assign
+            | BinaryOperator::MultiplyAssign
+            | BinaryOperator::DivideAssign
+            | BinaryOperator::RemainderAssign
+            | BinaryOperator::AddAssign
+            | BinaryOperator::SubtractAssign
+            | BinaryOperator::ShiftLeftAssign
+            | BinaryOperator::ShiftRightAssign
+            | BinaryOperator::BitAndAssign
+            | BinaryOperator::BitXorAssign
+            | BinaryOperator::BitOrAssign => {
+                let mut left_set = unsequenced_accesses(left, conflict);
+                let right_set = unsequenced_accesses(right, conflict);
+                let target = left.ignore_parentheses().referenced_declaration();
+                if let Some(declaration) = target {
+                    if right_set.modified.contains(&declaration) {
+                        *conflict = true;
+                    }
+                    if let Some(position) =
+                        left_set.used.iter().position(|used| *used == declaration)
+                    {
+                        left_set.used.remove(position);
+                    }
+                }
+                if left_set.conflicts_with(&right_set) {
+                    *conflict = true;
+                }
+                left_set.merge(right_set);
+                if let Some(declaration) = target {
+                    left_set.modified.push(declaration);
+                }
+                left_set
+            }
+            _ => unsequenced_parts(&[left, right], conflict),
+        },
+        ExpressionKind::Conditional {
+            condition,
+            then,
+            otherwise,
+        } => {
+            let mut set = unsequenced_accesses(condition, conflict);
+            if let Some(then) = then {
+                set.merge(unsequenced_accesses(then, conflict));
+            }
+            set.merge(unsequenced_accesses(otherwise, conflict));
+            set
+        }
+        ExpressionKind::Call { callee, arguments } => {
+            let mut parts: Vec<&Expression> = vec![callee];
+            parts.extend(arguments.iter());
+            unsequenced_parts(&parts, conflict)
+        }
+        ExpressionKind::Subscript { base, index } => unsequenced_parts(&[base, index], conflict),
+        ExpressionKind::CompoundLiteral { initializer, .. } => {
+            unsequenced_accesses(initializer, conflict)
+        }
+        ExpressionKind::InitializerList { elements, .. } => {
+            let parts: Vec<&Expression> = elements.iter().collect();
+            unsequenced_parts(&parts, conflict)
+        }
+        _ => AccessSet::default(),
+    }
+}
+
+fn format_floating_value(value: f64, single: bool) -> String {
+    if value.is_infinite() {
+        return if value > 0.0 {
+            "+Inf".to_string()
+        } else {
+            "-Inf".to_string()
+        };
+    }
+    if value.is_nan() {
+        return "NaN".to_string();
+    }
+    let scientific = if single {
+        format!("{:e}", value as f32)
+    } else {
+        format!("{value:e}")
+    };
+    let (mantissa, exponent) = scientific.split_once('e').unwrap_or((&scientific, "0"));
+    let negative = mantissa.starts_with('-');
+    let digits: String = mantissa
+        .chars()
+        .filter(|character| character.is_ascii_digit())
+        .collect();
+    let digits = digits.trim_end_matches('0');
+    let digits = if digits.is_empty() { "0" } else { digits };
+    let exponent: i32 = exponent.parse().unwrap_or(0);
+    let count = digits.len() as i32;
+    let power = exponent - (count - 1);
+    let sign = if negative { "-" } else { "" };
+    if power >= 0 {
+        if power <= 3 {
+            return format!("{sign}{digits}{}", "0".repeat(power as usize));
+        }
+    } else if -power <= count + 3 {
+        let point = count + power;
+        if point > 0 {
+            return format!(
+                "{sign}{}.{}",
+                &digits[..point as usize],
+                &digits[point as usize..]
+            );
+        }
+        return format!("{sign}0.{}{digits}", "0".repeat((-point) as usize));
+    }
+    let rest = if count > 1 { &digits[1..] } else { "0" };
+    let exponent_sign = if exponent < 0 { "-" } else { "+" };
+    format!(
+        "{sign}{}.{rest}E{exponent_sign}{}",
+        &digits[..1],
+        exponent.abs()
+    )
+}
+
+fn adopt_parser_token(mut token: Token) -> Token {
+    if token.place != token.site || token.has(MACRO_ARGUMENT) {
+        token.flags |= MACRO_ARGUMENT;
+    }
+    token.site = token.file_site;
+    token
+}
+
+static PARSER_KEYWORDS: [&str; 117] = [
+    "_Alignas",
+    "_Alignof",
+    "_Atomic",
+    "_BitInt",
+    "_Bool",
+    "_Complex",
+    "_Countof",
+    "_Decimal128",
+    "_Decimal32",
+    "_Decimal64",
+    "_Defer",
+    "_ExtInt",
+    "_Float16",
+    "_Generic",
+    "_Imaginary",
+    "_Nonnull",
+    "_Noreturn",
+    "_Null_unspecified",
+    "_Nullable",
+    "_Nullable_result",
+    "_Static_assert",
+    "_Thread_local",
+    "__FUNCTION__",
+    "__PRETTY_FUNCTION__",
+    "__alignof",
+    "__attribute",
+    "__auto_type",
+    "__bf16",
+    "__builtin_COLUMN",
+    "__builtin_FILE",
+    "__builtin_FILE_NAME",
+    "__builtin_FUNCTION",
+    "__builtin_LINE",
+    "__builtin_astype",
+    "__builtin_bit_cast",
+    "__builtin_choose_expr",
+    "__builtin_offsetof",
+    "__builtin_va_arg",
+    "__cdecl",
+    "__declspec",
+    "__extension__",
+    "__fastcall",
+    "__float128",
+    "__forceinline",
+    "__func__",
+    "__funcref",
+    "__ibm128",
+    "__imag",
+    "__int128",
+    "__int64",
+    "__kernel",
+    "__kindof",
+    "__label__",
+    "__noinline__",
+    "__pascal",
+    "__private_extern__",
+    "__ptr32",
+    "__ptr64",
+    "__ptrauth",
+    "__real",
+    "__regcall",
+    "__sptr",
+    "__stdcall",
+    "__thiscall",
+    "__thread",
+    "__unaligned",
+    "__uptr",
+    "__vectorcall",
+    "__w64",
+    "alignas",
+    "alignof",
+    "asm",
+    "auto",
+    "bool",
+    "break",
+    "case",
+    "char",
+    "const",
+    "consteval",
+    "constexpr",
+    "continue",
+    "default",
+    "do",
+    "double",
+    "else",
+    "enum",
+    "extern",
+    "false",
+    "float",
+    "for",
+    "goto",
+    "half",
+    "if",
+    "inline",
+    "int",
+    "long",
+    "nullptr",
+    "register",
+    "restrict",
+    "return",
+    "short",
+    "signed",
+    "sizeof",
+    "static",
+    "static_assert",
+    "struct",
+    "switch",
+    "thread_local",
+    "true",
+    "typedef",
+    "typeof",
+    "typeof_unqual",
+    "union",
+    "unsigned",
+    "void",
+    "volatile",
+    "while",
+];
+
+static UNPORTED_WARNING_GROUPS: [&str; 3] = [
+    "c++-compat",
+    "documentation",
+    "documentation-unknown-command",
+];
+
+static CONVERSION_WARNING_GROUPS: [&str; 8] = [
+    "conversion",
+    "sign-conversion",
+    "implicit-int-conversion",
+    "float-conversion",
+    "shorten-64-to-32",
+    "implicit-float-conversion",
+    "implicit-int-float-conversion",
+    "enum-conversion",
+];
+
+static TAUTOLOGICAL_COMPARE_WARNING_GROUPS: [&str; 5] = [
+    "tautological-type-limit-compare",
+    "tautological-unsigned-zero-compare",
+    "tautological-unsigned-enum-zero-compare",
+    "tautological-value-range-compare",
+    "tautological-bitwise-compare",
+];
+
+static CAST_WARNING_GROUPS: [&str; 4] = [
+    "cast-align",
+    "cast-function-type",
+    "cast-qual",
+    "bad-function-cast",
+];
+
+static UNINITIALIZED_WARNING_GROUPS: [&str; 3] = [
+    "uninitialized",
+    "sometimes-uninitialized",
+    "conditional-uninitialized",
+];
+
+static GENERATED_BUILTIN_HEADERS: [&str; 13] = [
+    "arm_bf16.h",
+    "arm_cde.h",
+    "arm_fp16.h",
+    "arm_mve.h",
+    "arm_neon.h",
+    "arm_sme.h",
+    "arm_sve.h",
+    "arm_vector_types.h",
+    "riscv_andes_vector.h",
+    "riscv_sifive_vector.h",
+    "riscv_vector.h",
+    "arm_neon_sve_bridge.h",
+    "arm_sme_draft_spec_subject_to_change.h",
+];
+
+static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
+    ("compat_c23_c_label_at_end_of_compound_statement", MessageClass::WarningOff, "pre-c23-compat", "label at end of compound statement is incompatible with C standards before C23"),
+    ("compat_c23_c_static_assert_no_message", MessageClass::WarningOff, "pre-c23-compat", "'_Static_assert' with no message is incompatible with C standards before C23"),
+    ("compat_c23_label_followed_by_declaration", MessageClass::WarningOff, "pre-c23-compat-pedantic", "label followed by a declaration is incompatible with C standards before C23"),
+    ("compat_c23_non_local_variable_decl_in_for", MessageClass::WarningOff, "pre-c23-compat-pedantic", "declaration of non-local variable in 'for' loop is incompatible with C standards before C23"),
+    ("compat_c23_non_variable_decl_in_for", MessageClass::WarningOff, "pre-c23-compat-pedantic", "non-variable declaration in 'for' loop is incompatible with C standards before C23"),
+    ("compat_c23_restrict_on_array_of_pointers", MessageClass::WarningOff, "pre-c23-compat-pedantic", "'restrict' qualifier on an array of pointers is incompatible with C standards before C23"),
+    ("compat_c2y_alignof_incomplete_array", MessageClass::WarningOff, "pre-c2y-compat-pedantic", "'alignof' on an incomplete array type is incompatible with C standards before C2y"),
+    ("compat_c2y_imaginary_constant", MessageClass::WarningOff, "pre-c2y-compat-pedantic", "imaginary constants are incompatible with C standards before C2y"),
+    ("compat_c2y_increment_complex", MessageClass::WarningOff, "pre-c2y-compat-pedantic", "'%select{--|++}0' on an object of complex type is incompatible with C standards before C2y"),
+    ("compat_pre_c23_c_label_at_end_of_compound_statement", MessageClass::ExtWarn, "c23-extensions", "label at end of compound statement is a C23 extension"),
+    ("compat_pre_c23_c_static_assert_no_message", MessageClass::ExtWarn, "c23-extensions", "'_Static_assert' with no message is a C23 extension"),
+    ("compat_pre_c23_label_followed_by_declaration", MessageClass::Extension, "c23-extensions", "label followed by a declaration is a C23 extension"),
+    ("compat_pre_c23_non_local_variable_decl_in_for", MessageClass::Extension, "c23-extensions", "declaration of non-local variable in 'for' loop is a C23 extension"),
+    ("compat_pre_c23_non_variable_decl_in_for", MessageClass::Extension, "c23-extensions", "non-variable declaration in 'for' loop is a C23 extension"),
+    ("compat_pre_c23_restrict_on_array_of_pointers", MessageClass::Extension, "c23-extensions", "'restrict' qualifier on an array of pointers is a C23 extension"),
+    ("compat_pre_c2y_alignof_incomplete_array", MessageClass::Extension, "c2y-extensions", "'alignof' on an incomplete array type is a C2y extension"),
+    ("compat_pre_c2y_imaginary_constant", MessageClass::Extension, "c2y-extensions", "imaginary constants are a C2y extension"),
+    ("compat_pre_c2y_increment_complex", MessageClass::Extension, "c2y-extensions", "'%select{--|++}0' on an object of complex type is a C2y extension"),
+    ("err_anon_bitfield_has_negative_width", MessageClass::Error, "", "anonymous bit-field has negative width (%0)"),
+    ("err_anon_type_definition", MessageClass::Error, "", "declaration of anonymous %0 must be a definition"),
+    ("err_anonymous_record_member_redecl", MessageClass::Error, "", "member of anonymous %select{struct|union}0 redeclares %1"),
+    ("err_array_designator_negative", MessageClass::Error, "", "array designator value '%0' is negative"),
+    ("err_array_designator_non_array", MessageClass::Error, "", "array designator cannot initialize non-array type %0"),
+    ("err_array_designator_too_large", MessageClass::Error, "", "array designator index (%0) exceeds array bounds (%1)"),
+    ("err_array_element_alignment", MessageClass::Error, "", "size of array element of type %0 (%1 bytes) isn't a multiple of its alignment (%2 bytes)"),
+    ("err_array_incomplete_or_sizeless_type", MessageClass::Error, "", "array has %select{incomplete|sizeless}0 element type %1"),
+    ("err_array_init_incompat_wide_string_into_wchar", MessageClass::Error, "", "initializing wide char array with incompatible wide string literal"),
+    ("err_array_init_narrow_string_into_wchar", MessageClass::Error, "", "initializing wide char array with non-wide string literal"),
+    ("err_array_init_not_init_list", MessageClass::Error, "", "array initializer must be an initializer list%select{| or string literal| or wide string literal}0"),
+    ("err_array_init_wide_string_into_char", MessageClass::Error, "", "initializing char array with wide string literal"),
+    ("err_array_size_non_int", MessageClass::Error, "", "size of array has non-integer type %0"),
+    ("err_array_star_outside_prototype", MessageClass::Error, "", "star modifier used outside of function prototype"),
+    ("err_array_static_not_outermost", MessageClass::Error, "", "%0 used in non-outermost array type derivation"),
+    ("err_array_static_outside_prototype", MessageClass::Error, "", "%0 used in array declarator outside of function prototype"),
+    ("err_array_too_large", MessageClass::Error, "", "array is too large (%0 elements)"),
+    ("err_atomic_specifier_bad_type", MessageClass::Error, "", "_Atomic cannot be applied to %select{incomplete |array |function |reference |atomic |qualified |sizeless ||integer ||overflow behavior }0type %1 %select{|||||||which is not trivially copyable||in C23|}0"),
+    ("err_bitfield_has_negative_width", MessageClass::Error, "", "bit-field %0 has negative width (%1)"),
+    ("err_bitfield_has_zero_width", MessageClass::Error, "", "named bit-field %0 has zero width"),
+    ("err_bitfield_width_exceeds_type_width", MessageClass::Error, "", "width of%select{ anonymous|}0 bit-field%select{| %1}0 (%2 bits) exceeds the %select{width|size}3 of its type (%4 bit%s4)"),
+    ("err_block_extern_cant_init", MessageClass::Error, "", "declaration of block scope identifier with linkage cannot have an initializer"),
+    ("err_bracket_depth_exceeded", MessageClass::Fatal, "", "bracket nesting level exceeded maximum of %0"),
+    ("err_break_not_in_loop_or_switch", MessageClass::Error, "", "'break' statement not in loop or switch statement"),
+    ("err_c11_noreturn_misplaced", MessageClass::Error, "", "'_Noreturn' keyword must precede function declarator"),
+    ("err_c2y_multiple_declarations", MessageClass::Error, "", "multiple declarations are not allowed"),
+    ("err_call_incomplete_argument", MessageClass::Error, "", "argument type %0 is incomplete"),
+    ("err_call_incomplete_return", MessageClass::Error, "", "calling function with incomplete return type %0"),
+    ("err_case_not_in_switch", MessageClass::Error, "", "'case' statement not in switch statement"),
+    ("err_cast_pointer_from_non_pointer_int", MessageClass::Error, "", "operand of type %0 cannot be cast to a pointer type"),
+    ("err_cast_pointer_to_non_pointer_int", MessageClass::Error, "", "pointer cannot be cast to type %0"),
+    ("err_conflicting_types", MessageClass::Error, "", "conflicting types for %0"),
+    ("err_continue_not_in_loop", MessageClass::Error, "", "'continue' statement not in loop statement"),
+    ("err_cxx23_size_t_suffix", MessageClass::Error, "", "'size_t' suffix for literals is a C++23 feature"),
+    ("err_decimal_unsupported", MessageClass::Error, "", "GNU decimal type extension not supported"),
+    ("err_decl_negative_array_size", MessageClass::Error, "", "'%0' declared as an array with a negative size"),
+    ("err_declaration_does_not_declare_param", MessageClass::Error, "", "declaration does not declare a parameter"),
+    ("err_declarator_need_ident", MessageClass::Error, "", "declarator requires an identifier"),
+    ("err_decrement_bool", MessageClass::Error, "", "cannot decrement expression of type bool"),
+    ("err_default_not_in_switch", MessageClass::Error, "", "'default' statement not in switch statement"),
+    ("err_designator_for_scalar_or_sizeless_init", MessageClass::Error, "", "designator in initializer for %select{scalar|indivisible sizeless}0 type %1"),
+    ("err_duplicate_case", MessageClass::Error, "", "duplicate case value '%0'"),
+    ("err_duplicate_case_differing_expr", MessageClass::Error, "", "duplicate case value: '%0' and '%1' both equal '%2'"),
+    ("err_duplicate_member", MessageClass::Error, "", "duplicate member %0"),
+    ("err_ellipsis_first_param", MessageClass::Error, "", "ISO C requires a named parameter before '...'"),
+    ("err_empty_enum", MessageClass::Error, "", "use of empty enum"),
+    ("err_empty_scalar_initializer", MessageClass::Error, "", "scalar initializer cannot be empty"),
+    ("err_enumerator_list_missing_comma", MessageClass::Error, "", "missing ',' between enumerators"),
+    ("err_expected", MessageClass::Error, "", "expected %0"),
+    ("err_expected_after", MessageClass::Error, "", "expected %1 after %0"),
+    ("err_expected_case_before_expression", MessageClass::Error, "", "expected 'case' keyword before expression"),
+    ("err_expected_either", MessageClass::Error, "", "expected %0 or %1"),
+    ("err_expected_equal_designator", MessageClass::Error, "", "expected '=' or another designator"),
+    ("err_expected_expression", MessageClass::Error, "", "expected expression"),
+    ("err_expected_external_declaration", MessageClass::Error, "", "expected external declaration"),
+    ("err_expected_field_designator", MessageClass::Error, "", "expected a field designator, such as '.field = 4'"),
+    ("err_expected_fn_body", MessageClass::Error, "", "expected function body after function declarator"),
+    ("err_expected_lparen_after", MessageClass::Error, "", "expected '(' after '%0'"),
+    ("err_expected_member_name_or_semi", MessageClass::Error, "", "expected member name or ';' after declaration specifiers"),
+    ("err_expected_parentheses_around_typename", MessageClass::Error, "", "expected parentheses around type name in %0 expression"),
+    ("err_expected_semi_after_expr", MessageClass::Error, "", "expected ';' after expression"),
+    ("err_expected_semi_after_static_assert", MessageClass::Error, "", "expected ';' after '%0'"),
+    ("err_expected_semi_after_stmt", MessageClass::Error, "", "expected ';' after %0 statement"),
+    ("err_expected_semi_decl_list", MessageClass::Error, "", "expected ';' at end of declaration list"),
+    ("err_expected_semi_declaration", MessageClass::Error, "", "expected ';' at end of declaration"),
+    ("err_expected_semi_for", MessageClass::Error, "", "expected ';' in 'for' statement specifier"),
+    ("err_expected_statement", MessageClass::Error, "", "expected statement"),
+    ("err_expected_string_literal", MessageClass::Error, "", "expected string literal %select{in %1|for diagnostic message in static_assert|for optional message in 'availability' attribute|for %select{language name|source container name|USR}1 in 'external_source_symbol' attribute|as argument of '%1' attribute}0"),
+    ("err_expected_type", MessageClass::Error, "", "expected a type"),
+    ("err_expected_unqualified_id", MessageClass::Error, "", "expected %select{identifier|unqualified-id}0"),
+    ("err_expected_while", MessageClass::Error, "", "expected 'while' in do/while loop"),
+    ("err_expr_not_ice", MessageClass::Error, "", "expression is not an %select{integer|integral}0 constant expression"),
+    ("err_extern_non_extern", MessageClass::Error, "", "extern declaration of %0 follows non-extern declaration"),
+    ("err_extraneous_closing_brace", MessageClass::Error, "", "extraneous closing brace ('}')"),
+    ("err_extraneous_rparen_in_condition", MessageClass::Error, "", "extraneous ')' after condition, expected a statement"),
+    ("err_extraneous_token_before_semi", MessageClass::Error, "", "extraneous '%0' before ';'"),
+    ("err_field_declared_as_function", MessageClass::Error, "", "field %0 declared as a function"),
+    ("err_field_designator_non_aggr", MessageClass::Error, "", "field designator cannot initialize a %select{non-struct, non-union|non-class}0 type %1"),
+    ("err_field_designator_unknown", MessageClass::Error, "", "field designator %0 does not refer to any field in type %1"),
+    ("err_field_incomplete_or_sizeless", MessageClass::Error, "", "field has %select{incomplete|sizeless}0 type %1"),
+    ("err_flexible_array_not_at_end", MessageClass::Error, "", "flexible array member %0 with type %1 is not at the end of %select{struct|interface|union|class|enum}2"),
+    ("err_func_def_incomplete_result", MessageClass::Error, "", "incomplete result type %0 in function definition"),
+    ("err_func_returning_array_function", MessageClass::Error, "", "function cannot return %select{array|function}0 type %1"),
+    ("err_func_returning_qualified_void", MessageClass::ExtWarn, "qualified-void-return-type", "function cannot return qualified void type %0"),
+    ("err_function_declared_typedef", MessageClass::Error, "", "function definition declared 'typedef'"),
+    ("err_function_definition_not_allowed", MessageClass::Error, "", "function definition is not allowed here"),
+    ("err_ice_not_integral", MessageClass::Error, "", "%select{integer|integral}1 constant expression must have %select{integer|integral or unscoped enumeration}1 type, not %0"),
+    ("err_ident_list_in_fn_declaration", MessageClass::Error, "", "a parameter list without types is only allowed in a function definition"),
+    ("err_illegal_decl_array_of_functions", MessageClass::Error, "", "'%0' declared as array of functions of type %1"),
+    ("err_illegal_initializer", MessageClass::Error, "", "illegal initializer (only variables can be initialized)"),
+    ("err_imaginary_not_supported", MessageClass::Error, "", "imaginary types are not supported"),
+    ("err_incomplete_type", MessageClass::Error, "", "incomplete type %0 where a complete type is required"),
+    ("err_init_element_not_constant", MessageClass::Error, "", "initializer element is not a compile-time constant"),
+    ("err_inline_main", MessageClass::Error, "", "'main' is not allowed to be declared inline"),
+    ("err_inline_non_function", MessageClass::Error, "", "'inline' can only appear on functions%select{| and non-local variables}0"),
+    ("err_integer_literal_too_large", MessageClass::Error, "", "integer literal is too large to be represented in any %select{signed |}0integer type"),
+    ("err_invalid_complex_spec", MessageClass::Error, "", "'_Complex %0' is invalid"),
+    ("err_invalid_decl_spec_combination", MessageClass::Error, "", "cannot combine with previous '%0' declaration specifier"),
+    ("err_invalid_sign_spec", MessageClass::Error, "", "'%0' cannot be signed or unsigned"),
+    ("err_invalid_storage_class_in_func_decl", MessageClass::Error, "", "invalid storage class specifier in function declarator"),
+    ("err_invalid_thread", MessageClass::Error, "", "'%0' is only allowed on variable declarations"),
+    ("err_invalid_token_after_toplevel_declarator", MessageClass::Error, "", "expected ';' after top level declarator"),
+    ("err_invalid_width_spec", MessageClass::Error, "", "'%select{|short|long|long long}0 %1' is invalid"),
+    ("err_keyword_as_parameter", MessageClass::Error, "", "invalid parameter name: '%0' is a keyword"),
+    ("err_main_arg_wrong", MessageClass::Error, "", "%select{first|second|third|fourth}0 parameter of 'main' (%select{argument count|argument array|environment|platform-specific data}0) must be of type %1"),
+    ("err_main_surplus_args", MessageClass::Error, "", "too many parameters (%0) for 'main': must be 0, 2, or 3"),
+    ("err_missing_comma_before_ellipsis", MessageClass::Error, "", "C requires a comma prior to the ellipsis in a variadic function type"),
+    ("err_missing_param", MessageClass::Error, "", "expected parameter declarator"),
+    ("err_missing_type_specifier", MessageClass::Error, "", "a type specifier is required for all declarations"),
+    ("err_multiple_default_labels_defined", MessageClass::Error, "", "multiple default labels in one switch"),
+    ("err_nested_redefinition", MessageClass::Error, "", "nested redefinition of %0"),
+    ("err_no_matching_param", MessageClass::Error, "", "parameter named %0 is missing"),
+    ("err_no_member", MessageClass::Error, "", "no member named %0 in %1"),
+    ("err_non_extern_extern", MessageClass::Error, "", "non-extern declaration of %0 follows extern declaration"),
+    ("err_non_static_static", MessageClass::Error, "", "non-static declaration of %0 follows static declaration"),
+    ("err_non_thread_thread", MessageClass::Error, "", "non-thread-local declaration of %0 follows thread-local declaration"),
+    ("err_noreturn_non_function", MessageClass::Error, "", "'_Noreturn' can only appear on functions"),
+    ("err_not_integral_type_anon_bitfield", MessageClass::Error, "", "anonymous bit-field has non-integral type %0"),
+    ("err_not_integral_type_bitfield", MessageClass::Error, "", "bit-field %0 has non-integral type %1"),
+    ("err_param_default_argument", MessageClass::Error, "", "C does not support default arguments"),
+    ("err_param_redefinition", MessageClass::Error, "", "redefinition of parameter %0"),
+    ("err_param_with_void_type", MessageClass::Error, "", "argument may not have 'void' type"),
+    ("err_parameters_retval_cannot_have_fp16_type", MessageClass::Error, "", "%select{parameters|function return value}0 cannot have __fp16 type; did you forget * ?"),
+    ("err_postfix_after_unary_requires_parens", MessageClass::Error, "", "expression cannot be followed by a postfix %0 operator; add parentheses"),
+    ("err_pragma_fenv_requires_precise", MessageClass::Error, "", "'#pragma STDC FENV_ACCESS ON' is illegal when precise is disabled"),
+    ("err_pragma_file_or_compound_scope", MessageClass::Error, "", "'#pragma %0' can only appear at file scope or at the start of a compound statement"),
+    ("err_realimag_invalid_type", MessageClass::Error, "", "invalid type %0 to %1 operator"),
+    ("err_redeclaration_different_type", MessageClass::Error, "", "redeclaration of %0 with a different type%diff{: $ vs $|}1,2"),
+    ("err_redefinition", MessageClass::Error, "", "redefinition of %0"),
+    ("err_redefinition_different_kind", MessageClass::Error, "", "redefinition of %0 as different kind of symbol"),
+    ("err_redefinition_different_type", MessageClass::Error, "", "redefinition of %0 with a different type%diff{: $ vs $|}1,2"),
+    ("err_redefinition_different_typedef", MessageClass::Error, "", "%select{typedef|type alias|type alias template}0 redefinition with different types%diff{ ($ vs $)|}1,2"),
+    ("err_redefinition_extern_inline", MessageClass::Error, "", "redefinition of a 'extern inline' function %0 is not supported in %select{C99 mode|C++}1"),
+    ("err_redefinition_of_enumerator", MessageClass::Error, "", "redefinition of enumerator %0"),
+    ("err_redefinition_of_label", MessageClass::Error, "", "redefinition of label %0"),
+    ("err_redefinition_variably_modified_typedef", MessageClass::Error, "", "redefinition of %select{typedef|type alias}0 for variably-modified type %1"),
+    ("err_return_init_list", MessageClass::Error, "", "%select{void function|void method|constructor|destructor}1 %0 must not return a value"),
+    ("err_sizeof_alignof_incomplete_or_sizeless_type", MessageClass::Error, "", "invalid application of '%0' to %select{an incomplete|sizeless}1 type %2"),
+    ("err_sizeof_alignof_typeof_bitfield", MessageClass::Error, "", "invalid application of '%select{sizeof|alignof|typeof|typeof_unqual}0' to bit-field"),
+    ("err_static_assert_expression_is_not_constant", MessageClass::Error, "", "static assertion expression is not an integral constant expression"),
+    ("err_static_assert_failed", MessageClass::Error, "", "static assertion failed%select{: %1|}0"),
+    ("err_static_assert_requirement_failed", MessageClass::Error, "", "static assertion failed due to requirement '%0'%select{: %2|}1"),
+    ("err_static_block_func", MessageClass::Error, "", "function declared in block scope cannot have 'static' storage class"),
+    ("err_static_non_static", MessageClass::Error, "", "static declaration of %0 follows non-static declaration%select{|; behavior is undefined}1"),
+    ("err_subscript_function_type", MessageClass::Error, "", "subscript of pointer to function type %0"),
+    ("err_subscript_incomplete_or_sizeless_type", MessageClass::Error, "", "subscript of pointer to %select{incomplete|sizeless}0 type %1"),
+    ("err_tentative_def_incomplete_type", MessageClass::Error, "", "tentative definition has type %0 that is never completed"),
+    ("err_thread_non_global", MessageClass::Error, "", "'%0' variables must have global storage"),
+    ("err_thread_non_thread", MessageClass::Error, "", "thread-local declaration of %0 follows non-thread-local declaration"),
+    ("err_type_unsupported", MessageClass::Error, "", "%0 is not supported on this target"),
+    ("err_typecheck_address_of", MessageClass::Error, "", "address of %select{bit-field|vector element|property expression|register variable|matrix element}0 requested"),
+    ("err_typecheck_arithmetic_incomplete_or_sizeless_type", MessageClass::Error, "", "arithmetic on a pointer to %select{an incomplete|sizeless}0 type %1"),
+    ("err_typecheck_array_not_modifiable_lvalue", MessageClass::Error, "", "array type %0 is not assignable"),
+    ("err_typecheck_assign_const", MessageClass::Error, "", "%select{cannot assign to return value because function %1 returns a const value|cannot assign to variable %1 with const-qualified type %2|cannot assign to %select{non-|}1static data member %2 with const-qualified type %3|cannot assign to %select{variable %2|non-static data member %2|lvalue}1 with %select{|nested }3const-qualified data member %4|read-only variable is not assignable}0"),
+    ("err_typecheck_call_not_function", MessageClass::Error, "", "called object type %0 is not a function or function pointer"),
+    ("err_typecheck_call_too_few_args", MessageClass::Error, "", "too few %select{|||execution configuration }0%select{|non-object }3arguments to %select{function|block|method|kernel function}0 call, expected %1, have %2"),
+    ("err_typecheck_call_too_many_args", MessageClass::Error, "", "too many %select{|||execution configuration }0%select{|non-object }3arguments to %select{function|block|method|kernel function}0 call, expected %1, have %2"),
+    ("err_typecheck_cast_to_incomplete", MessageClass::Error, "", "cast to incomplete type %0"),
+    ("err_typecheck_cast_to_union_no_type", MessageClass::Error, "", "cast to union type from type %0 not present in union"),
+    ("err_typecheck_cond_expect_scalar", MessageClass::Error, "", "used type %0 where arithmetic or pointer type is required"),
+    ("err_typecheck_cond_incompatible_operands", MessageClass::Error, "", "incompatible operand types%diff{ ($ and $)|}0,1"),
+    ("err_typecheck_convert_incompatible", MessageClass::Error, "", "%select{%diff{assigning to $ from incompatible type $|assigning to type from incompatible type}0,1|%diff{passing $ to parameter of incompatible type $|passing type to parameter of incompatible type}0,1|%diff{returning $ from a function with incompatible result type $|returning type from a function with incompatible result type}0,1|%diff{converting $ to incompatible type $|converting type to incompatible type}0,1|%diff{initializing $ with an expression of incompatible type $|initializing type with an expression of incompatible type}0,1|%diff{sending $ to parameter of incompatible type $|sending type to parameter of incompatible type}0,1|%diff{casting $ to incompatible type $|casting type to incompatible type}0,1}2%select{|; dereference with *|; take the address with &|; remove *|; remove &}3%select{|: different classes%diff{ ($ vs $)|}5,6|: different number of parameters (%5 vs %6)|: type mismatch at %ordinal5 parameter%diff{ ($ vs $)|}6,7|: different return type%diff{ ($ vs $)|}5,6|: different qualifiers (%5 vs %6)|: different exception specifications}4"),
+    ("err_typecheck_decl_incomplete_type", MessageClass::Error, "", "variable has incomplete type %0"),
+    ("err_typecheck_expect_scalar_operand", MessageClass::Error, "", "operand of type %0 where arithmetic or pointer type is required"),
+    ("err_typecheck_expression_not_modifiable_lvalue", MessageClass::Error, "", "expression is not assignable"),
+    ("err_typecheck_field_variable_size", MessageClass::Error, "", "fields must have a constant size: 'variable length array in structure' extension will never be supported"),
+    ("err_typecheck_illegal_increment_decrement", MessageClass::Error, "", "cannot %select{decrement|increment}1 value of type %0"),
+    ("err_typecheck_incomplete_array_needs_initializer", MessageClass::Error, "", "definition of variable with array type needs an explicit size or an initializer"),
+    ("err_typecheck_incomplete_tag", MessageClass::Error, "", "incomplete definition of type %0"),
+    ("err_typecheck_incomplete_type_not_modifiable_lvalue", MessageClass::Error, "", "incomplete type %0 is not assignable"),
+    ("err_typecheck_indirection_requires_pointer", MessageClass::Error, "", "indirection requires pointer operand (%0 invalid)"),
+    ("err_typecheck_invalid_lvalue_addrof", MessageClass::Error, "", "cannot take the address of an rvalue of type %0"),
+    ("err_typecheck_invalid_operands", MessageClass::Error, "", "invalid operands to binary expression (%0 and %1)"),
+    ("err_typecheck_invalid_restrict_invalid_pointee", MessageClass::Error, "", "pointer to function type %0 may not be 'restrict' qualified"),
+    ("err_typecheck_invalid_restrict_not_pointer", MessageClass::Error, "", "restrict requires a pointer or reference (%0 is invalid)"),
+    ("err_typecheck_lvalue_casts_not_supported", MessageClass::Error, "", "assignment to cast is illegal, lvalue casts are not supported"),
+    ("err_typecheck_lvalue_imag_not_modifiable_lvalue", MessageClass::Error, "", "'__imag' operator with non-complex operand type %0 is not assignable"),
+    ("err_typecheck_member_reference_arrow", MessageClass::Error, "", "member reference type %0 is not a pointer"),
+    ("err_typecheck_member_reference_struct_union", MessageClass::Error, "", "member reference base type %0 is not a structure or union"),
+    ("err_typecheck_member_reference_suggestion", MessageClass::Error, "", "member reference type %0 is %select{a|not a}1 pointer; did you mean to use '%select{->|.}1'?"),
+    ("err_typecheck_negative_array_size", MessageClass::Error, "", "array size is negative"),
+    ("err_typecheck_non_object_not_modifiable_lvalue", MessageClass::Error, "", "non-object type %0 is not assignable"),
+    ("err_typecheck_sclass_fscope", MessageClass::Error, "", "illegal storage class on file-scoped variable"),
+    ("err_typecheck_sclass_func", MessageClass::Error, "", "illegal storage class on function"),
+    ("err_typecheck_statement_requires_integer", MessageClass::Error, "", "statement requires expression of integer type (%0 invalid)"),
+    ("err_typecheck_statement_requires_scalar", MessageClass::Error, "", "statement requires expression of scalar type (%0 invalid)"),
+    ("err_typecheck_sub_ptr_compatible", MessageClass::Error, "", "%diff{$ and $ are not pointers to compatible types|pointers to incompatible types}0,1"),
+    ("err_typecheck_subscript_not_integer", MessageClass::Error, "", "array subscript is not an integer"),
+    ("err_typecheck_subscript_value", MessageClass::Error, "", "subscripted value is not an array, pointer, or vector"),
+    ("err_typecheck_unary_expr", MessageClass::Error, "", "invalid argument type %0 to unary expression"),
+    ("err_typename_invalid_functionspec", MessageClass::Error, "", "type name does not allow function specifier to be specified"),
+    ("err_typename_invalid_storageclass", MessageClass::Error, "", "type name does not allow storage class to be specified"),
+    ("err_typename_requires_specqual", MessageClass::Error, "", "type name requires a specifier or qualifier"),
+    ("err_undeclared_label_use", MessageClass::Error, "", "use of undeclared label %0"),
+    ("err_undeclared_var_use", MessageClass::Error, "", "use of undeclared identifier %0"),
+    ("err_unexpected_typedef", MessageClass::Error, "", "unexpected type name %0: expected expression"),
+    ("err_unexpected_typedef_ident", MessageClass::Error, "", "unexpected type name %0: expected identifier"),
+    ("err_unknown_typename", MessageClass::Error, "", "unknown type name %0"),
+    ("err_unspecified_size_with_static", MessageClass::Error, "", "'static' may not be used without an array size"),
+    ("err_unspecified_vla_size_with_static", MessageClass::Error, "", "'static' may not be used with an unspecified variable length array size"),
+    ("err_unsupported_string_concat", MessageClass::Error, "", "unsupported non-standard concatenation of string literals"),
+    ("err_use_with_wrong_tag", MessageClass::Error, "", "use of %0 with tag type that does not match previous declaration"),
+    ("err_variable_object_no_init", MessageClass::Error, "", "variable-sized object may not be initialized"),
+    ("err_vla_decl_has_extern_linkage", MessageClass::Error, "", "variable length array declaration cannot have 'extern' linkage"),
+    ("err_vla_decl_has_static_storage", MessageClass::Error, "", "variable length array declaration cannot have 'static' storage duration"),
+    ("err_vla_decl_in_file_scope", MessageClass::Error, "", "variable length array declaration not allowed at file scope"),
+    ("err_vm_decl_has_extern_linkage", MessageClass::Error, "", "variably modified type declaration cannot have 'extern' linkage"),
+    ("err_vm_decl_in_file_scope", MessageClass::Error, "", "variably modified type declaration not allowed at file scope"),
+    ("err_void_only_param", MessageClass::Error, "", "'void' must be the first and only parameter if specified"),
+    ("err_void_param_qualified", MessageClass::Error, "", "'void' as parameter must not have type qualifiers"),
+    ("err_while_loop_outside_of_a_function", MessageClass::Error, "", "while loop outside of a function"),
+    ("ext_array_init_parens", MessageClass::ExtWarnError, "gnu-array-member-paren-init", "parenthesized initialization of a member array is a GNU extension"),
+    ("ext_c11_anonymous_struct", MessageClass::Extension, "c11-extensions", "anonymous structs are a C11 extension"),
+    ("ext_c11_feature", MessageClass::Extension, "c11-extensions", "'%0' is a C11 extension"),
+    ("ext_c23_enum_value_not_int", MessageClass::Extension, "c23-extensions", "%select{|incremented }0enumerator value which exceeds the range of 'int' is a C23 extension (%1 is too %select{small|large}2)"),
+    ("ext_c2y_case_range", MessageClass::Extension, "c2y-extensions", "case ranges are a C2y extension"),
+    ("ext_c99_array_usage", MessageClass::Extension, "c99-extensions", "%select{qualifier in |static |}0array size %select{||'[*] '}0is a C99 feature"),
+    ("ext_c99_compound_literal", MessageClass::Extension, "c99-extensions", "compound literals are a C99-specific feature"),
+    ("ext_c99_feature", MessageClass::Extension, "c99-extensions", "'%0' is a C99 extension"),
+    ("ext_c99_flexible_array_member", MessageClass::Extension, "c99-extensions", "flexible array members are a C99 feature"),
+    ("ext_c99_longlong", MessageClass::Extension, "long-long", "'long long' is an extension when C99 mode is not enabled"),
+    ("ext_c99_variable_decl_in_for_loop", MessageClass::Extension, "c99-extensions", "variable declaration in for loop is a C99-specific feature"),
+    ("ext_c_empty_initializer", MessageClass::Extension, "c23-extensions", "use of an empty initializer is a C23 extension"),
+    ("ext_designated_init", MessageClass::Extension, "c99-designator", "designated initializers are a C99 feature"),
+    ("ext_duplicate_declspec", MessageClass::Extension, "duplicate-decl-specifier", "duplicate '%0' declaration specifier"),
+    ("ext_empty_struct_union", MessageClass::Extension, "gnu-empty-struct", "empty %select{struct|union}0 is a GNU extension"),
+    ("ext_empty_translation_unit", MessageClass::Extension, "empty-translation-unit", "ISO C requires a translation unit to contain at least one declaration"),
+    ("ext_enum_too_large", MessageClass::ExtWarn, "enum-too-large", "enumeration values exceed range of largest integer"),
+    ("ext_enumerator_increment_too_large", MessageClass::ExtWarn, "enum-too-large", "incremented enumerator value %0 is not representable in the largest integer type"),
+    ("ext_enumerator_list_comma_c", MessageClass::Extension, "c99-extensions", "commas at the end of enumerator lists are a C99-specific feature"),
+    ("ext_excess_initializers", MessageClass::ExtWarn, "excess-initializers", "excess elements in %select{array|vector|matrix|scalar|union|struct}0 initializer"),
+    ("ext_expected_semi_decl_list", MessageClass::ExtWarn, "", "expected ';' at end of declaration list"),
+    ("ext_expr_not_ice", MessageClass::Extension, "gnu-folding-constant", "expression is not an %select{integer|integral}0 constant expression; folding it to a constant is a GNU extension"),
+    ("ext_extra_semi", MessageClass::Extension, "extra-semi", "extra ';' %select{outside of a function|inside a %1|inside instance variable list|after member function definition}0"),
+    ("ext_flexible_array_empty_aggregate_gnu", MessageClass::Extension, "gnu-empty-struct", "flexible array member %0 in otherwise empty %select{struct|interface|union|class|enum}1 is a GNU extension"),
+    ("ext_flexible_array_in_array", MessageClass::Extension, "flexible-array-extensions", "%0 may not be used as an array element due to flexible array member"),
+    ("ext_flexible_array_in_struct", MessageClass::Extension, "flexible-array-extensions", "%0 may not be nested in a struct due to flexible array member"),
+    ("ext_flexible_array_union_gnu", MessageClass::Extension, "gnu-flexible-array-union-member", "flexible array member %0 in a union is a GNU extension"),
+    ("ext_forward_ref_enum", MessageClass::Extension, "", "ISO C forbids forward references to 'enum' types"),
+    ("ext_gnu_conditional_expr", MessageClass::Extension, "gnu-conditional-omitted-operand", "use of GNU ?: conditional expression extension, omitting middle operand"),
+    ("ext_gnu_missing_equal_designator", MessageClass::ExtWarn, "gnu-designator", "use of GNU 'missing =' extension in designator"),
+    ("ext_gnu_ptr_func_arith", MessageClass::Extension, "gnu-pointer-arith", "arithmetic on%select{ a|}0 pointer%select{|s}0 to%select{ the|}2 function type%select{|s}2 %1%select{| and %3}2 is a GNU extension"),
+    ("ext_gnu_statement_expr", MessageClass::Extension, "gnu-statement-expression", "use of GNU statement expression extension"),
+    ("ext_gnu_subscript_void_type", MessageClass::Extension, "gnu-pointer-arith", "subscript of a pointer to void is a GNU extension"),
+    ("ext_gnu_void_ptr", MessageClass::Extension, "gnu-pointer-arith", "arithmetic on%select{ a|}0 pointer%select{|s}0 to void is a GNU extension"),
+    ("ext_ident_list_in_param", MessageClass::Extension, "", "type-less parameter names in function declaration"),
+    ("ext_implicit_function_decl_c99", MessageClass::ExtWarnError, "implicit-function-declaration", "call to undeclared function %0; ISO C99 and later do not support implicit function declarations"),
+    ("ext_initializer_string_for_char_array_too_long", MessageClass::ExtWarn, "excess-initializers", "initializer-string for char array is too long"),
+    ("ext_integer_complement_complex", MessageClass::Extension, "", "ISO C does not support '~' for complex conjugation of %0"),
+    ("ext_integer_complex", MessageClass::Extension, "gnu-complex-integer", "complex integer types are a GNU extension"),
+    ("ext_integer_literal_too_large_for_signed", MessageClass::ExtWarn, "implicitly-unsigned-literal", "integer literal is too large to be represented in a signed integer type, interpreting as unsigned"),
+    ("ext_main_no_return", MessageClass::Extension, "main-return-type", "implicit '0' return value from 'main' is a C99 extension"),
+    ("ext_main_returns_nonint", MessageClass::ExtWarn, "main-return-type", "return type of 'main' is not 'int'"),
+    ("ext_many_braces_around_init", MessageClass::ExtWarn, "many-braces-around-scalar-init", "too many braces around %select{scalar |}0initializer"),
+    ("ext_missing_type_specifier", MessageClass::ExtWarnError, "implicit-int", "type specifier missing, defaults to 'int'; ISO C99 and later do not support implicit int"),
+    ("ext_mixed_decls_code", MessageClass::Extension, "declaration-after-statement", "mixing declarations and code is a C99 extension"),
+    ("ext_nested_pointer_qualifier_mismatch", MessageClass::ExtWarn, "incompatible-pointer-types-discards-qualifiers", "%select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2 discards qualifiers in nested pointer types"),
+    ("ext_no_declarators", MessageClass::ExtWarn, "missing-declarations", "declaration does not declare anything"),
+    ("ext_no_named_members_in_struct_union", MessageClass::Extension, "gnu-empty-struct", "%select{struct|union}0 without named members is a GNU extension"),
+    ("ext_noreturn_main", MessageClass::ExtWarn, "main", "'main' is not allowed to be declared _Noreturn"),
+    ("ext_param_not_declared", MessageClass::ExtWarnError, "implicit-int", "parameter %0 was not declared, defaults to 'int'; ISO C99 and later do not support implicit int"),
+    ("ext_parameter_name_omitted_c23", MessageClass::ExtWarn, "c23-extensions", "omitting the parameter name in a function definition is a C23 extension"),
+    ("ext_plain_complex", MessageClass::ExtWarn, "", "plain '_Complex' requires a type specifier; assuming '_Complex double'"),
+    ("ext_pp_bad_paste_ms", MessageClass::ExtWarnError, "invalid-token-paste", "pasting formed '%0', an invalid preprocessing token"),
+    ("ext_predef_outside_function", MessageClass::Warning, "predefined-identifier-outside-function", "predefined identifier is only valid inside function"),
+    ("ext_redefinition_of_typedef", MessageClass::ExtWarn, "typedef-redefinition", "redefinition of typedef %0 is a C11 feature"),
+    ("ext_return_has_expr", MessageClass::ExtWarnError, "return-mismatch", "%select{void function|void method|constructor|destructor}1 %0 should not return a value"),
+    ("ext_return_has_void_expr", MessageClass::Extension, "", "void %select{function|method|block}1 %0 should not return void expression"),
+    ("ext_return_missing_expr", MessageClass::ExtWarnError, "return-mismatch", "non-void %select{function|method}1 %0 should return a value"),
+    ("ext_sizeof_alignof_function_type", MessageClass::Extension, "pointer-arith", "invalid application of '%0' to a function type"),
+    ("ext_sizeof_alignof_void_type", MessageClass::Extension, "pointer-arith", "invalid application of '%0' to a void type"),
+    ("ext_thread_before", MessageClass::Extension, "", "'__thread' before '%0'"),
+    ("ext_token_used", MessageClass::Extension, "language-extension-token", "extension used"),
+    ("ext_typecheck_addrof_void", MessageClass::Extension, "", "ISO C forbids taking the address of an expression of type 'void'"),
+    ("ext_typecheck_cast_nonscalar", MessageClass::Extension, "", "C99 forbids casting nonscalar type %0 to the same type"),
+    ("ext_typecheck_cast_to_union", MessageClass::Extension, "gnu-union-cast", "cast to union type is a GNU extension"),
+    ("ext_typecheck_compare_complete_incomplete_pointers", MessageClass::Extension, "c11-extensions", "pointer comparisons before C11 need to be between two complete or two incomplete types; %0 is %select{|in}2complete and %1 is %select{|in}3complete"),
+    ("ext_typecheck_comparison_of_distinct_pointers", MessageClass::ExtWarn, "compare-distinct-pointer-types", "comparison of distinct pointer types%diff{ ($ and $)|}0,1"),
+    ("ext_typecheck_comparison_of_fptr_to_void", MessageClass::Extension, "", "equality comparison between function pointer and void pointer (%0 and %1)"),
+    ("ext_typecheck_comparison_of_pointer_integer", MessageClass::ExtWarn, "pointer-integer-compare", "comparison between pointer and integer (%0 and %1)"),
+    ("ext_typecheck_cond_incompatible_pointers", MessageClass::ExtWarn, "pointer-type-mismatch", "pointer type mismatch%diff{ ($ and $)|}0,1"),
+    ("ext_typecheck_cond_one_void", MessageClass::Extension, "", "C99 forbids conditional expressions with only one void side"),
+    ("ext_typecheck_cond_pointer_integer_mismatch", MessageClass::ExtWarn, "conditional-type-mismatch", "pointer/integer type mismatch in conditional expression%diff{ ($ and $)|}0,1"),
+    ("ext_typecheck_convert_discards_qualifiers", MessageClass::ExtWarn, "incompatible-pointer-types-discards-qualifiers", "%select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2 discards qualifiers"),
+    ("ext_typecheck_convert_incompatible_function_pointer", MessageClass::ExtWarnError, "incompatible-function-pointer-types", "incompatible function pointer types %select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2%select{|; dereference with *|; take the address with &|; remove *|; remove &}3"),
+    ("ext_typecheck_convert_incompatible_pointer", MessageClass::ExtWarnError, "incompatible-pointer-types", "incompatible pointer types %select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2%select{|; dereference with *|; take the address with &|; remove *|; remove &}3"),
+    ("ext_typecheck_convert_incompatible_pointer_sign", MessageClass::ExtWarn, "pointer-sign", "%select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2 converts between pointers to integer types %select{with different sign|where one is of the unique plain 'char' type and the other is not}3"),
+    ("ext_typecheck_convert_int_pointer", MessageClass::ExtWarnError, "int-conversion", "incompatible integer to pointer conversion %select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2%select{|; dereference with *|; take the address with &|; remove *|; remove &}3"),
+    ("ext_typecheck_convert_pointer_int", MessageClass::ExtWarnError, "int-conversion", "incompatible pointer to integer conversion %select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2%select{|; dereference with *|; take the address with &|; remove *|; remove &}3"),
+    ("ext_typecheck_convert_pointer_void_func", MessageClass::Extension, "", "%select{%diff{assigning to $ from $|assigning to different types}0,1|%diff{passing $ to parameter of type $|passing to parameter of different type}0,1|%diff{returning $ from a function with result type $|returning from function with different return type}0,1|%diff{converting $ to type $|converting between types}0,1|%diff{initializing $ with an expression of type $|initializing with expression of different type}0,1|%diff{sending $ to parameter of type $|sending to parameter of different type}0,1|%diff{casting $ to type $|casting between types}0,1}2 converts between void pointer and function pointer"),
+    ("ext_typecheck_decl_incomplete_type", MessageClass::Extension, "tentative-definition-incomplete-type", "tentative definition of variable with internal linkage has incomplete %select{non-array|array}0 type %1"),
+    ("ext_typecheck_function_qualifiers_unspecified", MessageClass::ExtWarn, "ignored-qualifiers", "'%0' qualifier on function type %1 has no effect and is a Clang extension"),
+    ("ext_typecheck_indirection_through_void_pointer", MessageClass::ExtWarn, "void-ptr-dereference", "ISO C does not allow indirection on operand of type %0"),
+    ("ext_typecheck_ordered_comparison_of_function_pointers", MessageClass::ExtWarn, "ordered-compare-function-pointers", "ordered comparison of function pointers (%0 and %1)"),
+    ("ext_typecheck_ordered_comparison_of_pointer_and_zero", MessageClass::Extension, "", "ordered comparison between pointer and zero (%0 and %1) is an extension"),
+    ("ext_typecheck_ordered_comparison_of_pointer_integer", MessageClass::ExtWarn, "", "ordered comparison between pointer and integer (%0 and %1)"),
+    ("ext_typecheck_zero_array_size", MessageClass::Extension, "zero-length-array", "zero size arrays are an extension"),
+    ("ext_typedef_without_a_name", MessageClass::ExtWarn, "missing-declarations", "typedef requires a name"),
+    ("ext_variable_sized_type_in_struct", MessageClass::ExtWarn, "gnu-variable-sized-type-not-at-end", "field %0 with variable sized type %1 not at the end of a struct or class is a GNU extension"),
+    ("ext_vla", MessageClass::Extension, "vla-extension", "variable length arrays are a C99 feature"),
+    ("ext_vla_folded_to_constant", MessageClass::ExtWarn, "gnu-folding-constant", "variable length array folded to constant array as an extension"),
+    ("ext_warn_duplicate_declspec", MessageClass::ExtWarn, "duplicate-decl-specifier", "duplicate '%0' declaration specifier"),
+    ("note_bracket_depth", MessageClass::Note, "", "use -fbracket-depth=N to increase maximum nesting level"),
+    ("note_callee_decl", MessageClass::Note, "", "%0 declared here"),
+    ("note_condition_assign_silence", MessageClass::Note, "", "place parentheses around the assignment to silence this warning"),
+    ("note_condition_assign_to_comparison", MessageClass::Note, "", "use '==' to turn this assignment into an equality comparison"),
+    ("note_condition_or_assign_to_comparison", MessageClass::Note, "", "use '!=' to turn this compound assignment into an inequality comparison"),
+    ("note_conflicting_prototype", MessageClass::Note, "", "conflicting prototype is here"),
+    ("note_duplicate_case_prev", MessageClass::Note, "", "previous case defined here"),
+    ("note_empty_body_on_separate_line", MessageClass::Note, "", "put the semicolon on a separate line to silence this warning"),
+    ("note_equality_comparison_silence", MessageClass::Note, "", "remove extraneous parentheses around the comparison to silence this warning"),
+    ("note_equality_comparison_to_assign", MessageClass::Note, "", "use '=' to turn this equality comparison into an assignment"),
+    ("note_forward_declaration", MessageClass::Note, "", "forward declaration of %0"),
+    ("note_function_warning_silence", MessageClass::Note, "", "prefix with the address-of operator to silence this warning"),
+    ("note_inequality_comparison_to_or_assign", MessageClass::Note, "", "use '|=' to turn this inequality comparison into an or-assignment"),
+    ("note_logical_not_fix", MessageClass::Note, "", "add parentheses after the '!' to evaluate the %select{comparison|bitwise operator}0 first"),
+    ("note_logical_not_silence_with_parens", MessageClass::Note, "", "add parentheses around left hand side expression to silence this warning"),
+    ("note_main_remove_noreturn", MessageClass::Note, "", "remove '_Noreturn'"),
+    ("note_matching", MessageClass::Note, "", "to match this %0"),
+    ("note_next_field_declaration", MessageClass::Note, "", "next field declaration is here"),
+    ("note_precedence_bitwise_first", MessageClass::Note, "", "place parentheses around the %0 expression to evaluate it first"),
+    ("note_precedence_silence", MessageClass::Note, "", "place parentheses around the %quoted0 expression to silence this warning"),
+    ("note_previous_builtin_declaration", MessageClass::Note, "", "%0 is a builtin with type %1"),
+    ("note_previous_declaration", MessageClass::Note, "", "previous declaration is here"),
+    ("note_previous_definition", MessageClass::Note, "", "previous definition is here"),
+    ("note_previous_implicit_declaration", MessageClass::Note, "", "previous implicit declaration is here"),
+    ("note_previous_use", MessageClass::Note, "", "previous use is here"),
+    ("note_string_plus_scalar_silence", MessageClass::Note, "", "use array indexing to silence this warning"),
+    ("note_type_being_defined", MessageClass::Note, "", "definition of %0 is not complete until the closing '}'"),
+    ("note_typecheck_assign_const", MessageClass::Note, "", "%select{function %1 which returns const-qualified type %2 declared here|variable %1 declared const here|%select{non-|}1static data member %2 declared const here|%select{|nested }1data member %2 declared const here}0"),
+    ("warn_addition_in_bitshift", MessageClass::Warning, "shift-op-parentheses", "operator '%0' has lower precedence than '%1'; '%1' will be evaluated first"),
+    ("warn_arith_conv_enum_float", MessageClass::WarningOff, "enum-float-conversion", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 %select{floating-point|enumeration}1 type %2 %plural{2:with|4:from|:and}0 %select{enumeration|floating-point}1 type %3"),
+    ("warn_arith_conv_mixed_anon_enum_types", MessageClass::WarningOff, "anon-enum-enum-conversion", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 different enumeration types%diff{ ($ and $)|}1,2"),
+    ("warn_arith_conv_mixed_enum_types", MessageClass::WarningOff, "enum-enum-conversion", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 different enumeration types%diff{ ($ and $)|}1,2"),
+    ("warn_array_index_exceeds_bounds", MessageClass::Warning, "array-bounds", "array index %0 is past the end of the array (that has type %1%select{|, cast to %3}2)"),
+    ("warn_bitwise_op_in_bitwise_op", MessageClass::WarningOff, "bitwise-op-parentheses", "'%0' within '%1'"),
+    ("warn_bool_switch_condition", MessageClass::Warning, "switch-bool", "switch condition has boolean value"),
+    ("warn_braces_around_init", MessageClass::Warning, "braced-scalar-init", "braces around %select{scalar |}0initializer"),
+    ("warn_c17_compat_ellipsis_only_parameter", MessageClass::WarningOff, "pre-c23-compat", "'...' as the only parameter of a function is incompatible with C standards before C23"),
+    ("warn_c17_compat_enum_value_not_int", MessageClass::WarningOff, "pre-c23-compat", "%select{|incremented }0enumerator value which exceeds the range of 'int' is incompatible with C standards before C23 (%1 is too %select{small|large}2)"),
+    ("warn_c23_compat_case_range", MessageClass::WarningOff, "pre-c2y-compat", "case ranges are incompatible with C standards before C2y"),
+    ("warn_c23_compat_empty_initializer", MessageClass::WarningOff, "pre-c23-compat", "use of an empty initializer is incompatible with C standards before C23"),
+    ("warn_c23_compat_keyword", MessageClass::WarningOff, "pre-c23-compat", "'%0' is incompatible with C standards before C23"),
+    ("warn_c23_keyword", MessageClass::WarningOff, "c23-compat", "'%0' is a keyword in C23"),
+    ("warn_case_empty_range", MessageClass::Warning, "", "empty case range specified"),
+    ("warn_case_value_overflow", MessageClass::Warning, "switch", "overflow converting case value to switch condition type (%0 to %1)"),
+    ("warn_comma_operator", MessageClass::WarningOff, "comma", "possible misuse of comma operator here"),
+    ("warn_comparison_always", MessageClass::Warning, "tautological-compare", "%select{self-|array |pointer }0comparison always evaluates to %select{a constant|true|false|'std::strong_ordering::equal'}1"),
+    ("warn_comparison_mixed_enum_types", MessageClass::Warning, "enum-compare", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 different enumeration types%diff{ ($ and $)|}1,2"),
+    ("warn_comparison_of_mixed_enum_types_switch", MessageClass::Warning, "enum-compare-switch", "comparison of different enumeration types in switch statement%diff{ ($ and $)|}0,1"),
+    ("warn_condition_is_assignment", MessageClass::Warning, "parentheses", "using the result of an assignment as a condition without parentheses"),
+    ("warn_conditional_mixed_enum_types", MessageClass::WarningOff, "enum-compare-conditional", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 different enumeration types%diff{ ($ and $)|}1,2"),
+    ("warn_dangling_else", MessageClass::Warning, "dangling-else", "add explicit braces to avoid dangling else"),
+    ("warn_decl_in_param_list", MessageClass::Warning, "visibility", "declaration of %0 will not be visible outside of this function"),
+    ("warn_def_missing_case", MessageClass::WarningOff, "switch-enum", "%plural{1:enumeration value %1 not explicitly handled in switch|2:enumeration values %1 and %2 not explicitly handled in switch|3:enumeration values %1, %2, and %3 not explicitly handled in switch|:%0 enumeration values not explicitly handled in switch: %1, %2, %3...}0"),
+    ("warn_default_init_const", MessageClass::WarningOff, "default-const-init-var", "default initialization of an object of type %0 is incompatible with C++"),
+    ("warn_default_init_const_unsafe", MessageClass::Warning, "default-const-init-var-unsafe", "default initialization of an object of type %0 leaves the object uninitialized%select{| and is incompatible with C++}1"),
+    ("warn_duplicate_declspec", MessageClass::Warning, "duplicate-decl-specifier", "duplicate '%0' declaration specifier"),
+    ("warn_empty_for_body", MessageClass::Warning, "empty-body", "for loop has empty body"),
+    ("warn_empty_if_body", MessageClass::Warning, "empty-body", "if statement has empty body"),
+    ("warn_empty_switch_body", MessageClass::Warning, "empty-body", "switch statement has empty body"),
+    ("warn_empty_while_body", MessageClass::Warning, "empty-body", "while loop has empty body"),
+    ("warn_equality_with_extra_parens", MessageClass::Warning, "parentheses-equality", "equality comparison with extraneous parentheses"),
+    ("warn_extern_init", MessageClass::Warning, "extern-initializer", "'extern' variable has an initializer"),
+    ("warn_falloff_nonvoid", MessageClass::Warning, "return-type", "non-void %select{function|block|lambda|coroutine}0 does not return a value%select{| in all control paths}1"),
+    ("warn_float_overflow", MessageClass::Warning, "literal-range", "magnitude of floating-point constant too large for type %0; maximum is %1"),
+    ("warn_float_underflow", MessageClass::Warning, "literal-range", "magnitude of floating-point constant too small for type %0; minimum is %1"),
+    ("warn_gcc_variable_decl_in_for_loop", MessageClass::Warning, "gcc-compat", "GCC does not allow variable declarations in for loop initializers before C99"),
+    ("warn_gnu_null_ptr_arith", MessageClass::Extension, "gnu-null-pointer-arithmetic", "arithmetic on a null pointer treated as a cast from integer to pointer is a GNU extension"),
+    ("warn_impcast_float_integer", MessageClass::WarningOff, "float-conversion", "implicit conversion turns floating-point number into integer: %0 to %1"),
+    ("warn_impcast_integer_precision_constant", MessageClass::Warning, "constant-conversion", "implicit conversion from %2 to %3 changes value from %0 to %1"),
+    ("warn_impcast_literal_float_to_integer", MessageClass::Warning, "literal-conversion", "implicit conversion from %0 to %1 changes value from %2 to %3"),
+    ("warn_impcast_pointer_to_bool", MessageClass::Warning, "pointer-bool-conversion", "address of %select{'%1'|function '%1'|array '%1'|lambda function pointer conversion operator}0 will always evaluate to 'true'"),
+    ("warn_impcast_string_literal_to_bool", MessageClass::WarningOff, "string-conversion", "implicit conversion turns string literal into bool: %0 to %1"),
+    ("warn_implicit_function_decl", MessageClass::WarningOff, "implicit-function-declaration", "implicit declaration of function %0"),
+    ("warn_int_to_pointer_cast", MessageClass::Warning, "int-to-pointer-cast", "cast to %1 from smaller integer type %0"),
+    ("warn_integer_constant_overflow", MessageClass::Warning, "integer-overflow", "overflow in expression; result is %0 with type %1"),
+    ("warn_logical_and_in_logical_or", MessageClass::WarningOff, "logical-op-parentheses", "'&&' within '||'"),
+    ("warn_logical_not_on_lhs_of_check", MessageClass::Warning, "logical-not-parentheses", "logical not is only applied to the left hand side of this %select{comparison|bitwise operator}0"),
+    ("warn_main_one_arg", MessageClass::Warning, "main", "only one parameter on 'main' declaration"),
+    ("warn_misleading_indentation", MessageClass::WarningOff, "misleading-indentation", "misleading indentation; statement is not part of the previous '%select{if|else|for|while}0'"),
+    ("warn_missing_case", MessageClass::Warning, "switch", "%plural{1:enumeration value %1 not handled in switch|2:enumeration values %1 and %2 not handled in switch|3:enumeration values %1, %2, and %3 not handled in switch|:%0 enumeration values not handled in switch: %1, %2, %3...}0"),
+    ("warn_missing_case_for_condition", MessageClass::Warning, "", "no case matching constant switch condition '%0'"),
+    ("warn_missing_prototype", MessageClass::WarningOff, "missing-prototypes", "no previous prototype for function %0"),
+    ("warn_missing_type_specifier", MessageClass::WarningOff, "implicit-int", "type specifier missing, defaults to 'int'"),
+    ("warn_mixed_decls_code", MessageClass::WarningOff, "declaration-after-statement", "mixing declarations and code is incompatible with standards before C99"),
+    ("warn_non_prototype_changes_behavior", MessageClass::Warning, "deprecated-non-prototype", "a function %select{declaration|definition}0 without a prototype is deprecated in all versions of C %select{and is not supported in C23|and is treated as a zero-parameter prototype in C23, conflicting with a %select{previous|subsequent}2 %select{declaration|definition}3}1"),
+    ("warn_noreturn_function_has_return_expr", MessageClass::Warning, "invalid-noreturn", "function %0 declared 'noreturn' should not return"),
+    ("warn_noreturn_has_return_expr", MessageClass::Warning, "invalid-noreturn", "%select{function|block|lambda|coroutine}0 declared 'noreturn' should not return"),
+    ("warn_not_in_enum", MessageClass::Warning, "switch", "case value not in enumerated type %0"),
+    ("warn_null_statement", MessageClass::WarningOff, "extra-semi-stmt", "empty expression statement has no effect; remove unnecessary ';' to silence this warning"),
+    ("warn_old_implicitly_unsigned_long", MessageClass::Warning, "c99-compat", "integer literal is too large to be represented in type 'long', interpreting as 'unsigned long' per C89; this literal will %select{have type 'long long'|be ill-formed}0 in C99 onwards"),
+    ("warn_parameter_size", MessageClass::Warning, "large-by-value-copy", "%0 is a large (%1 bytes) pass-by-value argument; pass it by reference instead?"),
+    ("warn_pointer_arith_null_ptr", MessageClass::WarningOff, "null-pointer-arithmetic", "performing pointer arithmetic on a null pointer has undefined behavior%select{| if the offset is nonzero}0"),
+    ("warn_pointer_compare", MessageClass::Warning, "pointer-compare", "comparing a pointer to a null character constant; did you mean to compare to %select{NULL|(void *)0}0?"),
+    ("warn_pointer_sub_null_ptr", MessageClass::WarningOff, "null-pointer-subtraction", "performing pointer subtraction with a null pointer %select{has|may have}0 undefined behavior"),
+    ("warn_pointer_to_enum_cast", MessageClass::Warning, "pointer-to-enum-cast", "cast to smaller integer type %1 from %0"),
+    ("warn_pointer_to_int_cast", MessageClass::Warning, "pointer-to-int-cast", "cast to smaller integer type %1 from %0"),
+    ("warn_pp_identifier_is_cpp_keyword", MessageClass::WarningOff, "c++-keyword", "identifier %0 conflicts with a C++ keyword"),
+    ("warn_precedence_bitwise_rel", MessageClass::Warning, "parentheses", "%0 has lower precedence than %1; %1 will be evaluated first"),
+    ("warn_qual_return_type", MessageClass::WarningOff, "ignored-qualifiers", "'%0' type qualifier%s1 on return type %plural{1:has|:have}1 no effect"),
+    ("warn_redundant_loop_iteration", MessageClass::WarningOff, "for-loop-analysis", "variable %0 is %select{decremented|incremented}1 both in the loop header and in the loop body"),
+    ("warn_remainder_division_by_zero", MessageClass::Warning, "division-by-zero", "%select{remainder|division}0 by zero is undefined"),
+    ("warn_reserved_extern_symbol", MessageClass::WarningOff, "reserved-identifier", "identifier %0 is reserved because %select{<ERROR>|it starts with '_' at global scope|it starts with '_' and has C language linkage|it starts with '__'|it starts with '_' followed by a capital letter|it contains '__'}1"),
+    ("warn_ret_stack_addr_ref", MessageClass::Warning, "return-stack-address", "%select{address of|reference to}0 stack memory associated with %select{local variable|parameter|compound literal}2 %1 %select{returned|passed to musttail function}3"),
+    ("warn_return_missing_expr", MessageClass::WarningError, "return-mismatch", "non-void %select{function|method}1 %0 should return a value"),
+    ("warn_shift_gt_typewidth", MessageClass::Warning, "shift-count-overflow", "shift count >= width of type"),
+    ("warn_shift_lhs_negative", MessageClass::Warning, "shift-negative-value", "shifting a negative signed value is undefined"),
+    ("warn_shift_negative", MessageClass::Warning, "shift-count-negative", "shift count is negative"),
+    ("warn_shift_result_gt_typewidth", MessageClass::Warning, "shift-overflow", "signed shift result (%0) requires %1 bits to represent, but %2 only has %3 bits"),
+    ("warn_shift_result_sets_sign_bit", MessageClass::WarningOff, "shift-sign-overflow", "signed shift result (%0) sets the sign bit of the shift expression's type (%1) and becomes negative"),
+    ("warn_standalone_specifier", MessageClass::Warning, "missing-declarations", "'%0' ignored on this declaration"),
+    ("warn_static_main", MessageClass::Warning, "main", "'main' should not be declared static"),
+    ("warn_strict_uses_without_prototype", MessageClass::Warning, "deprecated-non-prototype", "passing arguments to %select{a function|%1}0 without a prototype is deprecated in all versions of C and is not supported in C23"),
+    ("warn_string_plus_char", MessageClass::Warning, "string-plus-char", "adding %0 to a string pointer does not append to the string"),
+    ("warn_string_plus_int", MessageClass::Warning, "string-plus-int", "adding %0 to a string does not append to the string"),
+    ("warn_stringcompare", MessageClass::Warning, "string-compare", "result of comparison against %select{a string literal|@encode}0 is unspecified (use an explicit string comparison function instead)"),
+    ("warn_sub_ptr_zero_size_types", MessageClass::Warning, "pointer-arith", "subtraction of pointers to type %0 of zero size has undefined behavior"),
+    ("warn_subscript_is_char", MessageClass::WarningOff, "char-subscripts", "array subscript is of type 'char'"),
+    ("warn_suggest_noreturn_block", MessageClass::WarningOff, "missing-noreturn", "block could be declared with attribute 'noreturn'"),
+    ("warn_suggest_noreturn_function", MessageClass::WarningOff, "missing-noreturn", "%select{function|method}0 %1 could be declared with attribute 'noreturn'"),
+    ("warn_switch_default", MessageClass::WarningOff, "switch-default", "'switch' missing 'default' label"),
+    ("warn_tentative_incomplete_array", MessageClass::Warning, "tentative-definition-array", "tentative array definition assumed to have one element"),
+    ("warn_typecheck_function_qualifiers_ignored", MessageClass::Warning, "ignored-qualifiers", "'%0' qualifier on function type %1 has no effect"),
+    ("warn_unreachable", MessageClass::WarningOff, "unreachable-code", "code will never be executed"),
+    ("warn_unreachable_default", MessageClass::WarningOff, "covered-switch-default", "default label in switch which covers all enumeration values"),
+    ("warn_unsequenced_mod_mod", MessageClass::Warning, "unsequenced", "multiple unsequenced modifications to %0"),
+    ("warn_unsequenced_mod_use", MessageClass::Warning, "unsequenced", "unsequenced modification and access to %0"),
+    ("warn_unused_but_set_variable", MessageClass::WarningOff, "unused-but-set-variable", "variable %0 set but not used"),
+    ("warn_unused_comma_left_operand", MessageClass::Warning, "unused-value", "left operand of comma operator has no effect"),
+    ("warn_unused_comparison", MessageClass::Warning, "unused-comparison", "%select{equality|inequality|relational|three-way}0 comparison result unused"),
+    ("warn_unused_expr", MessageClass::Warning, "unused-value", "expression result unused"),
+    ("warn_unused_local_typedef", MessageClass::WarningOff, "unused-local-typedef", "unused %select{typedef|type alias}0 %1"),
+    ("warn_unused_parameter", MessageClass::WarningOff, "unused-parameter", "unused parameter %0"),
+    ("warn_unused_variable", MessageClass::WarningOff, "unused-variable", "unused variable %0"),
+    ("warn_unused_voidptr", MessageClass::Warning, "unused-value", "expression result unused; should this cast be to 'void'?"),
+    ("warn_unused_volatile", MessageClass::Warning, "unused-volatile-lvalue", "expression result unused; assign into a variable to force a volatile load"),
+    ("warn_variables_not_in_loop_body", MessageClass::WarningOff, "for-loop-analysis", "variable%select{s| %1|s %1 and %2|s %1, %2, and %3|s %1, %2, %3, and %4}0 used in loop condition not modified in loop body"),
+    ("warn_vla_used", MessageClass::WarningOff, "vla", "variable length array used"),
+];
+
+static LIBRARY_BUILTIN_NAMES: [&str; 371] = [
+    "_Block_object_assign",
+    "_Block_object_dispose",
+    "_Exit",
+    "__finite",
+    "__finitef",
+    "__finitel",
+    "__sigsetjmp",
+    "_exit",
+    "_longjmp",
+    "_setjmp",
+    "abort",
+    "abs",
+    "acos",
+    "acosf",
+    "acosh",
+    "acoshf",
+    "acoshl",
+    "acosl",
+    "aligned_alloc",
+    "alloca",
+    "asin",
+    "asinf",
+    "asinh",
+    "asinhf",
+    "asinhl",
+    "asinl",
+    "atan",
+    "atan2",
+    "atan2f",
+    "atan2l",
+    "atanf",
+    "atanh",
+    "atanhf",
+    "atanhl",
+    "atanl",
+    "bcmp",
+    "bcopy",
+    "bzero",
+    "cabs",
+    "cabsf",
+    "cabsl",
+    "cacos",
+    "cacosf",
+    "cacosh",
+    "cacoshf",
+    "cacoshl",
+    "cacosl",
+    "calloc",
+    "carg",
+    "cargf",
+    "cargl",
+    "casin",
+    "casinf",
+    "casinh",
+    "casinhf",
+    "casinhl",
+    "casinl",
+    "catan",
+    "catanf",
+    "catanh",
+    "catanhf",
+    "catanhl",
+    "catanl",
+    "cbrt",
+    "cbrtf",
+    "cbrtl",
+    "ccos",
+    "ccosf",
+    "ccosh",
+    "ccoshf",
+    "ccoshl",
+    "ccosl",
+    "ceil",
+    "ceilf",
+    "ceill",
+    "cexp",
+    "cexpf",
+    "cexpl",
+    "cimag",
+    "cimagf",
+    "cimagl",
+    "clog",
+    "clogf",
+    "clogl",
+    "conj",
+    "conjf",
+    "conjl",
+    "copysign",
+    "copysignf",
+    "copysignl",
+    "cos",
+    "cosf",
+    "cosh",
+    "coshf",
+    "coshl",
+    "cosl",
+    "cpow",
+    "cpowf",
+    "cpowl",
+    "cproj",
+    "cprojf",
+    "cprojl",
+    "creal",
+    "crealf",
+    "creall",
+    "csin",
+    "csinf",
+    "csinh",
+    "csinhf",
+    "csinhl",
+    "csinl",
+    "csqrt",
+    "csqrtf",
+    "csqrtl",
+    "ctan",
+    "ctanf",
+    "ctanh",
+    "ctanhf",
+    "ctanhl",
+    "ctanl",
+    "erf",
+    "erfc",
+    "erfcf",
+    "erfcl",
+    "erff",
+    "erfl",
+    "exit",
+    "exp",
+    "exp2",
+    "exp2f",
+    "exp2l",
+    "expf",
+    "expl",
+    "expm1",
+    "expm1f",
+    "expm1l",
+    "fabs",
+    "fabsf",
+    "fabsl",
+    "fdim",
+    "fdimf",
+    "fdiml",
+    "finite",
+    "finitef",
+    "finitel",
+    "floor",
+    "floorf",
+    "floorl",
+    "fma",
+    "fmaf",
+    "fmal",
+    "fmax",
+    "fmaxf",
+    "fmaximum_num",
+    "fmaximum_numf",
+    "fmaximum_numl",
+    "fmaxl",
+    "fmin",
+    "fminf",
+    "fminimum_num",
+    "fminimum_numf",
+    "fminimum_numl",
+    "fminl",
+    "fmod",
+    "fmodf",
+    "fmodl",
+    "fopen",
+    "fprintf",
+    "fread",
+    "free",
+    "frexp",
+    "frexpf",
+    "frexpl",
+    "fscanf",
+    "fwrite",
+    "getcontext",
+    "hypot",
+    "hypotf",
+    "hypotl",
+    "ilogb",
+    "ilogbf",
+    "ilogbl",
+    "index",
+    "isalnum",
+    "isalpha",
+    "isblank",
+    "iscntrl",
+    "isdigit",
+    "isgraph",
+    "islower",
+    "isprint",
+    "ispunct",
+    "isspace",
+    "isupper",
+    "isxdigit",
+    "labs",
+    "ldexp",
+    "ldexpf",
+    "ldexpl",
+    "lgamma",
+    "lgammaf",
+    "lgammal",
+    "llabs",
+    "llrint",
+    "llrintf",
+    "llrintl",
+    "llround",
+    "llroundf",
+    "llroundl",
+    "log",
+    "log10",
+    "log10f",
+    "log10l",
+    "log1p",
+    "log1pf",
+    "log1pl",
+    "log2",
+    "log2f",
+    "log2l",
+    "logb",
+    "logbf",
+    "logbl",
+    "logf",
+    "logl",
+    "longjmp",
+    "lrint",
+    "lrintf",
+    "lrintl",
+    "lround",
+    "lroundf",
+    "lroundl",
+    "malloc",
+    "memalign",
+    "memccpy",
+    "memchr",
+    "memcmp",
+    "memcpy",
+    "memmove",
+    "mempcpy",
+    "memset",
+    "modf",
+    "modff",
+    "modfl",
+    "nan",
+    "nanf",
+    "nanl",
+    "nearbyint",
+    "nearbyintf",
+    "nearbyintl",
+    "nextafter",
+    "nextafterf",
+    "nextafterl",
+    "nexttoward",
+    "nexttowardf",
+    "nexttowardl",
+    "pow",
+    "powf",
+    "powl",
+    "printf",
+    "pthread_create",
+    "realloc",
+    "recv",
+    "recvfrom",
+    "remainder",
+    "remainderf",
+    "remainderl",
+    "remquo",
+    "remquof",
+    "remquol",
+    "rindex",
+    "rint",
+    "rintf",
+    "rintl",
+    "round",
+    "roundeven",
+    "roundevenf",
+    "roundevenl",
+    "roundf",
+    "roundl",
+    "savectx",
+    "scalbln",
+    "scalblnf",
+    "scalblnl",
+    "scalbn",
+    "scalbnf",
+    "scalbnl",
+    "scanf",
+    "setjmp",
+    "siglongjmp",
+    "sigsetjmp",
+    "sin",
+    "sincos",
+    "sincosf",
+    "sincosl",
+    "sinf",
+    "sinh",
+    "sinhf",
+    "sinhl",
+    "sinl",
+    "snprintf",
+    "sprintf",
+    "sqrt",
+    "sqrtf",
+    "sqrtl",
+    "sscanf",
+    "stdc_memreverse8",
+    "stpcpy",
+    "stpncpy",
+    "strcasecmp",
+    "strcat",
+    "strchr",
+    "strcmp",
+    "strcpy",
+    "strcspn",
+    "strdup",
+    "strerror",
+    "strlcat",
+    "strlcpy",
+    "strlen",
+    "strncasecmp",
+    "strncat",
+    "strncmp",
+    "strncpy",
+    "strndup",
+    "strpbrk",
+    "strrchr",
+    "strspn",
+    "strstr",
+    "strtod",
+    "strtof",
+    "strtok",
+    "strtol",
+    "strtold",
+    "strtoll",
+    "strtoul",
+    "strtoull",
+    "strxfrm",
+    "tan",
+    "tanf",
+    "tanh",
+    "tanhf",
+    "tanhl",
+    "tanl",
+    "tgamma",
+    "tgammaf",
+    "tgammal",
+    "tolower",
+    "toupper",
+    "trunc",
+    "truncf",
+    "truncl",
+    "umask",
+    "va_copy",
+    "va_end",
+    "va_start",
+    "vfork",
+    "vfprintf",
+    "vfscanf",
+    "vprintf",
+    "vscanf",
+    "vsnprintf",
+    "vsprintf",
+    "vsscanf",
+    "wcschr",
+    "wcscmp",
+    "wcslen",
+    "wcsncmp",
+    "wmemchr",
+    "wmemcmp",
+    "wmemcpy",
+    "wmemmove",
+];

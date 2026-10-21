@@ -71954,6 +71954,12 @@ mod c_front_end {
         if let Some(reason) = invocation.target_problem.clone() {
             return out_of_scope(world, reason);
         }
+        if invocation.action == FrontendAction::SyntaxOnly
+            && invocation.language_kind.is_none()
+            && (path.ends_with(".cl") || path.ends_with(".clcpp"))
+        {
+            return out_of_scope(world, "C parser: OpenCL input".to_string());
+        }
         let (name, bytes) = if path == "-" {
             ("<stdin>".to_string(), input.to_vec())
         } else {
@@ -71984,6 +71990,9 @@ mod c_front_end {
         };
         if let Some(gap) = parser_gap {
             return out_of_scope(world, format!("C parser: {gap}"));
+        }
+        if let Some(gap) = outcome.gap.clone() {
+            return out_of_scope(world, format!("preprocessor: {gap}"));
         }
         let mut result = ToolOutcome::ok(Vec::new());
         world.errors_before_output = true;
@@ -73560,8 +73569,22 @@ mod c_front_end {
         );
         let (gap, _) = parse(&["-fsyntax-only"], "#pragma pack(1)\nint value;\n");
         assert_eq!(gap.as_deref(), Some("unsupported #pragma pack"));
-        let (gap, _) = parse(&["-fsyntax-only"], "int value;\n");
-        assert_eq!(gap.as_deref(), Some("declaration starting with 'int'"));
+        let (gap, stderr) = parse(&["-fsyntax-only"], "int value;\n");
+        assert_eq!(gap, None);
+        assert_eq!(stderr, "");
+        let (gap, stderr) = parse(&["-fsyntax-only", "-Wc++-keyword"], "int class;\n");
+        assert_eq!(gap, None);
+        assert_eq!(
+            stderr,
+            "main.c:1:5: warning: identifier 'class' conflicts with a C++ keyword [-Wc++-keyword]\n"
+        );
+        let (gap, _) = parse(&["-fsyntax-only", "-Wcomma"], "int value;\n");
+        assert_eq!(gap, None);
+        let (gap, _) = parse(
+            &["-fsyntax-only", "-Wcomma"],
+            "int twice(int a) { return a, a; }\n",
+        );
+        assert_eq!(gap.as_deref(), Some("warning group -Wcomma"));
     }
 
     fn predefined(arguments: &[&str]) -> String {
