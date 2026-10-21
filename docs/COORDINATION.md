@@ -154,7 +154,9 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 - Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
 - Claude-A: x86 assembler, disassembler ve ELF nesne dosyası çıktısı tamam: `mc-x86` 598/642 (kapsam içi
   %100, 44 kapsam dışı), `mc-x86-disassembler` 188/188; assembler çıktısı bizim bağlayıcıyla bağlanıp bu
-  makinede çalışıyor. Sıradaki adımlar: Omni IR → x86_64 arka ucu, sonra ARMv8.
+  makinede çalışıyor. Omni IR → x86_64 arka ucu (`X86_64.rs` içinde `codegen`, çalışma zamanı Omni IR
+  metniyle) ilk sürümde: `kotlin-omni-native` 3846/7711, 0 başarısız (yorumlayıcıda OK veren kutu testleri
+  yerel kodda da OK). Sıradaki adımlar: çalışma zamanında sayı biçimlendirme ve matematik, sonra ARMv8.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
