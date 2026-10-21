@@ -42,7 +42,7 @@ BASELINE = TEST / "Builder_Test_Baseline.json"
 REFERENCE_SUITES = ["bundles", "filecheck", "tablegen-lit"]
 ORACLE_SUITES = ["regex-oracle", "tablegen-oracle"]
 SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
-KOTLIN_SUITES = ["kotlin-omni"]
+KOTLIN_SUITES = ["kotlin-omni", "kotlin-omni-native"]
 LINKER_SUITES = ["lld-elf", "lld-coff"]
 ASSEMBLER_SUITES = ["mc-x86", "mc-x86-disassembler"]
 RECORDING = {"on": False}
@@ -1007,7 +1007,7 @@ def kotlin_standard_library() -> Path | None:
     return found[-1] if found else None
 
 def check_kotlin_omni() -> str:
-    """Every Kotlin box test the JVM answers OK answers OK on Omni IR too."""
+    """Every Kotlin box test the JVM answers OK answers OK on Omni IR too, and natively as interpreted."""
     if shutil.which("cargo") is None:
         raise Skip("cargo is not on this machine")
     if not bundles_present():

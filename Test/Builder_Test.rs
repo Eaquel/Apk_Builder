@@ -63663,6 +63663,13 @@ mod reference_checks {
         module: &crate::compilers::compiler_infrastructure::Module,
         entry: crate::compilers::compiler_infrastructure::FunctionId,
     ) -> Result<String, String> {
+        omni_answer_and_output(module, entry).map(|(answer, _)| answer)
+    }
+
+    fn omni_answer_and_output(
+        module: &crate::compilers::compiler_infrastructure::Module,
+        entry: crate::compilers::compiler_infrastructure::FunctionId,
+    ) -> Result<(String, Vec<u8>), String> {
         use crate::compilers::compiler_infrastructure::{
             Datum, Finish, Interpreter, Limits, Object, StandardHost,
         };
@@ -63685,7 +63692,7 @@ mod reference_checks {
                         .iter()
                         .map(|item| item.as_integer().unwrap_or(0) as u16)
                         .collect();
-                    return Ok(String::from_utf16_lossy(&units));
+                    return Ok((String::from_utf16_lossy(&units), machine.stdout().to_vec()));
                 }
             }
         }
@@ -63916,10 +63923,10 @@ mod reference_checks {
             let Ok((mut module, entry)) = omni_lowered(&made, &facade, &library) else {
                 return Verdict::OutOfScope("it does not lower to Omni IR yet".to_string());
             };
-            match omni_answer(&module, entry) {
-                Ok(answer) if answer == "OK" => {}
+            let printed = match omni_answer_and_output(&module, entry) {
+                Ok((answer, printed)) if answer == "OK" => printed,
                 _ => return Verdict::OutOfScope("the interpreter does not answer OK".to_string()),
-            }
+            };
             if let Err(problem) = native_main(&mut module, entry) {
                 return Verdict::Failed(problem);
             }
@@ -63942,7 +63949,16 @@ mod reference_checks {
                     return Verdict::Failed(format!("{} {:?}", problem.message, problem.context))
                 }
             };
-            let name = path.rsplit('/').next().unwrap_or("box").replace('.', "_");
+            let name: String = path[BOX_ROOT.len()..]
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
             let Some((code, said, complained)) = super::native_x86_64::run_native(&program, &name)
             else {
                 return Verdict::OutOfScope(
@@ -63961,7 +63977,8 @@ mod reference_checks {
                 }
             }
             let said = String::from_utf8_lossy(&said).to_string();
-            if code == Some(0) && said == "OK" {
+            let expected = format!("{}OK", String::from_utf8_lossy(&printed));
+            if code == Some(0) && said == expected {
                 Verdict::Passed
             } else {
                 Verdict::Failed(format!(
@@ -72397,19 +72414,51 @@ mod native_x86_64 {
         if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             return None;
         }
-        let path =
-            std::env::temp_dir().join(format!("apk_builder_native_{name}_{}", std::process::id()));
-        std::fs::write(&path, program).expect("the program is written");
+        let folder = std::env::temp_dir().join(format!(
+            "apk_builder_native_{name}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        let path = folder.join("program");
         {
-            use std::os::unix::fs::PermissionsExt;
-            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
-                .expect("the program becomes executable");
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o755)
+                .open(&path)
+                .expect("the program is written");
+            std::io::Write::write_all(&mut file, program).expect("the program is written");
         }
-        let mut child = std::process::Command::new(&path)
-            .stdout(std::process::Stdio::piped())
-            .stderr(std::process::Stdio::piped())
-            .spawn()
-            .expect("the program starts");
+        let mut attempts = 0;
+        let mut child = loop {
+            match std::process::Command::new(&path)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(26) && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("the program starts: {error}"),
+            }
+        };
+        let mut out = child.stdout.take().expect("a stdout pipe");
+        let mut error = child.stderr.take().expect("a stderr pipe");
+        let reader = std::thread::spawn(move || {
+            let mut said = Vec::new();
+            std::io::Read::read_to_end(&mut out, &mut said).ok();
+            said
+        });
+        let complainer = std::thread::spawn(move || {
+            let mut said = Vec::new();
+            std::io::Read::read_to_end(&mut error, &mut said).ok();
+            said
+        });
         let started = std::time::Instant::now();
         let status = loop {
             match child.try_wait() {
@@ -72424,15 +72473,9 @@ mod native_x86_64 {
                 }
             }
         };
-        let mut said = Vec::new();
-        if let Some(mut out) = child.stdout.take() {
-            std::io::Read::read_to_end(&mut out, &mut said).ok();
-        }
-        let mut complained = Vec::new();
-        if let Some(mut out) = child.stderr.take() {
-            std::io::Read::read_to_end(&mut out, &mut complained).ok();
-        }
-        let _ = std::fs::remove_file(&path);
+        let said = reader.join().unwrap_or_default();
+        let complained = complainer.join().unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&folder);
         Some((status.and_then(|status| status.code()), said, complained))
     }
 
