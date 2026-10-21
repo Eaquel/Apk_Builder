@@ -71960,6 +71960,13 @@ mod c_front_end {
         {
             return out_of_scope(world, "C parser: OpenCL input".to_string());
         }
+        if invocation.action == FrontendAction::SyntaxOnly
+            && arguments
+                .iter()
+                .any(|argument| argument == "-fdiagnostics-parseable-fixits")
+        {
+            return out_of_scope(world, "C parser: fix-it hints".to_string());
+        }
         let (name, bytes) = if path == "-" {
             ("<stdin>".to_string(), input.to_vec())
         } else {

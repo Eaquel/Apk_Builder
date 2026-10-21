@@ -7,8 +7,8 @@
       "total": 605473
     },
     "clang-c-lexer": {
-      "failed": 12,
-      "out_of_scope": 101,
+      "failed": 11,
+      "out_of_scope": 102,
       "passed": 28,
       "total": 141
     },
@@ -25,9 +25,9 @@
       "total": 395
     },
     "clang-c-sema": {
-      "failed": 88,
-      "out_of_scope": 1235,
-      "passed": 59,
+      "failed": 67,
+      "out_of_scope": 1246,
+      "passed": 69,
       "total": 1382
     },
     "filecheck": {

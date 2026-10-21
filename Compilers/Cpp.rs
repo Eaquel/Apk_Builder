@@ -20533,6 +20533,14 @@ impl<'files> Preprocessor<'files> {
         printer.tokens_on_line = true;
     }
 
+    pub fn bool_macro_names_keyword(&self) -> bool {
+        self.macros.get(&b"bool"[..]).is_some_and(|definition| {
+            !definition.function_like
+                && definition.body.len() == 1
+                && &*definition.body[0].spelling == b"_Bool"
+        })
+    }
+
     pub fn macro_dump(&self) -> Vec<u8> {
         let mut out = Vec::new();
         for definition in self.macros.values() {
@@ -22780,6 +22788,7 @@ pub struct Declaration {
     pub has_prototype_written: bool,
     pub defined_earlier: Option<usize>,
     pub original_type: Option<QualifiedType>,
+    pub parameters: Vec<usize>,
 }
 
 impl Declaration {
@@ -22812,6 +22821,7 @@ impl Declaration {
             has_prototype_written: false,
             defined_earlier: None,
             original_type: None,
+            parameters: Vec::new(),
         }
     }
 }
@@ -23148,11 +23158,17 @@ impl<'session, 'files> Parser<'session, 'files> {
     }
 
     fn print_type(&self, ty: &QualifiedType) -> String {
-        TypePrinter::new(&self.tags, &self.preprocessor.language).print(ty, "")
+        self.print_type_with(ty, "")
     }
 
     fn print_type_with(&self, ty: &QualifiedType, placeholder: &str) -> String {
-        TypePrinter::new(&self.tags, &self.preprocessor.language).print(ty, placeholder)
+        let mut printer = TypePrinter::new(&self.tags, &self.preprocessor.language);
+        printer.bool_keyword = self.bool_keyword_policy();
+        printer.print(ty, placeholder)
+    }
+
+    fn bool_keyword_policy(&self) -> bool {
+        self.language().at_least(CStandard::C23) || self.preprocessor.bool_macro_names_keyword()
     }
 
     fn typedef_names_anonymous_tag(&self, ty: &QualifiedType, underlying: &QualifiedType) -> bool {
@@ -23640,11 +23656,25 @@ impl<'session, 'files> Parser<'session, 'files> {
         if let Some(layout) = information.layout {
             return Some(layout);
         }
+        let (size, alignment, _) = self.walk_record_layout(tag, None);
+        Some((size, alignment))
+    }
+
+    fn field_offset_bits(&self, tag: usize, field: usize) -> Option<u64> {
+        if !self.tags[tag].complete {
+            return None;
+        }
+        self.walk_record_layout(tag, Some(field)).2
+    }
+
+    fn walk_record_layout(&self, tag: usize, stop: Option<usize>) -> (u64, u64, Option<u64>) {
+        let information = &self.tags[tag];
         let union = information.information.kind == TagKind::Union;
         let mut size = 0u64;
         let mut alignment = 8u64;
         let mut bit_offset = 0u64;
-        for field in &information.fields {
+        let mut offset = None;
+        for (index, field) in information.fields.iter().enumerate() {
             let field_alignment = if information.packed {
                 8
             } else {
@@ -23675,9 +23705,15 @@ impl<'session, 'files> Parser<'session, 'files> {
                 }
                 None => {
                     if union {
+                        if stop == Some(index) {
+                            offset = Some(0);
+                        }
                         size = size.max(field_size);
                     } else {
                         bit_offset = bit_offset.div_ceil(field_alignment) * field_alignment;
+                        if stop == Some(index) {
+                            offset = Some(bit_offset);
+                        }
                         bit_offset += field_size;
                     }
                     alignment = alignment.max(field_alignment);
@@ -23688,7 +23724,7 @@ impl<'session, 'files> Parser<'session, 'files> {
             size = bit_offset;
         }
         size = size.div_ceil(alignment) * alignment;
-        Some((size, alignment))
+        (size, alignment, offset)
     }
 
     fn is_promotable_integer(&self, ty: &QualifiedType) -> bool {
@@ -24530,7 +24566,7 @@ impl<'session, 'files> Parser<'session, 'files> {
             return true;
         }
         if specifiers.specifier != TypeSpecifier::Unspecified {
-            let bool_keyword = self.language().at_least(CStandard::C23);
+            let bool_keyword = self.bool_keyword_policy();
             let previous = specifiers.specifier.name(bool_keyword);
             self.diagnose(
                 "err_invalid_decl_spec_combination",
@@ -24981,7 +25017,7 @@ impl<'session, 'files> Parser<'session, 'files> {
         if specifiers.specifier == TypeSpecifier::Error {
             return;
         }
-        let bool_keyword = self.language().at_least(CStandard::C23);
+        let bool_keyword = self.bool_keyword_policy();
         if specifiers.sign != Sign::Unspecified {
             if specifiers.specifier == TypeSpecifier::Unspecified {
                 specifiers.specifier = TypeSpecifier::Int;
@@ -25170,6 +25206,11 @@ impl<'session, 'files> Parser<'session, 'files> {
                 return;
             };
             self.expect_closing(TokenKind::RightParen, open);
+            if expression.contains_error() {
+                specifiers.specifier = TypeSpecifier::Error;
+                specifiers.end = self.previous_place;
+                return;
+            }
             if expression.is_bit_field(self) {
                 self.diagnose(
                     "err_sizeof_alignof_typeof_bitfield",
@@ -26996,6 +27037,7 @@ pub enum ExpressionKind {
     String {
         units: Vec<u32>,
         prefix: LiteralPrefix,
+        pieces: Vec<Place>,
     },
     Reference {
         declaration: usize,
@@ -27368,7 +27410,7 @@ impl<'session, 'files> Parser<'session, 'files> {
                 };
                 format!("{head}'{}'", escape_character(*value, b'\''))
             }
-            ExpressionKind::String { units, prefix } => {
+            ExpressionKind::String { units, prefix, .. } => {
                 let head = match prefix {
                     LiteralPrefix::Plain => "",
                     LiteralPrefix::Wide => "L",
@@ -27925,10 +27967,12 @@ impl<'session, 'files> Parser<'session, 'files> {
                     _ => None,
                 }
             }
-            ExpressionKind::String { .. } => Some(ConstantValue::Address {
-                base: AddressBase::String,
-                offset: 0,
-            }),
+            ExpressionKind::String { .. } | ExpressionKind::Predefined { .. } => {
+                Some(ConstantValue::Address {
+                    base: AddressBase::String,
+                    offset: 0,
+                })
+            }
             ExpressionKind::CompoundLiteral {
                 file_scope: true, ..
             } => Some(ConstantValue::Address {
@@ -27939,6 +27983,44 @@ impl<'session, 'files> Parser<'session, 'files> {
                 operator: UnaryOperator::Dereference,
                 operand,
             } => self.evaluate(operand, state),
+            ExpressionKind::Member {
+                base,
+                tag,
+                field,
+                arrow,
+            } => {
+                let value = if *arrow {
+                    self.evaluate(base, state)?
+                } else {
+                    self.evaluate_address(base, state)?
+                };
+                let ConstantValue::Address { base, offset } = value else {
+                    return None;
+                };
+                let bits = self.field_offset_bits(*tag, *field)?;
+                Some(ConstantValue::Address {
+                    base,
+                    offset: offset + i128::from(bits / 8),
+                })
+            }
+            ExpressionKind::Subscript { base, index } => {
+                let (pointer, integer) = if base.ty.is_pointer() {
+                    (base, index)
+                } else {
+                    (index, base)
+                };
+                let ConstantValue::Address { base, offset } = self.evaluate(pointer, state)? else {
+                    return None;
+                };
+                let ConstantValue::Integer(amount) = self.evaluate(integer, state)? else {
+                    return None;
+                };
+                let size = i128::from(self.type_size_bits(&operand.ty)? / 8);
+                Some(ConstantValue::Address {
+                    base,
+                    offset: offset + amount * size,
+                })
+            }
             _ => None,
         }
     }
@@ -28322,7 +28404,8 @@ impl<'session, 'files> Parser<'session, 'files> {
                 ConstantValue::Integer(value) => Some(ConstantValue::Integer(
                     self.normalize_integer(value, &expression.ty),
                 )),
-                other => Some(other),
+                other => (self.type_size_bits(&expression.ty) == self.type_size_bits(&operand.ty))
+                    .then_some(other),
             },
             CastKind::IntegralToBoolean
             | CastKind::FloatingToBoolean
@@ -28396,6 +28479,9 @@ impl<'session, 'files> Parser<'session, 'files> {
                 } => Some(ConstantValue::Integer(
                     self.normalize_integer(offset, &expression.ty),
                 )),
+                address @ ConstantValue::Address { .. } => (self.type_size_bits(&expression.ty)
+                    == self.type_size_bits(&operand.ty))
+                .then_some(address),
                 _ => None,
             },
             _ => None,
@@ -29647,6 +29733,32 @@ impl<'session, 'files> Parser<'session, 'files> {
         (left, right, Some(common))
     }
 
+    fn null_pointer_constant_is_literal(&self, expression: &Expression) -> bool {
+        match &expression.kind {
+            ExpressionKind::Parenthesized(inner) | ExpressionKind::Generic { selected: inner } => {
+                self.null_pointer_constant_is_literal(inner)
+            }
+            ExpressionKind::Cast {
+                explicit: false,
+                operand,
+                ..
+            } => self.null_pointer_constant_is_literal(operand),
+            ExpressionKind::Cast {
+                explicit: true,
+                operand,
+                ..
+            } if expression
+                .ty
+                .pointee()
+                .is_some_and(|pointee| pointee.is_void() && pointee.qualifiers == 0) =>
+            {
+                self.null_pointer_constant_is_literal(operand)
+            }
+            ExpressionKind::Integer { .. } => true,
+            _ => false,
+        }
+    }
+
     pub fn is_null_pointer_constant(&self, expression: &Expression) -> bool {
         let inner = expression.ignore_parentheses();
         if let ExpressionKind::Cast {
@@ -30010,8 +30122,13 @@ impl<'session, 'files> Parser<'session, 'files> {
             modifier: ArrayModifier::Normal,
             index_qualifiers: 0,
         });
+        let pieces = pieces.iter().map(|piece| piece.site).collect();
         Some(Expression::new(
-            ExpressionKind::String { units, prefix },
+            ExpressionKind::String {
+                units,
+                prefix,
+                pieces,
+            },
             ty,
             ValueCategory::LValue,
             start,
@@ -30369,11 +30486,22 @@ impl<'session, 'files> Parser<'session, 'files> {
                 self.binary(operator, left, right, ty, place)
             }
             BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr => {
+                let enum_constant_in_bool_context = [&left, &right].iter().any(|side| {
+                    matches!(&side.kind, ExpressionKind::Reference { declaration }
+                        if self.declarations[*declaration].kind == DeclarationKind::EnumConstant
+                            && self.declarations[*declaration].value != 0
+                            && self.declarations[*declaration].value != 1)
+                });
+                if enum_constant_in_bool_context {
+                    self.diagnose("warn_enum_constant_in_bool_context", place, Vec::new());
+                }
                 let left = self.usual_unary_conversions(left);
                 let right = self.usual_unary_conversions(right);
                 if !left.ty.is_scalar() || !right.ty.is_scalar() {
                     return self.invalid_operands(place, &left, &right);
                 }
+                self.check_bool_like_conversion(&left);
+                self.check_bool_like_conversion(&right);
                 self.binary(operator, left, right, Parser::int_type(), place)
             }
             BinaryOperator::Multiply | BinaryOperator::Divide => {
@@ -30465,6 +30593,60 @@ impl<'session, 'files> Parser<'session, 'files> {
             self.binary(BinaryOperator::Remainder, left, right, result_type, place),
             Some(common),
         )
+    }
+
+    fn check_pointer_pair_arithmetic(
+        &mut self,
+        place: Place,
+        left: &Expression,
+        right: &Expression,
+    ) -> bool {
+        let (Some(left_pointee), Some(right_pointee)) = (left.ty.pointee(), right.ty.pointee())
+        else {
+            return true;
+        };
+        if left_pointee.is_void() || right_pointee.is_void() {
+            if left_pointee.is_void() && right_pointee.is_void() {
+                self.diagnose("ext_gnu_void_ptr", place, vec![Argument::number(1)]);
+            } else {
+                self.diagnose("ext_gnu_void_ptr", place, vec![Argument::number(0)]);
+            }
+            return true;
+        }
+        if left_pointee.is_function() || right_pointee.is_function() {
+            if left_pointee.is_function() && right_pointee.is_function() {
+                let differ =
+                    left.ty.canonical().unqualified() != right.ty.canonical().unqualified();
+                self.diagnose(
+                    "ext_gnu_ptr_func_arith",
+                    place,
+                    vec![
+                        Argument::number(1),
+                        Argument::Type(left_pointee),
+                        Argument::number(i128::from(differ)),
+                        Argument::Type(right_pointee),
+                    ],
+                );
+            } else {
+                let pointee = if left_pointee.is_function() {
+                    left_pointee
+                } else {
+                    right_pointee
+                };
+                self.diagnose(
+                    "ext_gnu_ptr_func_arith",
+                    place,
+                    vec![
+                        Argument::number(0),
+                        Argument::Type(pointee),
+                        Argument::number(0),
+                    ],
+                );
+            }
+            return true;
+        }
+        self.check_pointer_arithmetic_operand(place, left)
+            && self.check_pointer_arithmetic_operand(place, right)
     }
 
     fn check_pointer_arithmetic_operand(&mut self, place: Place, pointer: &Expression) -> bool {
@@ -30618,8 +30800,10 @@ impl<'session, 'files> Parser<'session, 'files> {
                 if compound {
                     return (self.invalid_operands(place, &left, &right), None);
                 }
-                if !self.types_compatible(&left_pointee.unqualified(), &right_pointee.unqualified())
-                {
+                if !self.types_compatible(
+                    &left_pointee.canonical().unqualified(),
+                    &right_pointee.canonical().unqualified(),
+                ) {
                     self.diagnose(
                         "err_typecheck_sub_ptr_compatible",
                         place,
@@ -30630,8 +30814,7 @@ impl<'session, 'files> Parser<'session, 'files> {
                     );
                     return (Expression::error(place), None);
                 }
-                let left_clone = left.clone();
-                if !self.check_pointer_arithmetic_operand(place, &left_clone) {
+                if !self.check_pointer_pair_arithmetic(place, &left, &right) {
                     return (Expression::error(place), None);
                 }
                 let left_null = self.is_null_pointer_constant(left.ignore_parentheses_and_casts());
@@ -31406,6 +31589,21 @@ impl<'session, 'files> Parser<'session, 'files> {
         let source = self.default_function_array_lvalue_conversion(source);
         let target_unatomic = target.atomic_value().unwrap_or_else(|| target.clone());
         if target_unatomic.is_pointer() && self.is_null_pointer_constant(&source) {
+            if !source.ty.is_pointer() && !self.null_pointer_constant_is_literal(&source) {
+                if source.ty.is_bool() {
+                    self.diagnose_if_reachable(
+                        "warn_impcast_bool_to_null_pointer",
+                        source.place,
+                        vec![Argument::Type(target.clone())],
+                    );
+                } else if self.unevaluated_depth == 0 {
+                    self.diagnose(
+                        "warn_non_literal_null_pointer",
+                        source.place,
+                        vec![Argument::Type(target.clone())],
+                    );
+                }
+            }
             let converted =
                 self.implicit_cast(source, target.unqualified(), CastKind::NullToPointer);
             return (AssignResult::Compatible, (converted, source_type));
@@ -31730,6 +31928,9 @@ impl<'session, 'files> Parser<'session, 'files> {
         else {
             return;
         };
+        if target.is_bool() && !operand.ty.is_atomic() {
+            self.diagnose_int_in_bool_context(operand);
+        }
         if !matches!(kind, CastKind::IntegralCast | CastKind::FloatingToIntegral) {
             return;
         }
@@ -31796,6 +31997,74 @@ impl<'session, 'files> Parser<'session, 'files> {
     }
 
     fn act_on_conditional(
+        &mut self,
+        condition: Expression,
+        middle: Option<Expression>,
+        otherwise: Expression,
+        place: Place,
+    ) -> Expression {
+        let result = self.check_conditional_operands(condition, middle, otherwise, place);
+        if let ExpressionKind::Conditional { condition, .. } = &result.kind {
+            self.diagnose_conditional_precedence(condition, place);
+            self.check_bool_like_conversion(condition);
+        }
+        result
+    }
+
+    fn diagnose_conditional_precedence(&mut self, condition: &Expression, place: Place) {
+        let ExpressionKind::Binary {
+            operator, right, ..
+        } = &condition.ignore_implicit_casts().kind
+        else {
+            return;
+        };
+        let operator = *operator;
+        let arithmetic = matches!(
+            operator,
+            BinaryOperator::Add
+                | BinaryOperator::Subtract
+                | BinaryOperator::Multiply
+                | BinaryOperator::Divide
+                | BinaryOperator::Remainder
+                | BinaryOperator::ShiftLeft
+                | BinaryOperator::ShiftRight
+                | BinaryOperator::BitAnd
+                | BinaryOperator::BitOr
+        );
+        if !arithmetic {
+            return;
+        }
+        let looks_boolean = {
+            let inner = right.ignore_parentheses_and_implicit_casts();
+            inner.ty.is_bool()
+                || inner.ty.is_pointer()
+                || matches!(&inner.kind, ExpressionKind::Binary { operator, .. } if operator.is_comparison() || matches!(operator, BinaryOperator::LogicalAnd | BinaryOperator::LogicalOr))
+                || matches!(
+                    &inner.kind,
+                    ExpressionKind::Unary {
+                        operator: UnaryOperator::LogicalNot,
+                        ..
+                    }
+                )
+        };
+        if !looks_boolean {
+            return;
+        }
+        let message = if matches!(operator, BinaryOperator::BitAnd | BinaryOperator::BitOr) {
+            "warn_precedence_bitwise_conditional"
+        } else {
+            "warn_precedence_conditional"
+        };
+        self.diagnose(message, place, vec![Argument::text(operator.spelling())]);
+        self.diagnose(
+            "note_precedence_silence",
+            place,
+            vec![Argument::text(operator.spelling())],
+        );
+        self.diagnose("note_precedence_conditional_first", place, Vec::new());
+    }
+
+    fn check_conditional_operands(
         &mut self,
         condition: Expression,
         middle: Option<Expression>,
@@ -32092,6 +32361,7 @@ impl<'session, 'files> Parser<'session, 'files> {
                     self.diagnose("err_typecheck_unary_expr", place, vec![Argument::Type(ty)]);
                     return Expression::error(place);
                 }
+                self.check_bool_like_conversion(&operand);
                 make(operand, Parser::int_type(), ValueCategory::RValue)
             }
             UnaryOperator::Real | UnaryOperator::Imaginary => {
@@ -32576,14 +32846,18 @@ impl<'session, 'files> Parser<'session, 'files> {
                         let argument_place = argument.start;
                         let (result, (value, source_type)) =
                             self.check_single_assignment_constraints(&parameter_type, argument);
-                        if self.diagnose_assignment_result(
+                        let invalid = self.diagnose_assignment_result(
                             result,
                             argument_place,
                             &parameter_type,
                             &source_type,
                             &value,
                             AssignmentAction::Passing,
-                        ) {
+                        );
+                        if result != AssignResult::Compatible && self.unsupported.is_none() {
+                            self.note_parameter_here(function_declaration, index);
+                        }
+                        if invalid {
                             return Expression::error(start);
                         }
                         self.check_implicit_conversion(&value, &parameter_type, argument_place);
@@ -32656,6 +32930,23 @@ impl<'session, 'files> Parser<'session, 'files> {
             start,
             close,
         )
+    }
+
+    fn note_parameter_here(&mut self, function: Option<usize>, index: usize) {
+        let Some(parameter) = function
+            .and_then(|function| self.declarations[function].parameters.get(index).copied())
+        else {
+            return;
+        };
+        let place = self.declarations[parameter].place;
+        match self.declarations[parameter].name.clone() {
+            Some(name) => self.diagnose(
+                "note_parameter_named_here",
+                place,
+                vec![Argument::Name(name)],
+            ),
+            None => self.diagnose("note_parameter_here", place, Vec::new()),
+        }
     }
 
     fn note_callee(&mut self, declaration: usize) {
@@ -32949,6 +33240,7 @@ impl<'session, 'files> Parser<'session, 'files> {
         if file_scope {
             if let Some(culprit) = self.check_constant_initializer(&converted) {
                 self.diagnose("err_init_element_not_constant", culprit, Vec::new());
+                return Some(Expression::error(open));
             }
         }
         let end = converted.end;
@@ -34370,6 +34662,12 @@ impl<'session, 'files> Parser<'session, 'files> {
         declaration.invalid = declarator.invalid;
         declaration.has_prototype_written =
             matches!(&*ty.desugared().node, TypeNode::FunctionPrototype { .. });
+        if let Some(DeclaratorChunk::Function { parameters, .. }) = declarator.function_chunk() {
+            declaration.parameters = parameters
+                .iter()
+                .filter_map(|parameter| parameter.declaration)
+                .collect();
+        }
         let index = self.add_declaration(declaration);
         if &*name == b"main" {
             self.check_main(index, specifiers);
@@ -35537,6 +35835,8 @@ impl<'session, 'files> Parser<'session, 'files> {
         }
         let depth = self.tag_scope_depth();
         let mut enumerators: Vec<usize> = Vec::new();
+        let mut initializers: Vec<Option<Expression>> = Vec::new();
+        let mut all_valid = true;
         let mut last_value: Option<(i128, QualifiedType)> = None;
         let mut comma_place: Option<Place> = None;
         while self.is_identifier() {
@@ -35555,6 +35855,7 @@ impl<'session, 'files> Parser<'session, 'files> {
                     }
                 }
             }
+            let initializer = value_expression.clone();
             let (value, ty) =
                 match self.check_enumerator_value(place, value_expression, &last_value) {
                     Some(result) => result,
@@ -35587,6 +35888,7 @@ impl<'session, 'files> Parser<'session, 'files> {
                         );
                     }
                     self.note_previous_definition(previous);
+                    all_valid = false;
                     if self.try_consume(TokenKind::Comma).is_none() {
                         break;
                     }
@@ -35601,6 +35903,7 @@ impl<'session, 'files> Parser<'session, 'files> {
             let index = self.add_declaration(declaration);
             self.push_on_scope_at(index, depth);
             enumerators.push(index);
+            initializers.push(initializer);
             comma_place = None;
             match self.try_consume(TokenKind::Comma) {
                 Some(place) => comma_place = Some(place),
@@ -35627,7 +35930,181 @@ impl<'session, 'files> Parser<'session, 'files> {
             self.unsupported("attributes after enum body");
             return;
         }
-        self.act_on_enum_body(tag, enumerators);
+        self.act_on_enum_body(tag, enumerators.clone());
+        if all_valid {
+            self.check_for_duplicate_enum_values(tag, &enumerators, &initializers);
+        }
+        self.check_for_comparison_in_enum_initializer(&initializers);
+    }
+
+    fn check_for_duplicate_enum_values(
+        &mut self,
+        tag: usize,
+        enumerators: &[usize],
+        initializers: &[Option<Expression>],
+    ) {
+        if self.tags[tag].information.name.is_none() {
+            return;
+        }
+        let mut negative_bits = 0u32;
+        let mut positive_bits = 0u32;
+        for &enumerator in enumerators {
+            let value = self.declarations[enumerator].value;
+            if value >= 0 {
+                positive_bits = positive_bits.max(128 - value.leading_zeros());
+            } else {
+                negative_bits = negative_bits.max(129 - (!value).leading_zeros());
+            }
+        }
+        if positive_bits > 63 || negative_bits > 64 {
+            return;
+        }
+        let place = self.tags[tag].place;
+        if self.message_ignored("warn_duplicate_enum_values", place) {
+            return;
+        }
+        let mut implicit: Vec<(i128, usize)> = Vec::new();
+        for (index, &enumerator) in enumerators.iter().enumerate() {
+            let value = self.declarations[enumerator].value;
+            if initializers[index].is_none() && !implicit.iter().any(|(held, _)| *held == value) {
+                implicit.push((value, enumerator));
+            }
+        }
+        if implicit.is_empty() {
+            return;
+        }
+        let mut groups: Vec<Vec<usize>> = Vec::new();
+        for (index, &enumerator) in enumerators.iter().enumerate() {
+            if !self.valid_duplicate_enum(tag, initializers[index].as_ref()) {
+                continue;
+            }
+            let value = self.declarations[enumerator].value;
+            let Some(&(_, first)) = implicit.iter().find(|(held, _)| *held == value) else {
+                continue;
+            };
+            if first == enumerator {
+                continue;
+            }
+            match groups.iter_mut().find(|group| group[0] == first) {
+                Some(group) => group.push(enumerator),
+                None => groups.push(vec![first, enumerator]),
+            }
+        }
+        for group in groups {
+            let first = &self.declarations[group[0]];
+            let (first_place, first_name, first_value) = (
+                first.place,
+                first.name.clone().unwrap_or_else(|| Rc::from(&b""[..])),
+                first.value,
+            );
+            self.diagnose(
+                "warn_duplicate_enum_values",
+                first_place,
+                vec![
+                    Argument::Name(first_name),
+                    Argument::Text(first_value.to_string()),
+                ],
+            );
+            for &other in &group[1..] {
+                let declaration = &self.declarations[other];
+                let (other_place, other_name, other_value) = (
+                    declaration.place,
+                    declaration
+                        .name
+                        .clone()
+                        .unwrap_or_else(|| Rc::from(&b""[..])),
+                    declaration.value,
+                );
+                self.diagnose(
+                    "note_duplicate_element",
+                    other_place,
+                    vec![
+                        Argument::Name(other_name),
+                        Argument::Text(other_value.to_string()),
+                    ],
+                );
+            }
+        }
+    }
+
+    fn valid_duplicate_enum(&self, tag: usize, initializer: Option<&Expression>) -> bool {
+        let Some(initializer) = initializer else {
+            return true;
+        };
+        let mut current = initializer.ignore_implicit_casts();
+        if let ExpressionKind::Binary {
+            operator,
+            left,
+            right,
+        } = &current.kind
+        {
+            if !matches!(operator, BinaryOperator::Add | BinaryOperator::Subtract) {
+                return true;
+            }
+            if !matches!(&right.kind, ExpressionKind::Integer { value: 1, .. }) {
+                return true;
+            }
+            current = left;
+        }
+        let ExpressionKind::Reference { declaration } = &current.kind else {
+            return true;
+        };
+        let referenced = &self.declarations[*declaration];
+        referenced.kind != DeclarationKind::EnumConstant || referenced.tag != Some(tag)
+    }
+
+    fn check_for_comparison_in_enum_initializer(&mut self, initializers: &[Option<Expression>]) {
+        let mut has_bitwise = false;
+        let mut suspicious: Vec<(BinaryOperator, Place)> = Vec::new();
+        for initializer in initializers.iter().flatten() {
+            let ExpressionKind::Binary { operator, left, .. } =
+                &initializer.ignore_parentheses_and_implicit_casts().kind
+            else {
+                continue;
+            };
+            match operator {
+                BinaryOperator::BitAnd
+                | BinaryOperator::BitXor
+                | BinaryOperator::BitOr
+                | BinaryOperator::ShiftLeft
+                | BinaryOperator::ShiftRight => has_bitwise = true,
+                BinaryOperator::Less | BinaryOperator::Greater => {
+                    if matches!(
+                        &left.ignore_parentheses_and_implicit_casts().kind,
+                        ExpressionKind::Integer { value: 1, .. }
+                    ) {
+                        suspicious.push((
+                            *operator,
+                            initializer.ignore_parentheses_and_implicit_casts().place,
+                        ));
+                    }
+                }
+                _ => {}
+            }
+        }
+        if !has_bitwise {
+            return;
+        }
+        for (operator, place) in suspicious {
+            let suggested = if operator == BinaryOperator::Less {
+                "<<"
+            } else {
+                ">>"
+            };
+            self.diagnose(
+                "warn_comparison_in_enum_initializer",
+                place,
+                vec![
+                    Argument::text(operator.spelling()),
+                    Argument::text(suggested),
+                ],
+            );
+            self.diagnose(
+                "note_enum_compare_typo_suggest",
+                place,
+                vec![Argument::text(suggested)],
+            );
+        }
     }
 
     fn check_enumerator_value(
@@ -36002,7 +36479,7 @@ impl<'session, 'files> Parser<'session, 'files> {
         literal: &Expression,
     ) -> Option<Expression> {
         let (element, _) = self.is_character_array(target)?;
-        let ExpressionKind::String { units, prefix } = &literal.kind else {
+        let ExpressionKind::String { units, prefix, .. } = &literal.kind else {
             if let ExpressionKind::Predefined { units, .. } = &literal.kind {
                 let count = units.len() as u64;
                 if target.is_incomplete_array() {
@@ -36555,6 +37032,16 @@ impl<'session, 'files> Parser<'session, 'files> {
         explicit_braces: bool,
     ) -> Expression {
         self.guard_warning_groups(&["missing-field-initializers"]);
+        if self.tags[tag].invalid {
+            *position += 1;
+            state.had_error = true;
+            return Expression::error(
+                elements
+                    .first()
+                    .map(|element| element.start)
+                    .unwrap_or_default(),
+            );
+        }
         let fields = self.tags[tag].fields.clone();
         let union = self.tags[tag].information.kind == TagKind::Union;
         let start = elements
@@ -36779,6 +37266,53 @@ impl<'session, 'files> Parser<'session, 'files> {
             self.diagnose("warn_extern_init", place, Vec::new());
         }
         self.check_self_initialization(declaration, &converted);
+        self.check_concatenated_string_initializers(declaration, &converted);
+    }
+
+    fn check_concatenated_string_initializers(
+        &mut self,
+        declaration: usize,
+        initializer: &Expression,
+    ) {
+        if matches!(
+            self.declarations[declaration].ty.tag(),
+            Some((_, TagKind::Struct))
+        ) {
+            return;
+        }
+        let ExpressionKind::InitializerList { elements, .. } = &initializer.kind else {
+            return;
+        };
+        if elements.len() <= 2 {
+            return;
+        }
+        let pieces_of = |element: &Expression| match &element.ignore_implicit_casts().kind {
+            ExpressionKind::String { pieces, .. } => Some(pieces.clone()),
+            _ => None,
+        };
+        for (index, element) in elements.iter().enumerate() {
+            let Some(pieces) = pieces_of(element) else {
+                break;
+            };
+            if pieces.len() == 2 && !self.macro_sites.contains(&pieces[0]) {
+                let only_one_missing_comma = elements[index + 1..]
+                    .iter()
+                    .all(|later| pieces_of(later).is_some_and(|later| later.len() <= 1));
+                if only_one_missing_comma {
+                    self.diagnose(
+                        "warn_concatenated_literal_array_init",
+                        pieces[1],
+                        Vec::new(),
+                    );
+                    self.diagnose(
+                        "note_concatenated_string_literal_silence",
+                        pieces[0],
+                        Vec::new(),
+                    );
+                }
+                break;
+            }
+        }
     }
 
     fn check_self_initialization(&mut self, declaration: usize, initializer: &Expression) {
@@ -38124,7 +38658,10 @@ impl<'session, 'files> Parser<'session, 'files> {
             }
             _ => {}
         }
-        if allow_declarations && self.is_declaration_specifier() {
+        if allow_declarations
+            && (self.is_declaration_specifier()
+                || matches!(self.keyword(), Some("_Static_assert" | "static_assert")))
+        {
             return self.parse_block_declaration(start);
         }
         if self.at(TokenKind::RightBrace) {
@@ -39604,6 +40141,87 @@ impl<'session, 'files> Parser<'session, 'files> {
             return;
         }
         self.diagnose_always_non_null_pointer(inner);
+        self.diagnose_int_in_bool_context(inner);
+    }
+
+    fn diagnose_int_in_bool_context(&mut self, expression: &Expression) {
+        let expression = expression.ignore_parentheses_and_implicit_casts();
+        let integer_literal = |operand: &Expression| -> Option<u128> {
+            match &operand.ignore_implicit_casts().kind {
+                ExpressionKind::Integer { value, .. } => Some(*value),
+                ExpressionKind::Unary {
+                    operator: UnaryOperator::Minus,
+                    operand,
+                } => match &operand.ignore_implicit_casts().kind {
+                    ExpressionKind::Integer { value, .. } => Some(*value),
+                    _ => None,
+                },
+                _ => None,
+            }
+        };
+        match &expression.kind {
+            ExpressionKind::Binary {
+                operator: BinaryOperator::ShiftLeft,
+                left,
+                right,
+            } => {
+                let left_value = integer_literal(left);
+                let right_value = integer_literal(right);
+
+                if left_value == Some(0) {
+                    self.diagnose(
+                        "warn_left_shift_always",
+                        expression.place,
+                        vec![Argument::number(0)],
+                    );
+                } else if left_value.is_some() && right_value.is_some() {
+                    let mut state = EvaluationState::default();
+                    if let Some(ConstantValue::Integer(value)) =
+                        self.evaluate(expression, &mut state)
+                    {
+                        self.diagnose(
+                            "warn_left_shift_always",
+                            expression.place,
+                            vec![Argument::number(i128::from(value != 0))],
+                        );
+                    } else if self.is_signed_integer(&expression.ty) {
+                        self.diagnose(
+                            "warn_left_shift_in_bool_context",
+                            expression.place,
+                            Vec::new(),
+                        );
+                    }
+                } else if self.is_signed_integer(&expression.ty) {
+                    self.diagnose(
+                        "warn_left_shift_in_bool_context",
+                        expression.place,
+                        Vec::new(),
+                    );
+                }
+            }
+            ExpressionKind::Conditional {
+                then: Some(then),
+                otherwise,
+                ..
+            } => {
+                let (Some(then_value), Some(otherwise_value)) =
+                    (integer_literal(then), integer_literal(otherwise))
+                else {
+                    return;
+                };
+                if then_value <= 1 && otherwise_value <= 1 {
+                    return;
+                }
+                if then_value != 0 && otherwise_value != 0 {
+                    self.diagnose(
+                        "warn_integer_constants_in_conditional_always_true",
+                        expression.place,
+                        Vec::new(),
+                    );
+                }
+            }
+            _ => {}
+        }
     }
 
     fn diagnose_always_non_null_pointer(&mut self, expression: &Expression) {
@@ -40823,7 +41441,9 @@ impl<'session, 'files> Parser<'session, 'files> {
         let mut second_invalid = false;
         if self.at(TokenKind::Semi) {
             self.consume();
-        } else if self.is_declaration_specifier() {
+        } else if self.is_declaration_specifier()
+            || matches!(self.keyword(), Some("_Static_assert" | "static_assert"))
+        {
             if !c99 {
                 let place = self.token.site;
                 self.diagnose("ext_c99_variable_decl_in_for_loop", place, Vec::new());
@@ -41832,7 +42452,7 @@ static GENERATED_BUILTIN_HEADERS: [&str; 13] = [
     "arm_sme_draft_spec_subject_to_change.h",
 ];
 
-static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
+static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 474] = [
     ("compat_c23_c_label_at_end_of_compound_statement", MessageClass::WarningOff, "pre-c23-compat", "label at end of compound statement is incompatible with C standards before C23"),
     ("compat_c23_c_static_assert_no_message", MessageClass::WarningOff, "pre-c23-compat", "'_Static_assert' with no message is incompatible with C standards before C23"),
     ("compat_c23_label_followed_by_declaration", MessageClass::WarningOff, "pre-c23-compat-pedantic", "label followed by a declaration is incompatible with C standards before C23"),
@@ -42155,12 +42775,15 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("ext_warn_duplicate_declspec", MessageClass::ExtWarn, "duplicate-decl-specifier", "duplicate '%0' declaration specifier"),
     ("note_bracket_depth", MessageClass::Note, "", "use -fbracket-depth=N to increase maximum nesting level"),
     ("note_callee_decl", MessageClass::Note, "", "%0 declared here"),
+    ("note_concatenated_string_literal_silence", MessageClass::Note, "", "place parentheses around the string literal to silence warning"),
     ("note_condition_assign_silence", MessageClass::Note, "", "place parentheses around the assignment to silence this warning"),
     ("note_condition_assign_to_comparison", MessageClass::Note, "", "use '==' to turn this assignment into an equality comparison"),
     ("note_condition_or_assign_to_comparison", MessageClass::Note, "", "use '!=' to turn this compound assignment into an inequality comparison"),
     ("note_conflicting_prototype", MessageClass::Note, "", "conflicting prototype is here"),
     ("note_duplicate_case_prev", MessageClass::Note, "", "previous case defined here"),
+    ("note_duplicate_element", MessageClass::Note, "", "element %0 also has value %1"),
     ("note_empty_body_on_separate_line", MessageClass::Note, "", "put the semicolon on a separate line to silence this warning"),
+    ("note_enum_compare_typo_suggest", MessageClass::Note, "", "use '%0' to perform a bitwise shift"),
     ("note_equality_comparison_silence", MessageClass::Note, "", "remove extraneous parentheses around the comparison to silence this warning"),
     ("note_equality_comparison_to_assign", MessageClass::Note, "", "use '=' to turn this equality comparison into an assignment"),
     ("note_forward_declaration", MessageClass::Note, "", "forward declaration of %0"),
@@ -42171,7 +42794,10 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("note_main_remove_noreturn", MessageClass::Note, "", "remove '_Noreturn'"),
     ("note_matching", MessageClass::Note, "", "to match this %0"),
     ("note_next_field_declaration", MessageClass::Note, "", "next field declaration is here"),
+    ("note_parameter_here", MessageClass::Note, "", "passing argument to parameter here"),
+    ("note_parameter_named_here", MessageClass::Note, "", "passing argument to parameter %0 here"),
     ("note_precedence_bitwise_first", MessageClass::Note, "", "place parentheses around the %0 expression to evaluate it first"),
+    ("note_precedence_conditional_first", MessageClass::Note, "", "place parentheses around the '?:' expression to evaluate it first"),
     ("note_precedence_silence", MessageClass::Note, "", "place parentheses around the %quoted0 expression to silence this warning"),
     ("note_previous_builtin_declaration", MessageClass::Note, "", "%0 is a builtin with type %1"),
     ("note_previous_declaration", MessageClass::Note, "", "previous declaration is here"),
@@ -42199,8 +42825,10 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("warn_case_value_overflow", MessageClass::Warning, "switch", "overflow converting case value to switch condition type (%0 to %1)"),
     ("warn_comma_operator", MessageClass::WarningOff, "comma", "possible misuse of comma operator here"),
     ("warn_comparison_always", MessageClass::Warning, "tautological-compare", "%select{self-|array |pointer }0comparison always evaluates to %select{a constant|true|false|'std::strong_ordering::equal'}1"),
+    ("warn_comparison_in_enum_initializer", MessageClass::Warning, "enum-compare-typo", "comparison operator '%0' is potentially a typo for a shift operator '%1'"),
     ("warn_comparison_mixed_enum_types", MessageClass::Warning, "enum-compare", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 different enumeration types%diff{ ($ and $)|}1,2"),
     ("warn_comparison_of_mixed_enum_types_switch", MessageClass::Warning, "enum-compare-switch", "comparison of different enumeration types in switch statement%diff{ ($ and $)|}0,1"),
+    ("warn_concatenated_literal_array_init", MessageClass::WarningOff, "string-concatenation", "suspicious concatenation of string literals in an array initialization; did you mean to separate the elements with a comma?"),
     ("warn_condition_is_assignment", MessageClass::Warning, "parentheses", "using the result of an assignment as a condition without parentheses"),
     ("warn_conditional_mixed_enum_types", MessageClass::WarningOff, "enum-compare-conditional", "%select{arithmetic between|bitwise operation between|comparison of|conditional expression between|compound assignment of}0 different enumeration types%diff{ ($ and $)|}1,2"),
     ("warn_dangling_else", MessageClass::Warning, "dangling-else", "add explicit braces to avoid dangling else"),
@@ -42209,10 +42837,12 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("warn_default_init_const", MessageClass::WarningOff, "default-const-init-var", "default initialization of an object of type %0 is incompatible with C++"),
     ("warn_default_init_const_unsafe", MessageClass::Warning, "default-const-init-var-unsafe", "default initialization of an object of type %0 leaves the object uninitialized%select{| and is incompatible with C++}1"),
     ("warn_duplicate_declspec", MessageClass::Warning, "duplicate-decl-specifier", "duplicate '%0' declaration specifier"),
+    ("warn_duplicate_enum_values", MessageClass::WarningOff, "duplicate-enum", "element %0 has been implicitly assigned %1 which another element has been assigned"),
     ("warn_empty_for_body", MessageClass::Warning, "empty-body", "for loop has empty body"),
     ("warn_empty_if_body", MessageClass::Warning, "empty-body", "if statement has empty body"),
     ("warn_empty_switch_body", MessageClass::Warning, "empty-body", "switch statement has empty body"),
     ("warn_empty_while_body", MessageClass::Warning, "empty-body", "while loop has empty body"),
+    ("warn_enum_constant_in_bool_context", MessageClass::WarningOff, "int-in-bool-context", "converting the enum constant to a boolean"),
     ("warn_equality_with_extra_parens", MessageClass::Warning, "parentheses-equality", "equality comparison with extraneous parentheses"),
     ("warn_extern_init", MessageClass::Warning, "extern-initializer", "'extern' variable has an initializer"),
     ("warn_falloff_nonvoid", MessageClass::Warning, "return-type", "non-void %select{function|block|lambda|coroutine}0 does not return a value%select{| in all control paths}1"),
@@ -42220,6 +42850,7 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("warn_float_underflow", MessageClass::Warning, "literal-range", "magnitude of floating-point constant too small for type %0; minimum is %1"),
     ("warn_gcc_variable_decl_in_for_loop", MessageClass::Warning, "gcc-compat", "GCC does not allow variable declarations in for loop initializers before C99"),
     ("warn_gnu_null_ptr_arith", MessageClass::Extension, "gnu-null-pointer-arithmetic", "arithmetic on a null pointer treated as a cast from integer to pointer is a GNU extension"),
+    ("warn_impcast_bool_to_null_pointer", MessageClass::Warning, "bool-conversion", "initialization of pointer of type %0 to null from a constant boolean expression"),
     ("warn_impcast_float_integer", MessageClass::WarningOff, "float-conversion", "implicit conversion turns floating-point number into integer: %0 to %1"),
     ("warn_impcast_integer_precision_constant", MessageClass::Warning, "constant-conversion", "implicit conversion from %2 to %3 changes value from %0 to %1"),
     ("warn_impcast_literal_float_to_integer", MessageClass::Warning, "literal-conversion", "implicit conversion from %0 to %1 changes value from %2 to %3"),
@@ -42228,6 +42859,9 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("warn_implicit_function_decl", MessageClass::WarningOff, "implicit-function-declaration", "implicit declaration of function %0"),
     ("warn_int_to_pointer_cast", MessageClass::Warning, "int-to-pointer-cast", "cast to %1 from smaller integer type %0"),
     ("warn_integer_constant_overflow", MessageClass::Warning, "integer-overflow", "overflow in expression; result is %0 with type %1"),
+    ("warn_integer_constants_in_conditional_always_true", MessageClass::Warning, "tautological-constant-compare", "converting the result of '?:' with integer constants to a boolean always evaluates to 'true'"),
+    ("warn_left_shift_always", MessageClass::Warning, "tautological-constant-compare", "converting the result of '<<' to a boolean always evaluates to %select{false|true}0"),
+    ("warn_left_shift_in_bool_context", MessageClass::WarningOff, "int-in-bool-context", "converting the result of '<<' to a boolean; did you mean to compare with '0'?"),
     ("warn_logical_and_in_logical_or", MessageClass::WarningOff, "logical-op-parentheses", "'&&' within '||'"),
     ("warn_logical_not_on_lhs_of_check", MessageClass::Warning, "logical-not-parentheses", "logical not is only applied to the left hand side of this %select{comparison|bitwise operator}0"),
     ("warn_main_one_arg", MessageClass::Warning, "main", "only one parameter on 'main' declaration"),
@@ -42237,6 +42871,7 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("warn_missing_prototype", MessageClass::WarningOff, "missing-prototypes", "no previous prototype for function %0"),
     ("warn_missing_type_specifier", MessageClass::WarningOff, "implicit-int", "type specifier missing, defaults to 'int'"),
     ("warn_mixed_decls_code", MessageClass::WarningOff, "declaration-after-statement", "mixing declarations and code is incompatible with standards before C99"),
+    ("warn_non_literal_null_pointer", MessageClass::Warning, "non-literal-null-conversion", "expression which evaluates to zero treated as a null pointer constant of type %0"),
     ("warn_non_prototype_changes_behavior", MessageClass::Warning, "deprecated-non-prototype", "a function %select{declaration|definition}0 without a prototype is deprecated in all versions of C %select{and is not supported in C23|and is treated as a zero-parameter prototype in C23, conflicting with a %select{previous|subsequent}2 %select{declaration|definition}3}1"),
     ("warn_noreturn_function_has_return_expr", MessageClass::Warning, "invalid-noreturn", "function %0 declared 'noreturn' should not return"),
     ("warn_noreturn_has_return_expr", MessageClass::Warning, "invalid-noreturn", "%select{function|block|lambda|coroutine}0 declared 'noreturn' should not return"),
@@ -42250,7 +42885,9 @@ static CLANG_DIAGNOSTICS: [(&str, MessageClass, &str, &str); 457] = [
     ("warn_pointer_to_enum_cast", MessageClass::Warning, "pointer-to-enum-cast", "cast to smaller integer type %1 from %0"),
     ("warn_pointer_to_int_cast", MessageClass::Warning, "pointer-to-int-cast", "cast to smaller integer type %1 from %0"),
     ("warn_pp_identifier_is_cpp_keyword", MessageClass::WarningOff, "c++-keyword", "identifier %0 conflicts with a C++ keyword"),
+    ("warn_precedence_bitwise_conditional", MessageClass::Warning, "bitwise-conditional-parentheses", "operator '?:' has lower precedence than '%0'; '%0' will be evaluated first"),
     ("warn_precedence_bitwise_rel", MessageClass::Warning, "parentheses", "%0 has lower precedence than %1; %1 will be evaluated first"),
+    ("warn_precedence_conditional", MessageClass::Warning, "parentheses", "operator '?:' has lower precedence than '%0'; '%0' will be evaluated first"),
     ("warn_qual_return_type", MessageClass::WarningOff, "ignored-qualifiers", "'%0' type qualifier%s1 on return type %plural{1:has|:have}1 no effect"),
     ("warn_redundant_loop_iteration", MessageClass::WarningOff, "for-loop-analysis", "variable %0 is %select{decremented|incremented}1 both in the loop header and in the loop body"),
     ("warn_remainder_division_by_zero", MessageClass::Warning, "division-by-zero", "%select{remainder|division}0 by zero is undefined"),
