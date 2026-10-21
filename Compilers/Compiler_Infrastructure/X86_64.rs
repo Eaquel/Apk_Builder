@@ -32511,21 +32511,27 @@ pub mod codegen {
             .filter(|function| !function.is_declaration())
             .map(|function| function.name.as_str())
             .collect();
-        for function in &module.functions {
+        let mut stubs = String::new();
+        for (index, function) in module.functions.iter().enumerate() {
             if function.is_declaration()
                 && !provided.contains(&function.name)
                 && !defined.contains(function.name.as_str())
             {
-                return Err(unsupported(&format!(
-                    "the runtime function {}",
-                    function.name
-                )));
+                let symbol = function_symbol(module, FunctionId(index as u32));
+                stubs.push_str(&format!(
+                    "\t.text\n\t.globl {symbol}\n{symbol}:\n\tleaq .Lmissing{index}(%rip), %rdi\n\tmovl ${}, %esi\n\tcall __omni_missing\n\t.section .rodata\n.Lmissing{index}:\n",
+                    function.name.len()
+                ));
+                for chunk in function.name.as_bytes().chunks(16) {
+                    let listed: Vec<String> = chunk.iter().map(|byte| byte.to_string()).collect();
+                    stubs.push_str(&format!("\t.byte {}\n", listed.join(", ")));
+                }
             }
         }
         let runtime = runtime_module()?;
         let user = assemble(&emit_assembly(module)?)?;
         let support = assemble(&emit_assembly(&runtime)?)?;
-        let start = assemble(&start_assembly(entry))?;
+        let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
         let objects = [
             ("program.o", user),
             ("runtime.o", support),
@@ -32577,6 +32583,7 @@ global @__omni_identity size 8 align 8 mutable internal zero
 global @__omni_text_descriptor size 56 align 8 export bytes "ffffffffffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
 global @__omni_trap_text size 11 align 1 internal bytes "6f6d6e693a207472617020"
 global @__omni_uncaught_text size 25 align 1 internal bytes "6f6d6e693a20756e63617567687420657863657074696f6e0a"
+global @__omni_missing_text size 23 align 1 internal bytes "6f6d6e693a206d697373696e672066756e6374696f6e20"
 function @omni.machine.syscall(i64, i64, i64, i64, i64, i64, i64) -> i64 import
 function @omni.machine.address(ref) -> ptr import
 function @omni.machine.reference(ptr) -> ref import
@@ -32647,6 +32654,22 @@ block0(%kind: i64, %value: i64):
     %wrote: i64 = call @__omni_write(%error, %text, %length)
     call @__omni_write_number(%error, %kind)
     %code: i64 = const 134
+    call @__omni_exit(%code)
+    unreachable
+}
+function @__omni_missing(ptr, i64) export noreturn {
+block0(%name: ptr, %length: i64):
+    %error: i64 = const 2
+    %text: ptr = global_address @__omni_missing_text
+    %size: i64 = const 23
+    %wrote: i64 = call @__omni_write(%error, %text, %size)
+    %named: i64 = call @__omni_write(%error, %name, %length)
+    %newline: ptr = stack_slot size 8 align 8
+    %ten: i8 = const 10
+    store align 1 %ten, %newline
+    %one: i64 = const 1
+    %ended: i64 = call @__omni_write(%error, %newline, %one)
+    %code: i64 = const 135
     call @__omni_exit(%code)
     unreachable
 }

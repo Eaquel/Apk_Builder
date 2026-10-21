@@ -63610,14 +63610,18 @@ mod reference_checks {
             const { std::cell::RefCell::new(None) };
     }
 
-    fn omni_answer(
+    fn omni_lowered(
         made: &[(String, Vec<u8>)],
         facade: &str,
         library: &[u8],
-    ) -> Result<String, String> {
-        use crate::compilers::compiler_infrastructure::{
-            Datum, Finish, Interpreter, Layout, Limits, Object, StandardHost,
-        };
+    ) -> Result<
+        (
+            crate::compilers::compiler_infrastructure::Module,
+            crate::compilers::compiler_infrastructure::FunctionId,
+        ),
+        String,
+    > {
+        use crate::compilers::compiler_infrastructure::Layout;
         use crate::compilers::kotlin::native::{class_files::ClassFiles, lowering};
         let base = OMNI_BASE.with(|held| {
             let mut held = held.borrow_mut();
@@ -63652,10 +63656,20 @@ mod reference_checks {
         let roots = vec![(facade.to_string(), "box".to_string(), descriptor, true)];
         let lowered = lowering::lower(&mut files, &roots, Layout::Lp64, "box")
             .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
+        Ok((lowered.module, lowered.entries[0]))
+    }
+
+    fn omni_answer(
+        module: &crate::compilers::compiler_infrastructure::Module,
+        entry: crate::compilers::compiler_infrastructure::FunctionId,
+    ) -> Result<String, String> {
+        use crate::compilers::compiler_infrastructure::{
+            Datum, Finish, Interpreter, Limits, Object, StandardHost,
+        };
         let mut host = StandardHost;
-        let mut interpreter = Interpreter::new(&lowered.module, &mut host, Limits::default())
+        let mut interpreter = Interpreter::new(module, &mut host, Limits::default())
             .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
-        let handle = match interpreter.call(lowered.entries[0], Vec::new()) {
+        let handle = match interpreter.call(entry, Vec::new()) {
             Ok(Finish::Returned(Some(Datum::Reference(handle)))) => handle,
             Ok(other) => return Err(format!("finishes with {other:?}")),
             Err(problem) => return Err(format!("{} {:?}", problem.code, problem.context)),
@@ -63779,7 +63793,9 @@ mod reference_checks {
                 Some(_) => return Verdict::OutOfScope("the JVM does not answer OK".to_string()),
                 None => return Verdict::OutOfScope("the JVM does not answer in time".to_string()),
             }
-            match omni_answer(&made, &facade, &library) {
+            let answer = omni_lowered(&made, &facade, &library)
+                .and_then(|(module, entry)| omni_answer(&module, entry));
+            match answer {
                 Ok(answer) if answer == "OK" => Verdict::Passed,
                 Ok(answer) => Verdict::Failed(format!("Omni answers {answer}")),
                 Err(problem) => Verdict::Failed(problem),
@@ -63790,6 +63806,174 @@ mod reference_checks {
             outcomes,
         };
         report.publish();
+    }
+
+    fn native_main(
+        module: &mut crate::compilers::compiler_infrastructure::Module,
+        entry: crate::compilers::compiler_infrastructure::FunctionId,
+    ) -> Result<(), String> {
+        use crate::compilers::compiler_infrastructure::{
+            Function, FunctionBuilder, Linkage, Operation, Signature, Type,
+        };
+        let string = module
+            .class_named("java/lang/String")
+            .ok_or_else(|| "the module has no java/lang/String".to_string())?;
+        let field = module
+            .field_types(string)
+            .iter()
+            .position(|ty| *ty == Type::REFERENCE)
+            .ok_or_else(|| "java/lang/String holds no characters".to_string())?;
+        let write = match module.function_named("omni.write_chars") {
+            Some(found) => found,
+            None => module.add_function(Function::new(
+                "omni.write_chars",
+                Signature::new(vec![Type::I32, Type::REFERENCE, Type::I32, Type::I32], None),
+                Linkage::Import,
+            )),
+        };
+        let mut main = Function::new(
+            "omni.main",
+            Signature::new(Vec::new(), Some(Type::I32)),
+            Linkage::Export,
+        );
+        {
+            let mut builder = FunctionBuilder::new(&mut main);
+            let block = builder.create_block();
+            builder.switch_to(block);
+            let answer = builder
+                .call(entry, Some(Type::REFERENCE), Vec::new())
+                .ok_or("box answers nothing")?;
+            let characters = builder
+                .push(
+                    Operation::LoadField(string, field as u32),
+                    vec![answer],
+                    Some(Type::REFERENCE),
+                )
+                .ok_or("no characters")?;
+            let length = builder
+                .push(Operation::ArrayLength, vec![characters], Some(Type::I32))
+                .ok_or("no length")?;
+            let out = builder.integer(Type::I32, 1);
+            let zero = builder.integer(Type::I32, 0);
+            builder.call(write, None, vec![out, characters, zero, length]);
+            builder.ret(Some(zero));
+            builder
+                .finish()
+                .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
+        }
+        module.add_function(main);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_kotlin_omni_native() {
+        use crate::compilers::x86_64::codegen;
+        let Some((_, library)) = super::kotlin::standard_library() else {
+            panic!("the kotlin-omni-native suite needs a kotlin-stdlib");
+        };
+        let names = bundle_names("Test_13");
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the Kotlin box tests are present");
+        let mut tests: Vec<String> = tree
+            .paths_under(BOX_ROOT)
+            .into_iter()
+            .filter(|path| path.ends_with(".kt"))
+            .collect();
+        if let Ok(filter) = std::env::var("APK_BUILDER_NATIVE_FILTER") {
+            tests.retain(|path| path.contains(&filter));
+        }
+        let outcomes = run_parallel(tests, &|path| {
+            let Some(bytes) = tree.file(path) else {
+                return Verdict::Failed("the test cannot be read".to_string());
+            };
+            let text = String::from_utf8_lossy(bytes).to_string();
+            if let Some(reason) = box_scope(&text) {
+                return Verdict::OutOfScope(reason.to_string());
+            }
+            let file = path.rsplit('/').next().unwrap_or("Main.kt");
+            let (mut kotlin, java_sources) = box_files(file, &text);
+            let Some((box_file, box_text)) = kotlin
+                .iter()
+                .find(|(_, body)| body.contains("fun box()"))
+                .cloned()
+            else {
+                return Verdict::OutOfScope("the test has no box function".to_string());
+            };
+            let facade = super::kotlin::facade_of(&box_file, &box_text);
+            if text.contains("kotlin.test") {
+                kotlin.push((
+                    "Test.kt".to_string(),
+                    super::kotlin::KOTLIN_TEST.to_string(),
+                ));
+            }
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::kotlin::compiled(&kotlin, &java_sources, &library)
+            }));
+            let Ok(Ok(made)) = made else {
+                return Verdict::OutOfScope("our compiler does not build it yet".to_string());
+            };
+            let Ok((mut module, entry)) = omni_lowered(&made, &facade, &library) else {
+                return Verdict::OutOfScope("it does not lower to Omni IR yet".to_string());
+            };
+            match omni_answer(&module, entry) {
+                Ok(answer) if answer == "OK" => {}
+                _ => return Verdict::OutOfScope("the interpreter does not answer OK".to_string()),
+            }
+            if let Err(problem) = native_main(&mut module, entry) {
+                return Verdict::Failed(problem);
+            }
+            let program = match codegen::build_executable(&module, "omni.main") {
+                Ok(program) => program,
+                Err(problem) if problem.code == "EI500" => {
+                    let feature = problem
+                        .context
+                        .iter()
+                        .find_map(|line| line.strip_prefix("Feature: "))
+                        .unwrap_or("something")
+                        .to_string();
+                    let feature = match feature.strip_prefix("the runtime function ") {
+                        Some(name) => format!("the runtime function {name}"),
+                        None => feature,
+                    };
+                    return Verdict::OutOfScope(format!("native code: {feature}"));
+                }
+                Err(problem) => {
+                    return Verdict::Failed(format!("{} {:?}", problem.message, problem.context))
+                }
+            };
+            let name = path.rsplit('/').next().unwrap_or("box").replace('.', "_");
+            let Some((code, said, complained)) = super::native_x86_64::run_native(&program, &name)
+            else {
+                return Verdict::OutOfScope(
+                    "this machine cannot run x86_64 Linux programs".to_string(),
+                );
+            };
+            let complained = String::from_utf8_lossy(&complained).to_string();
+            if code == Some(135) {
+                if let Some(missing) = complained
+                    .lines()
+                    .find_map(|line| line.strip_prefix("omni: missing function "))
+                {
+                    return Verdict::OutOfScope(format!(
+                        "native code: the runtime function {missing}"
+                    ));
+                }
+            }
+            let said = String::from_utf8_lossy(&said).to_string();
+            if code == Some(0) && said == "OK" {
+                Verdict::Passed
+            } else {
+                Verdict::Failed(format!(
+                    "the native program exits {code:?} and says {said:?}"
+                ))
+            }
+        });
+        let report = SuiteReport {
+            name: "kotlin-omni-native".to_string(),
+            outcomes,
+        };
+        super::table_gen::publish_with_scope(&report);
     }
 
     #[test]
@@ -72206,7 +72390,10 @@ mod native_x86_64 {
         (code, interpreter.machine().stdout().to_vec())
     }
 
-    pub(super) fn run_native(program: &[u8], name: &str) -> Option<(Option<i32>, Vec<u8>)> {
+    pub(super) fn run_native(
+        program: &[u8],
+        name: &str,
+    ) -> Option<(Option<i32>, Vec<u8>, Vec<u8>)> {
         if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
             return None;
         }
@@ -72241,8 +72428,12 @@ mod native_x86_64 {
         if let Some(mut out) = child.stdout.take() {
             std::io::Read::read_to_end(&mut out, &mut said).ok();
         }
+        let mut complained = Vec::new();
+        if let Some(mut out) = child.stderr.take() {
+            std::io::Read::read_to_end(&mut out, &mut complained).ok();
+        }
         let _ = std::fs::remove_file(&path);
-        Some((status.and_then(|status| status.code()), said))
+        Some((status.and_then(|status| status.code()), said, complained))
     }
 
     fn agree(text: &str, entry: &str, name: &str) {
