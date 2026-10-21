@@ -18,6 +18,12 @@
       "passed": 3790,
       "total": 7711
     },
+    "kotlin-omni-native": {
+      "failed": 0,
+      "out_of_scope": 3865,
+      "passed": 3846,
+      "total": 7711
+    },
     "lld-coff": {
       "failed": 0,
       "out_of_scope": 224,
@@ -32,8 +38,8 @@
     },
     "mc-x86": {
       "failed": 0,
-      "out_of_scope": 129,
-      "passed": 513,
+      "out_of_scope": 44,
+      "passed": 598,
       "total": 642
     },
     "mc-x86-disassembler": {
