@@ -826,6 +826,7 @@ pub fn requirement_features(text: &str) -> Vec<String> {
 
 #[derive(Clone, Debug)]
 pub struct SystemEntry {
+    pub order: u64,
     pub name: String,
     pub encoding: u32,
     pub readable: bool,
@@ -851,6 +852,7 @@ pub struct SystemTables {
 
 fn system_entry(record: &TableRecord) -> SystemEntry {
     SystemEntry {
+        order: record.definition_order,
         name: table_text(record, "Name"),
         encoding: table_integer(record, "Encoding") as u32,
         readable: record.field("Readable").is_none() || table_bit(record, "Readable"),
@@ -1104,7 +1106,7 @@ impl Diag {
         if condition {
             Diag::Match
         } else {
-            Diag::No
+            Diag::Near
         }
     }
 }
@@ -2001,7 +2003,7 @@ impl<'s> Assembler<'s> {
         else {
             return Ok(None);
         };
-        let kind = name[head_end..].to_string();
+        let kind = name[head_end..].to_ascii_lowercase();
         if !kind.is_empty() && Self::arm_vector_kind_suffix(&kind).is_none() {
             self.token_error("invalid vector kind qualifier");
             return Err(());
@@ -3282,6 +3284,7 @@ impl<'s> Assembler<'s> {
                 self.error(location, &message);
                 return Err(());
             };
+            self.arm_suffixes.insert(suffix_start);
             self.arm_push_token(&mut operands, ".", suffix_start);
             operands.push(ParsedOperand {
                 kind: ParsedKind::Arm(Box::new(ArmOperand::ConditionCode(code))),
@@ -3296,6 +3299,7 @@ impl<'s> Assembler<'s> {
                 .find('.')
                 .map(|position| position + start + 1);
             let piece = name[start..end.unwrap_or(name.len())].to_string();
+            self.arm_suffixes.insert(name_start + start + 1);
             self.arm_push_token(&mut operands, &piece, name_start + start + 1);
             last = piece;
             next = end;
@@ -3403,6 +3407,59 @@ const ARM_SPECIFIERS: &[&str] = &[
     "secrel_lo12",
     "secrel_hi12",
 ];
+
+pub fn requirement_text(target: &Target, value: &TableValue) -> (String, bool) {
+    match value {
+        TableValue::Record(name) => (
+            target
+                .records
+                .get(name)
+                .map(|record| table_text(record, "Name"))
+                .unwrap_or_else(|| name.clone()),
+            false,
+        ),
+        TableValue::Dag {
+            operator,
+            arguments,
+            ..
+        } => {
+            let TableValue::Record(operator) = operator.as_ref() else {
+                return (String::new(), false);
+            };
+            let parts: Vec<(String, bool)> = arguments
+                .iter()
+                .filter(|(argument, _)| {
+                    !matches!(argument, TableValue::Record(name) if name == "FeatureAll")
+                })
+                .map(|(argument, _)| requirement_text(target, argument))
+                .collect();
+            if operator == "not" {
+                let inner = parts.first().cloned().unwrap_or_default();
+                return (format!("!{}", inner.0), true);
+            }
+            if parts.len() == 1 {
+                return parts[0].clone();
+            }
+            let joiner = if operator == "any_of" {
+                " or "
+            } else {
+                " and "
+            };
+            let rendered: Vec<String> = parts
+                .iter()
+                .map(|(text, compound)| {
+                    if *compound {
+                        format!("({text})")
+                    } else {
+                        text.clone()
+                    }
+                })
+                .collect();
+            (rendered.join(joiner), true)
+        }
+        _ => (String::new(), false),
+    }
+}
 
 fn predicates_features(requires: &[String], features: &BTreeSet<String>) -> bool {
     requires
@@ -4404,13 +4461,21 @@ impl<'s> Assembler<'s> {
             }
             ArmStatus::MissingFeature => {
                 let mut text = "instruction requires:".to_string();
+                let mut seen: Vec<String> = Vec::new();
                 for feature in &outcome.missing {
-                    let name = self
-                        .matcher
-                        .feature_names
+                    if seen.contains(feature) {
+                        continue;
+                    }
+                    seen.push(feature.clone());
+                    let name = match self
+                        .target
+                        .records
                         .get(feature)
-                        .cloned()
-                        .unwrap_or_else(|| feature.clone());
+                        .and_then(|record| record.field("AssemblerCondDag"))
+                    {
+                        Some(condition) => requirement_text(self.target, condition).0,
+                        None => feature.clone(),
+                    };
                     text.push(' ');
                     text.push_str(&name);
                 }
@@ -4445,7 +4510,8 @@ impl<'s> Assembler<'s> {
                     return self.error(location, "too few operands for instruction");
                 }
                 let at = self.statement_location(operands[index].start);
-                let suffix = matches!(&operands[index].kind, ParsedKind::Token(text) if index > 0 && text.starts_with('.'));
+                let suffix = matches!(&operands[index].kind, ParsedKind::Token(_))
+                    && self.arm_suffixes.contains(&operands[index].start);
                 let text = match &outcome.status {
                     ArmStatus::Diagnostic(name) if !suffix => Self::arm_diagnostic_text(name),
                     _ if suffix => "invalid type suffix for instruction",
@@ -4461,6 +4527,10 @@ impl<'s> Assembler<'s> {
         identifier: &str,
         identifier_token: Token,
     ) -> bool {
+        if self.is(TokenKind::Identifier) && self.lexer.token.text.eq_ignore_ascii_case(".req") {
+            return self.arm_define_register_alias(identifier);
+        }
+        self.arm_suffixes.clear();
         let Ok(mut operands) = self.arm_parse_instruction(identifier, identifier_token.start)
         else {
             return true;
@@ -4963,6 +5033,12 @@ impl<'t> ArmPrinter<'t> {
         for pattern in patterns {
             if instruction.operands.len() != pattern.operand_count {
                 return None;
+            }
+            if let Some(record) = self.target.records.get(&pattern.record) {
+                let predicates = table_record_list(record, "Predicates");
+                if !predicates_hold(self.target, &predicates, self.features) {
+                    continue;
+                }
             }
             let mut index = 0;
             let matched = pattern.conditions.iter().all(|condition| {
@@ -5476,15 +5552,19 @@ impl<'t> ArmPrinter<'t> {
             "printMRSSystemRegister" | "printMSRSystemRegister" => {
                 let value = operand.immediate() as u32;
                 let read = name == "printMRSSystemRegister";
-                let found = system_tables_for().registers.values().find(|entry| {
-                    entry.encoding == value
-                        && (if read {
-                            entry.readable
-                        } else {
-                            entry.writeable
-                        })
-                        && predicates_features(&entry.requires, self.features)
-                });
+                let found = system_tables_for()
+                    .registers
+                    .values()
+                    .filter(|entry| {
+                        entry.encoding == value
+                            && (if read {
+                                entry.readable
+                            } else {
+                                entry.writeable
+                            })
+                            && predicates_features(&entry.requires, self.features)
+                    })
+                    .min_by_key(|entry| entry.order);
                 match found {
                     Some(entry) => out.push_str(&entry.name),
                     None => out.push_str(&generic_register_string(value)),
@@ -5625,4 +5705,278 @@ fn generic_register_string(value: u32) -> String {
     let crm = (value >> 3) & 15;
     let op2 = value & 7;
     format!("S{op0}_{op1}_C{crn}_C{crm}_{op2}")
+}
+
+fn extension_features(target: &Target, name: &str) -> Option<Vec<String>> {
+    let mut found = Vec::new();
+    for record in target.records.values() {
+        if !record.is_a("Extension") {
+            continue;
+        }
+        let visible = table_text(record, "UserVisibleName");
+        let alias = table_text(record, "UserVisibleAlias");
+        if visible == name || (!alias.is_empty() && alias == name) {
+            found.push(record.name.clone());
+        }
+    }
+    if found.is_empty() {
+        None
+    } else {
+        Some(found)
+    }
+}
+
+fn set_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
+    let mut pending = vec![name.to_string()];
+    while let Some(held) = pending.pop() {
+        if features.insert(held.clone()) {
+            if let Some(record) = target.records.get(&held) {
+                pending.extend(table_record_list(record, "Implies"));
+            }
+        }
+    }
+}
+
+fn clear_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
+    let mut removed = BTreeSet::new();
+    removed.insert(name.to_string());
+    loop {
+        let before = removed.len();
+        for held in features.clone() {
+            if let Some(record) = target.records.get(&held) {
+                if table_record_list(record, "Implies")
+                    .iter()
+                    .any(|implied| removed.contains(implied))
+                {
+                    removed.insert(held);
+                }
+            }
+        }
+        if removed.len() == before {
+            break;
+        }
+    }
+    for held in removed {
+        features.remove(&held);
+    }
+}
+
+fn architecture_feature(target: &Target, name: &str) -> Option<String> {
+    let lower = name.to_ascii_lowercase();
+    target
+        .records
+        .values()
+        .filter(|record| record.is_a("Architecture64"))
+        .find(|record| {
+            let major = table_integer(record, "Major");
+            let minor = table_integer(record, "Minor");
+            let profile = table_text(record, "Profile");
+            let spelled = if minor == 0 {
+                format!("armv{major}-{profile}")
+            } else {
+                format!("armv{major}.{minor}-{profile}")
+            };
+            spelled == lower
+        })
+        .map(|record| record.name.clone())
+}
+
+impl<'s> Assembler<'s> {
+    fn arm_apply_extensions(&mut self, text: &str, location: SourceLocation) -> bool {
+        let target = self.target;
+        let mut offset = 0usize;
+        for piece in text.split('+') {
+            let position = SourceLocation {
+                buffer: location.buffer,
+                position: location.position + offset,
+            };
+            offset += piece.len() + 1;
+            if piece.is_empty() {
+                continue;
+            }
+            let lowered = piece.to_ascii_lowercase();
+            let (enable, name) = match lowered.strip_prefix("no") {
+                Some(rest) => (false, rest.to_string()),
+                None => (true, lowered.clone()),
+            };
+            let names: Vec<String> = if name == "crypto" {
+                vec!["FeatureAES".to_string(), "FeatureSHA2".to_string()]
+            } else {
+                match extension_features(target, &name) {
+                    Some(found) => found,
+                    None => {
+                        return self.error(
+                            position,
+                            &format!("unsupported architectural extension: {name}"),
+                        );
+                    }
+                }
+            };
+            for held in names {
+                if enable {
+                    set_feature(target, &mut self.arm_features, &held);
+                } else {
+                    clear_feature(target, &mut self.arm_features, &held);
+                }
+            }
+        }
+        false
+    }
+
+    pub(super) fn arm_directive(
+        &mut self,
+        identifier: &str,
+        location: SourceLocation,
+    ) -> Option<bool> {
+        match identifier {
+            ".hword" => Some(self.parse_directive_value(2)),
+            ".word" => Some(self.parse_directive_value(4)),
+            ".dword" | ".xword" => Some(self.parse_directive_value(8)),
+            ".align" => Some(self.parse_directive_align(true, 1)),
+            ".ltorg" | ".pool" => Some(self.parse_end_of_line()),
+            ".variant_pcs" => {
+                let Some(name) = self.parse_identifier() else {
+                    return Some(self.token_error("expected symbol name"));
+                };
+                let _ = name;
+                Some(self.parse_end_of_line())
+            }
+            ".tlsdesccall" => {
+                let Ok((_, _)) = self.parse_expression() else {
+                    return Some(true);
+                };
+                Some(self.parse_end_of_line())
+            }
+            ".inst" => {
+                if self.is(TokenKind::EndOfStatement) {
+                    return Some(
+                        self.error(location, "expected expression following '.inst' directive"),
+                    );
+                }
+                Some(self.parse_many(|parser| {
+                    let at = parser.location();
+                    let Ok((value, _)) = parser.parse_expression() else {
+                        return true;
+                    };
+                    let Some(constant) = parser.context.evaluate_absolute(&value, None) else {
+                        return parser.error(at, "expected constant expression");
+                    };
+                    if !(0..=0xffff_ffff).contains(&constant) && constant < -(1i64 << 31) {
+                        return parser.error(at, "out of range literal value");
+                    }
+                    parser.streamer.emit_value(
+                        &mut parser.context,
+                        &Expression::Constant(constant),
+                        4,
+                        at,
+                    );
+                    false
+                }))
+            }
+            ".arch" => {
+                let at = self.location();
+                let text = self.parse_string_to_end_of_statement();
+                let text = text.trim().to_string();
+                let (architecture, extensions) = match text.split_once('+') {
+                    Some((head, rest)) => (head.to_string(), rest.to_string()),
+                    None => (text.clone(), String::new()),
+                };
+                let target = self.target;
+                let Some(feature) = architecture_feature(target, &architecture) else {
+                    return Some(self.error(at, "unknown arch name"));
+                };
+                let mut features = BTreeSet::new();
+                for held in feature_set(target, "", &[]) {
+                    features.insert(held);
+                }
+                set_feature(target, &mut features, &feature);
+                if let Some(record) = target.records.get(&feature) {
+                    for default in table_record_list(record, "DefaultExts") {
+                        set_feature(target, &mut features, &default);
+                    }
+                }
+                self.arm_features = features;
+                let shifted = SourceLocation {
+                    buffer: at.buffer,
+                    position: at.position + architecture.len() + 1,
+                };
+                Some(self.arm_apply_extensions(&extensions, shifted))
+            }
+            ".cpu" => {
+                let at = self.location();
+                let text = self.parse_string_to_end_of_statement();
+                let text = text.trim().to_string();
+                let (cpu, extensions) = match text.split_once('+') {
+                    Some((head, rest)) => (head.to_string(), rest.to_string()),
+                    None => (text.clone(), String::new()),
+                };
+                let target = self.target;
+                let known = target.records.values().any(|record| {
+                    record.is_a("ProcessorModel") && table_text(record, "Name") == cpu
+                });
+                if !known {
+                    self.error(at, "unknown CPU name");
+                    return Some(false);
+                }
+                self.arm_features = feature_set(target, &cpu, &[]);
+                let shifted = SourceLocation {
+                    buffer: at.buffer,
+                    position: at.position + cpu.len() + 1,
+                };
+                Some(self.arm_apply_extensions(&extensions, shifted))
+            }
+            ".arch_extension" => {
+                let at = self.location();
+                let text = self.parse_string_to_end_of_statement();
+                let text = text.trim().to_string();
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                Some(self.arm_apply_extensions(&text, at))
+            }
+            ".unreq" => {
+                if !self.is(TokenKind::Identifier) {
+                    return Some(self.token_error("unexpected input in .unreq directive."));
+                }
+                let name = self.lexer.token.text.to_ascii_lowercase();
+                self.arm_aliases.remove(&name);
+                Some(self.parse_end_of_line())
+            }
+            _ => None,
+        }
+    }
+
+    fn arm_define_register_alias(&mut self, name: &str) -> bool {
+        self.lex();
+        if !self.is(TokenKind::Identifier) {
+            return self.token_error("unexpected input in .req directive");
+        }
+        let text = self.lexer.token.text.clone();
+        let (kind, register) =
+            if let Some(register) = self.arm_register_by_name(&text, RegKind::Scalar) {
+                (RegKind::Scalar, register)
+            } else if let Some(register) = self.arm_register_by_name(&text, RegKind::NeonVector) {
+                (RegKind::NeonVector, register)
+            } else {
+                return self.token_error("vector register without type specifier expected");
+            };
+        self.lex();
+        if self.parse_end_of_line() {
+            return true;
+        }
+        let lower = name.to_ascii_lowercase();
+        match self.arm_aliases.get(&lower) {
+            Some((held, existing)) if *held != kind || *existing != register => {
+                let location = self.location();
+                self.warning(
+                    location,
+                    &format!("ignoring redefinition of register alias '{name}'"),
+                );
+            }
+            _ => {
+                self.arm_aliases.insert(lower, (kind, register));
+            }
+        }
+        false
+    }
 }

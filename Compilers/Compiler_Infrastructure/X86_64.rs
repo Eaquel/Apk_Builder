@@ -9232,7 +9232,7 @@ impl Lexer {
         let start = self.state.position;
         self.state.token_start = start;
         let character = self.next_character();
-        if self.hash_token && character == Some(b'#') {
+        if self.hash_token && character == Some(b'#') && !self.state.at_start_of_statement {
             self.state.at_start_of_line = false;
             self.state.at_start_of_statement = false;
             return self.make(TokenKind::Hash, start, start + 1);
@@ -10684,6 +10684,7 @@ pub struct Assembler<'s> {
     pub dialect: Syntax,
     pub arm_features: BTreeSet<String>,
     pub arm_mnemonic: String,
+    pub arm_suffixes: BTreeSet<usize>,
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
@@ -10841,6 +10842,7 @@ impl<'s> Assembler<'s> {
             dialect,
             arm_features,
             arm_mnemonic: String::new(),
+            arm_suffixes: BTreeSet::new(),
             arm_aliases: BTreeMap::new(),
             pending_errors: Vec::new(),
             condition: ConditionState {
@@ -14265,6 +14267,9 @@ impl<'s> Assembler<'s> {
         identifier: &str,
         location: SourceLocation,
     ) -> Option<bool> {
+        if self.target.isa == Isa::Armv8 {
+            return self.arm_directive(identifier, location);
+        }
         if identifier.starts_with(".arch") {
             self.parse_string_to_end_of_statement();
             return Some(false);
@@ -19109,8 +19114,12 @@ impl Streamer for TextStreamer {
         size: u32,
         _location: SourceLocation,
     ) {
+        let arm = self.target.isa == Isa::Armv8;
         let directive = match size {
             1 => "\t.byte\t",
+            2 if arm => "\t.hword\t",
+            4 if arm => "\t.word\t",
+            8 if arm => "\t.xword\t",
             2 => "\t.short\t",
             4 => "\t.long\t",
             8 => "\t.quad\t",

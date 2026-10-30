@@ -70368,6 +70368,14 @@ mod linker_lit {
                                 ));
                             }
                         }
+                        if arguments[0].as_str() == "llvm-objdump"
+                            && said.contains("is not a recognized feature for this target")
+                        {
+                            world.missing_tool.get_or_insert(
+                                "llvm-objdump on this machine does not know the requested feature"
+                                    .to_string(),
+                            );
+                        }
                         if status != 0 && said.contains("SHT_CREL") {
                             world.missing_tool.get_or_insert(format!(
                                 "{} on this machine does not know SHT_CREL",
@@ -71802,9 +71810,27 @@ mod x86_assembly {
             || triple.starts_with("i586")
             || triple.starts_with("i486")
             || triple.starts_with("x86-")
-            || triple.starts_with("amd64"))
+            || triple.starts_with("amd64")
+            || triple == "aarch64"
+            || triple == "arm64"
+            || triple.starts_with("aarch64-")
+            || triple.starts_with("arm64-"))
         {
             unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
+        }
+        if triple.starts_with("aarch64") || triple.starts_with("arm64") {
+            if disassemble {
+                unsupported.get_or_insert("llvm-mc AArch64 disassembler".to_string());
+            }
+            if options.features.iter().any(|feature| {
+                let name = feature.trim_start_matches(['+', '-']);
+                name.starts_with("sve") || name.starts_with("sme") || name.starts_with("ssve")
+            }) {
+                unsupported.get_or_insert("llvm-mc AArch64 SVE and SME".to_string());
+            }
+            if triple.contains("_be") || triple.contains("ilp32") || triple.contains("arm64_32") {
+                unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
+            }
         }
         let parsed = TargetTriple::parse(&triple);
         if parsed.format == ObjectFormat::MachObject && !disassemble {
@@ -71973,6 +71999,7 @@ mod x86_assembly {
             "host-byteorder-little-endian",
             "non-root-user",
             "x86-registered-target",
+            "aarch64-registered-target",
             "asserts",
         ];
         let suite = LitSuite {
@@ -72016,6 +72043,12 @@ mod x86_assembly {
     #[ignore]
     fn suite_mc_x86() {
         mc_suite("mc-x86", "MC/X86");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_aarch64() {
+        mc_suite("mc-aarch64", "MC/AArch64");
     }
 
     #[test]
