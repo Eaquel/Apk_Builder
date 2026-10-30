@@ -6205,6 +6205,24 @@ fn clear_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
 
 fn architecture_feature(target: &Target, name: &str) -> Option<String> {
     let lower = name.to_ascii_lowercase();
+    let lower = {
+        let body = lower
+            .strip_prefix("armv")
+            .or_else(|| lower.strip_prefix('v'))
+            .unwrap_or(&lower);
+        let digits = body.trim_end_matches(|character: char| character.is_ascii_alphabetic());
+        let tail = &body[digits.len()..];
+        if body.contains('-')
+            || digits.is_empty()
+            || !(tail.is_empty() || tail == "a" || tail == "r")
+        {
+            lower.clone()
+        } else if tail.is_empty() && digits.contains('.') {
+            lower.clone()
+        } else {
+            format!("armv{digits}-{}", if tail.is_empty() { "a" } else { tail })
+        }
+    };
     target
         .records
         .values()
@@ -6270,6 +6288,14 @@ impl<'s> Assembler<'s> {
         identifier: &str,
         location: SourceLocation,
     ) -> Option<bool> {
+        let result = self.arm_directive_inner(identifier, location);
+        if matches!(identifier, ".arch" | ".cpu" | ".arch_extension") {
+            self.streamer.set_arm_features(&self.arm_features);
+        }
+        result
+    }
+
+    fn arm_directive_inner(&mut self, identifier: &str, location: SourceLocation) -> Option<bool> {
         match identifier {
             ".aeabi_subsection" => Some(self.arm_directive_subsection()),
             ".aeabi_attribute" => Some(self.arm_directive_attribute()),

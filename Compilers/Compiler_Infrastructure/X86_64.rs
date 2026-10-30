@@ -10539,6 +10539,7 @@ pub enum CfiInstruction {
     Undefined(i64),
     Register(i64, i64),
     WindowSave,
+    NegateReturnAddressStateWithPc,
     ValueOffset(i64, i64),
     GnuArgumentsSize(i64),
 }
@@ -10694,6 +10695,7 @@ pub trait Streamer {
         context.symbols[symbol].other |= 0x80;
     }
     fn emit_arm_subsection(&mut self, _name: &str, _optional: u8, _kind: u8) {}
+    fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
     fn emit_mode_change(&mut self, context: &mut AssemblyContext, mode: Mode);
@@ -12296,6 +12298,9 @@ impl<'s> Assembler<'s> {
                 false
             }
             ".cfi_window_save" => self.parse_cfi_plain(location, CfiInstruction::WindowSave),
+            ".cfi_negate_ra_state_with_pc" if self.target.isa == Isa::Armv8 => {
+                self.parse_cfi_plain(location, CfiInstruction::NegateReturnAddressStateWithPc)
+            }
             ".cfi_label" => {
                 let at = self.location();
                 let Some(name) = self.parse_identifier() else {
@@ -19454,6 +19459,9 @@ impl Streamer for TextStreamer {
                         self.register_name_for_dwarf(context, second)
                     ),
                     CfiInstruction::WindowSave => "\t.cfi_window_save".to_string(),
+                    CfiInstruction::NegateReturnAddressStateWithPc => {
+                        "\t.cfi_negate_ra_state_with_pc".to_string()
+                    }
                     CfiInstruction::ValueOffset(register, offset) => format!(
                         "\t.cfi_val_offset {}, {offset}",
                         self.register_name_for_dwarf(context, register)
@@ -19573,6 +19581,10 @@ impl Streamer for TextStreamer {
     fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
         let name = self.symbol(context, symbol);
         self.line(&format!("\t.variant_pcs\t{name}"));
+    }
+
+    fn set_arm_features(&mut self, features: &BTreeSet<String>) {
+        self.arm_features = features.clone();
     }
 
     fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
@@ -25072,6 +25084,7 @@ pub mod object {
         Undefined(i64),
         Register(i64, i64),
         WindowSave,
+        NegateReturnAddressStateWithPc,
         ValueOffset(i64, i64),
         GnuArgumentsSize(i64),
         Escape(Vec<u8>),
@@ -29266,6 +29279,7 @@ pub mod object {
                     self.emit_unsigned(second);
                 }
                 FrameOperation::WindowSave => self.append(&[0x2d]),
+                FrameOperation::NegateReturnAddressStateWithPc => self.append(&[0x2c]),
                 FrameOperation::Undefined(target) => {
                     self.append(&[0x07]);
                     self.emit_unsigned(*target as u64);
@@ -30362,6 +30376,11 @@ pub mod object {
                 CfiInstruction::WindowSave => {
                     self.push_frame_instruction(context, FrameOperation::WindowSave, location)
                 }
+                CfiInstruction::NegateReturnAddressStateWithPc => self.push_frame_instruction(
+                    context,
+                    FrameOperation::NegateReturnAddressStateWithPc,
+                    location,
+                ),
                 CfiInstruction::ValueOffset(register, offset) => self.push_frame_instruction(
                     context,
                     FrameOperation::ValueOffset(register, offset),

@@ -71968,6 +71968,12 @@ mod x86_assembly {
         tools
     }
 
+    const MC_VECTOR_EXTENSION_TESTS: &[&str] = &[
+        "MC/AArch64/directive-arch_extension.s",
+        "MC/AArch64/FP8/directive-arch.s",
+        "MC/AArch64/FP8/directive-arch-negative.s",
+    ];
+
     const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
         (
             "MC/AArch64/armv9a-tlbip.s",
@@ -72111,7 +72117,10 @@ mod x86_assembly {
                     .split("/MC/AArch64/")
                     .nth(1)
                     .and_then(|rest| rest.split('/').next())
-                    .is_some_and(|folder| folder.starts_with("SVE") || folder.starts_with("SME"));
+                    .is_some_and(|folder| folder.starts_with("SVE") || folder.starts_with("SME"))
+                    || MC_VECTOR_EXTENSION_TESTS
+                        .iter()
+                        .any(|test| path.ends_with(test));
                 match (verdict, limit) {
                     (Verdict::Failed(_), _) if vector_extension => (
                         path,
