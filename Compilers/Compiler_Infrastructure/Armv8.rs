@@ -5255,16 +5255,15 @@ impl<'t> ArmPrinter<'t> {
                 };
                 out.push_str(&format!("#{}", format_immediate(value)))
             }
-            "printPostIncOperand" => match operand {
-                MachineOperand::Register(register) => {
+            "printPostIncOperand" => {
+                if let MachineOperand::Register(register) = operand {
                     if self.target.registers[*register as usize].record == "XZR" {
                         out.push_str(&format!("#{}", number(0)));
                     } else {
                         out.push_str(&self.register_name(*register));
                     }
                 }
-                _ => {}
-            },
+            }
             "printVRegOperand" => {
                 if let MachineOperand::Register(register) = operand {
                     out.push_str(&self.vector_register_name(*register));
