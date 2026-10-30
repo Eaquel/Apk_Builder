@@ -157,8 +157,9 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
   makinede çalışıyor. Omni IR → x86_64 arka ucu (`X86_64.rs` içinde `codegen`, çalışma zamanı Omni IR
   metniyle) ilk sürümde: `kotlin-omni-native` 3846/7711, 0 başarısız (yorumlayıcıda OK veren kutu testleri
   yerel kodda da OK). ARMv8 (`Armv8.rs`, X86_64.rs'in alt modülü) sürüyor: hedef/eşleyici genelleştirildi
-  ve tablo güdümlü AArch64 kodlayıcı tamam (8871 komutun hepsi için kodlama planı); sırada ayrıştırıcı, yazıcı,
-  nesne yazıcı ve disassembler. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
+  ve tablo güdümlü AArch64 kodlayıcı tamam (8871 komutun hepsi için kodlama planı); AArch64 ayrıştırıcı ve ELF
+  nesne çıktısı çalışıyor (46 örnek komut ve etiketli/yeniden konumlandırmalı bir program host llvm-mc ile örtüşüyor);
+  sırada yazıcı (metin çıktısı), yönergeler, eşleme sembolleri, disassembler ve lit paketleri. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
