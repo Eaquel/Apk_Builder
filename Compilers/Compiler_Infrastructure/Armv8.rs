@@ -1378,10 +1378,15 @@ impl Target {
     }
 
     fn arm_x_from_w(&self, register: RegisterId) -> RegisterId {
-        let encoding = self.registers[register as usize].encoding;
-        if encoding == 31 {
-            return self.named_register("XZR");
+        let record = self.registers[register as usize].record.as_str();
+        match record {
+            "WZR" => return self.named_register("XZR"),
+            "WSP" => return self.named_register("SP"),
+            "W29" => return self.named_register("FP"),
+            "W30" => return self.named_register("LR"),
+            _ => {}
         }
+        let encoding = self.registers[register as usize].encoding;
         self.named_register(&format!("X{encoding}"))
     }
 
@@ -2842,10 +2847,15 @@ impl<'s> Assembler<'s> {
         let start = self.lexer.token.start;
         let location = self.location();
         if !self.is(TokenKind::Identifier) {
-            return Status::NoMatch;
+            self.error(location, "expected register");
+            return Status::Failure;
         }
         let Some(first) = self.arm_try_parse_scalar_register() else {
-            return Status::NoMatch;
+            self.error(
+                location,
+                "expected first even register of a consecutive same-size even/odd register pair",
+            );
+            return Status::Failure;
         };
         let target = self.target;
         let wide = target.in_register_class("GPR64", first);
@@ -4929,7 +4939,7 @@ impl<'s> Assembler<'s> {
         identifier_token: Token,
     ) -> bool {
         if self.is(TokenKind::Identifier) && self.lexer.token.text.eq_ignore_ascii_case(".req") {
-            return self.arm_define_register_alias(identifier);
+            return self.arm_define_register_alias(identifier, identifier_token.location());
         }
         self.arm_suffixes.clear();
         let Ok(mut operands) = self.arm_parse_instruction(identifier, identifier_token.start)
@@ -6436,7 +6446,7 @@ impl<'s> Assembler<'s> {
         }
     }
 
-    fn arm_define_register_alias(&mut self, name: &str) -> bool {
+    fn arm_define_register_alias(&mut self, name: &str, name_location: SourceLocation) -> bool {
         self.lex();
         if !self.is(TokenKind::Identifier) {
             return self.token_error("unexpected input in .req directive");
@@ -6457,9 +6467,8 @@ impl<'s> Assembler<'s> {
         let lower = name.to_ascii_lowercase();
         match self.arm_aliases.get(&lower) {
             Some((held, existing)) if *held != kind || *existing != register => {
-                let location = self.location();
                 self.warning(
-                    location,
+                    name_location,
                     &format!("ignoring redefinition of register alias '{name}'"),
                 );
             }
