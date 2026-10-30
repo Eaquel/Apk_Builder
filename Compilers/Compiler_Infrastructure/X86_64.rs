@@ -25380,7 +25380,6 @@ pub mod object {
         section_order: Vec<usize>,
         current: Option<(usize, usize)>,
         arm_mapping_state: BTreeMap<usize, bool>,
-        arm_mapping_count: u64,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
         has_layout: bool,
@@ -25566,7 +25565,6 @@ pub mod object {
                 section_order: Vec::new(),
                 current: None,
                 arm_mapping_state: BTreeMap::new(),
-                arm_mapping_count: 0,
                 current_fragment: None,
                 symbols_in_order: Vec::new(),
                 has_layout: false,
@@ -26031,13 +26029,9 @@ pub mod object {
                 return;
             }
             self.arm_mapping_state.insert(section, instruction);
-            let name = format!(
-                "${}.{}",
-                if instruction { 'x' } else { 'd' },
-                self.arm_mapping_count
-            );
-            self.arm_mapping_count += 1;
-            let symbol = context.symbol(&name);
+            let name = if instruction { "$x" } else { "$d" };
+            let symbol = context.symbols.len();
+            context.symbols.push(Symbol::new(name, false));
             self.emit_label(context, symbol, None);
         }
 

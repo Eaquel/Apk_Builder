@@ -872,6 +872,7 @@ pub struct SysAlias {
     pub requires: Vec<String>,
     pub needs_register: bool,
     pub optional_register: bool,
+    pub allow_tlbid: bool,
 }
 
 fn system_entry(record: &TableRecord) -> SystemEntry {
@@ -925,9 +926,19 @@ pub fn system_tables(target: &'static Target) -> &'static SystemTables {
                 } else if record.is_a("TIndex") {
                     let held = entry();
                     tables.hints.insert(lower(&held), held);
-                } else if let Some(group) = ["IC", "DC", "AT", "TLBIEntry"]
-                    .into_iter()
-                    .find(|class| record.is_a(class))
+                } else if let Some(group) = [
+                    "IC",
+                    "DC",
+                    "AT",
+                    "TLBIEntry",
+                    "TLBIPEntry",
+                    "GIC",
+                    "GSB",
+                    "GICR",
+                    "PLBIEntry",
+                ]
+                .into_iter()
+                .find(|class| record.is_a(class))
                 {
                     let requires_text = if record.field("RequiresStr").is_some() {
                         table_text(record, "RequiresStr")
@@ -939,16 +950,22 @@ pub fn system_tables(target: &'static Target) -> &'static SystemTables {
                         _ => String::new(),
                     };
                     let needs_register = match group {
-                        "IC" => table_bit(record, "NeedsReg"),
-                        "TLBIEntry" => reg_use == "REG_REQUIRED",
+                        "IC" | "GIC" | "GICR" => table_bit(record, "NeedsReg"),
+                        "TLBIEntry" | "PLBIEntry" => reg_use == "REG_REQUIRED",
+                        "GSB" => false,
                         _ => true,
                     };
                     tables
                         .sys_aliases
                         .entry(match group {
                             "TLBIEntry" => "TLBI",
+                            "TLBIPEntry" => "TLBIP",
+                            "PLBIEntry" => "PLBI",
                             "IC" => "IC",
                             "DC" => "DC",
+                            "GIC" => "GIC",
+                            "GSB" => "GSB",
+                            "GICR" => "GICR",
                             _ => "AT",
                         })
                         .or_default()
@@ -959,6 +976,7 @@ pub fn system_tables(target: &'static Target) -> &'static SystemTables {
                             requires: requirement_features(&requires_text),
                             needs_register,
                             optional_register: reg_use == "REG_OPTIONAL",
+                            allow_tlbid: table_bit(record, "AllowWithTLBID"),
                         });
                 } else if record.is_a("ExactFPImm") {
                     tables.exact_floats.insert(
@@ -2790,7 +2808,7 @@ impl<'s> Assembler<'s> {
             return Status::Failure;
         }
         let first_encoding = u32::from(target.registers[first as usize].encoding);
-        if first_encoding % 2 != 0 || first_encoding > 30 {
+        if first_encoding % 2 != 0 {
             self.error(
                 location,
                 "expected first even register of a consecutive same-size even/odd register pair",
@@ -2823,11 +2841,17 @@ impl<'s> Assembler<'s> {
             );
             return Status::Failure;
         }
-        let pair = if wide {
-            format!("X{first_encoding}_X{second_encoding}")
-        } else {
-            format!("W{first_encoding}_W{second_encoding}")
+        let part = |number: u32| -> String {
+            match (wide, number) {
+                (true, 29) => "FP".to_string(),
+                (true, 30) => "LR".to_string(),
+                (true, 31) => "XZR".to_string(),
+                (true, _) => format!("X{number}"),
+                (false, 31) => "WZR".to_string(),
+                (false, _) => format!("W{number}"),
+            }
         };
+        let pair = format!("{}_{}", part(first_encoding), part(second_encoding));
         let register = target.named_register(&pair);
         if register == NO_REGISTER {
             self.error(location, "expected a register pair");
@@ -3351,13 +3375,23 @@ impl<'s> Assembler<'s> {
         let head = name[..head_end].to_string();
         if matches!(
             head.as_str(),
-            "ic" | "dc" | "at" | "tlbi" | "cfp" | "dvp" | "cpp" | "cosp"
+            "ic" | "dc" | "at" | "tlbi" | "cfp" | "dvp" | "cpp" | "cosp" | "gic" | "gsb" | "plbi"
         ) {
             if name.contains('.') {
                 self.token_error("invalid operand");
                 return Err(());
             }
             return self.arm_parse_sys_alias(&head, name_start);
+        }
+        if head == "gicr" {
+            return self.arm_parse_sysl_alias(&head, name_start);
+        }
+        if head == "tlbip" {
+            if name.contains('.') {
+                self.token_error("invalid operand");
+                return Err(());
+            }
+            return self.arm_parse_sysp_alias(&head, name_start);
         }
         self.arm_push_token(&mut operands, &head, name_start);
         self.arm_mnemonic = head.clone();
@@ -5415,6 +5449,16 @@ impl<'t> ArmPrinter<'t> {
                 return Some(text);
             }
         }
+        if record == "SYSLxt" {
+            if let Some(text) = self.sysl_alias(instruction) {
+                return Some(text);
+            }
+        }
+        if record == "SYSPxt" || record == "SYSPxt_XZR" {
+            if let Some(text) = self.sysp_alias(instruction) {
+                return Some(text);
+            }
+        }
         let immediate = |index: usize| match instruction.operand(index) {
             MachineOperand::Immediate(value) => Some(*value),
             _ => None,
@@ -6510,6 +6554,9 @@ impl<'s> Assembler<'s> {
             "dc" => Some("DC"),
             "at" => Some("AT"),
             "tlbi" => Some("TLBI"),
+            "gic" => Some("GIC"),
+            "gsb" => Some("GSB"),
+            "plbi" => Some("PLBI"),
             _ => None,
         };
         if let Some(group) = group {
@@ -6534,10 +6581,10 @@ impl<'s> Assembler<'s> {
                 self.token_error(&text);
                 return Err(());
             }
-            if group == "IC" || group == "TLBI" {
+            if matches!(group, "IC" | "TLBI" | "GIC" | "GSB" | "PLBI") {
                 expect_register = entry.needs_register;
             }
-            if group == "TLBI" && (all || tlbid) {
+            if matches!(group, "TLBI" | "PLBI") && (all || tlbid) {
                 optional_register = entry.optional_register;
             }
             self.arm_sys_cr_operands(&mut operands, entry.encoding, start);
@@ -6596,7 +6643,182 @@ impl<'s> Assembler<'s> {
     }
 }
 
+impl<'s> Assembler<'s> {
+    fn arm_parse_sysl_alias(
+        &mut self,
+        head: &str,
+        name_start: usize,
+    ) -> Result<Vec<ParsedOperand>, ()> {
+        let mut operands = Vec::new();
+        self.arm_mnemonic = head.to_string();
+        self.arm_push_token(&mut operands, "sysl", name_start);
+        if !self.is(TokenKind::Identifier) || self.arm_parse_register(&mut operands) {
+            self.token_error("expected register operand");
+            return Err(());
+        }
+        if self.parse_token(TokenKind::Comma, "unexpected token") {
+            return Err(());
+        }
+        let start = self.lexer.token.start;
+        let location = self.location();
+        let op = self.lexer.token.text.clone();
+        self.lex();
+        let tables = system_tables_for();
+        let found = tables.sys_aliases.get("GICR").and_then(|list| {
+            list.iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case(&op))
+        });
+        let Some(entry) = found else {
+            self.error(location, "invalid operand for GICR instruction");
+            return Err(());
+        };
+        if !predicates_features(&entry.requires, &self.arm_features) {
+            let text = format!(
+                "GICR {} requires: {}",
+                entry.name,
+                required_features_text(self.target, &entry.requires)
+            );
+            self.error(location, &text);
+            return Err(());
+        }
+        self.arm_sys_cr_operands(&mut operands, entry.encoding, start);
+        if self.parse_token(
+            TokenKind::EndOfStatement,
+            "unexpected token in argument list",
+        ) {
+            return Err(());
+        }
+        Ok(operands)
+    }
+
+    fn arm_parse_sysp_alias(
+        &mut self,
+        head: &str,
+        name_start: usize,
+    ) -> Result<Vec<ParsedOperand>, ()> {
+        let mut operands = Vec::new();
+        self.arm_mnemonic = head.to_string();
+        self.arm_push_token(&mut operands, "sysp", name_start);
+        let start = self.lexer.token.start;
+        let op = self.lexer.token.text.clone();
+        let tables = system_tables_for();
+        let found = tables.sys_aliases.get("TLBIP").and_then(|list| {
+            list.iter()
+                .find(|entry| entry.name.eq_ignore_ascii_case(&op))
+        });
+        let Some(entry) = found else {
+            self.token_error("invalid operand for TLBIP instruction");
+            return Err(());
+        };
+        if !predicates_features(&entry.requires, &self.arm_features) {
+            let text = if entry.allow_tlbid {
+                "instruction requires: tlbid or d128"
+            } else {
+                "instruction requires: d128"
+            };
+            self.token_error(text);
+            return Err(());
+        }
+        self.arm_sys_cr_operands(&mut operands, entry.encoding, start);
+        self.lex();
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return Err(());
+        }
+        if !self.is(TokenKind::Identifier) {
+            self.token_error("expected register identifier");
+            return Err(());
+        }
+        let mut status = self.arm_try_parse_syp_xzr_pair(&mut operands);
+        if status == Status::NoMatch {
+            status = self.arm_try_parse_gpr_seq_pair(&mut operands);
+        }
+        if status != Status::Success {
+            self.token_error(&format!("specified {head} op requires a pair of registers"));
+            return Err(());
+        }
+        if self.parse_token(
+            TokenKind::EndOfStatement,
+            "unexpected token in argument list",
+        ) {
+            return Err(());
+        }
+        Ok(operands)
+    }
+}
+
 impl<'t> ArmPrinter<'t> {
+    fn system_encoding(
+        &self,
+        instruction: &MachineInstruction,
+        first: usize,
+    ) -> Option<(u32, u32, u32)> {
+        let value = |index: usize| match instruction.operand(index) {
+            MachineOperand::Immediate(value) => Some(*value as u32),
+            _ => None,
+        };
+        let (op1, cn, cm, op2) = (
+            value(first)?,
+            value(first + 1)?,
+            value(first + 2)?,
+            value(first + 3)?,
+        );
+        Some((cn, cm, op2 | (cm << 3) | (cn << 7) | (op1 << 11)))
+    }
+
+    fn sysl_alias(&self, instruction: &MachineInstruction) -> Option<String> {
+        let (cn, cm, encoding) = self.system_encoding(instruction, 1)?;
+        if cn != 12 || cm != 3 {
+            return None;
+        }
+        let tables = system_tables_for();
+        let entry = tables
+            .sys_aliases
+            .get("GICR")?
+            .iter()
+            .filter(|entry| {
+                entry.encoding == encoding && predicates_features(&entry.requires, self.features)
+            })
+            .min_by_key(|entry| entry.order)?;
+        Some(format!(
+            "\tgicr\t{}, {}",
+            self.register_text(instruction, 0),
+            entry.name.to_ascii_lowercase()
+        ))
+    }
+
+    fn sysp_alias(&self, instruction: &MachineInstruction) -> Option<String> {
+        let (cn, _, encoding) = self.system_encoding(instruction, 0)?;
+        if cn != 8 && cn != 9 {
+            return None;
+        }
+        let tables = system_tables_for();
+        let entry = tables
+            .sys_aliases
+            .get("TLBIP")?
+            .iter()
+            .filter(|entry| {
+                entry.encoding == encoding && predicates_features(&entry.requires, self.features)
+            })
+            .min_by_key(|entry| entry.order)?;
+        let pair = if self.register_text(instruction, 4) == "xzr" {
+            "xzr, xzr".to_string()
+        } else {
+            match instruction.operand(4) {
+                MachineOperand::Register(register) => self.target.registers[*register as usize]
+                    .sub_registers
+                    .iter()
+                    .map(|member| self.register_name(*member))
+                    .collect::<Vec<String>>()
+                    .join(", "),
+                _ => return None,
+            }
+        };
+        Some(format!(
+            "\ttlbip\t{}, {pair}",
+            entry.name.to_ascii_lowercase()
+        ))
+    }
+
     fn sys_alias(&self, instruction: &MachineInstruction) -> Option<String> {
         let value = |index: usize| match instruction.operand(index) {
             MachineOperand::Immediate(value) => Some(*value as u32),
@@ -6691,6 +6913,26 @@ impl<'t> ArmPrinter<'t> {
                 optional_register = entry.optional_register;
             }
             instruction_name = "tlbi";
+            name = entry.name.clone();
+        } else if cn == 12 {
+            if cm != 0 {
+                let entry = find("GIC")?;
+                needs_register = entry.needs_register;
+                instruction_name = "gic";
+                name = entry.name.clone();
+            } else {
+                let entry = find("GSB")?;
+                needs_register = false;
+                instruction_name = "gsb";
+                name = entry.name.clone();
+            }
+        } else if cn == 10 {
+            let entry = find("PLBI")?;
+            needs_register = entry.needs_register;
+            if all || tlbid {
+                optional_register = entry.optional_register;
+            }
+            instruction_name = "plbi";
             name = entry.name.clone();
         } else {
             return None;

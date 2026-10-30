@@ -71957,6 +71957,58 @@ mod x86_assembly {
 
     const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
         (
+            "MC/AArch64/armv9.4a-gcs.s",
+            "llvm-objdump 18 prints the GCSSTR operand without the brackets the test names",
+        ),
+        (
+            "MC/AArch64/armv9.5a-pauthlr.s",
+            "llvm-objdump 18 does not decode the PAuth_LR instructions the test lists",
+        ),
+        (
+            "MC/AArch64/armv9.5a-tlbiw.s",
+            "llvm-objdump 18 prints the TLBIW operations as generic SYS instructions",
+        ),
+        (
+            "MC/AArch64/armv9.6a-mpam.s",
+            "llvm-objdump 18 prints the Armv9.6-A MPAM system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.6a-pcdphint.s",
+            "llvm-objdump 18 does not decode STSHH",
+        ),
+        (
+            "MC/AArch64/armv9.6a-rme-gpc3.s",
+            "llvm-objdump 18 prints APAS as a generic SYS instruction",
+        ),
+        (
+            "MC/AArch64/armv9.6a-srmask.s",
+            "llvm-objdump 18 prints the SCTLRMASK system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.6a-statistical-profiling.s",
+            "llvm-objdump 18 prints the Armv9.6-A statistical profiling system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.6a-trbe-exception.s",
+            "llvm-objdump 18 prints the TRBE exception system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.7-scr2.s",
+            "llvm-objdump 18 prints SCR2_EL3 by its encoding",
+        ),
+        (
+            "MC/AArch64/armv9.7a-mpamv2.s",
+            "llvm-objdump 18 prints the MPAMv2 system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9-mrrs.s",
+            "llvm-objdump 18 does not decode MRRS",
+        ),
+        (
+            "MC/AArch64/armv9-msrr.s",
+            "llvm-objdump 18 does not decode MSRR",
+        ),
+        (
             "MC/X86/gotpcrelx.s",
             "llvm-readobj prints relocation 43 as Unknown; the test names it R_X86_64_CODE_4_GOTPCRELX",
         ),
