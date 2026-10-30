@@ -918,6 +918,19 @@ def run_suites(names: list[str], threads: int | None = None,
         raise AssertionError(f"these suites printed no result: {silent}")
     return found
 
+def failing_tests(name: str) -> str:
+    """The first few tests a suite failed, read from the report the run just wrote."""
+    report = ROOT / "Tests" / "suites" / f"{name}.txt"
+    try:
+        lines = report.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    failed = [line[len("FAILED "):].strip() for line in lines if line.startswith("FAILED ")]
+    if not failed:
+        return ""
+    shown = ", ".join(failed[:8])
+    return f" ({shown}{', ...' if len(failed) > 8 else ''})"
+
 def hold_ground(found: dict[str, dict]) -> str:
     """No suite may give back a test it once passed.
 
@@ -943,7 +956,10 @@ def hold_ground(found: dict[str, dict]) -> str:
         if now["passed"] < was["passed"]:
             trouble.append(f"{name} passes {now['passed']}, the baseline says {was['passed']}")
         if now["failed"] > was["failed"]:
-            trouble.append(f"{name} fails {now['failed']}, the baseline allows {was['failed']}")
+            trouble.append(
+                f"{name} fails {now['failed']}, the baseline allows {was['failed']}"
+                + failing_tests(name)
+            )
         if now["passed"] > was["passed"] or now["failed"] < was["failed"]:
             gains.append(name)
     if trouble:
