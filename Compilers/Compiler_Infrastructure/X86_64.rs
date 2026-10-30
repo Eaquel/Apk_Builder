@@ -10740,6 +10740,7 @@ pub struct Assembler<'s> {
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pub arm_keep_symbols: bool,
     pub arm_attributes: armv8::AttributeSet,
+    pub arm_pools: Vec<(usize, Vec<armv8::PoolEntry>)>,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
     conditions: Vec<ConditionState>,
@@ -10905,6 +10906,7 @@ impl<'s> Assembler<'s> {
             arm_aliases: BTreeMap::new(),
             arm_keep_symbols: false,
             arm_attributes: armv8::AttributeSet::default(),
+            arm_pools: Vec::new(),
             pending_errors: Vec::new(),
             condition: ConditionState {
                 kind: ConditionKind::None,
@@ -11600,6 +11602,9 @@ impl<'s> Assembler<'s> {
             }
         }
         if !self.context.had_error {
+            if self.target.isa == Isa::Armv8 {
+                self.arm_pool_finish();
+            }
             self.streamer.finish(&mut self.context);
         }
         self.context.had_error
@@ -19313,7 +19318,8 @@ impl Streamer for TextStreamer {
             return;
         }
         if self.target.isa == Isa::Armv8 {
-            let printer = armv8::ArmPrinter::new(self.target, &self.arm_features);
+            let mut printer = armv8::ArmPrinter::new(self.target, &self.arm_features);
+            printer.hexadecimal = self.hexadecimal_immediates;
             let text = printer.print(instruction);
             self.comments.push_str(&printer.comment.borrow());
             self.write(&text);

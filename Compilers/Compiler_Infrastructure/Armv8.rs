@@ -3322,7 +3322,7 @@ impl<'s> Assembler<'s> {
                 let saved = self.lexer.token.clone();
                 optional_shift_extend(self, operands, saved)
             }
-            TokenKind::Equal => self.token_error("unexpected token in operand"),
+            TokenKind::Equal => self.arm_parse_literal_load(operands),
             _ => {
                 let location = self.location();
                 let start = self.lexer.token.start;
@@ -5298,8 +5298,20 @@ fn arm_print_tables() -> &'static PrintTables {
     })
 }
 
+thread_local! {
+    static PRINT_HEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+}
+
 fn format_immediate(value: i64) -> String {
-    value.to_string()
+    if PRINT_HEX.with(std::cell::Cell::get) {
+        if value < 0 {
+            format!("-{:#x}", value.unsigned_abs())
+        } else {
+            format!("{value:#x}")
+        }
+    } else {
+        value.to_string()
+    }
 }
 
 fn arm_expression_text(target: &Target, expression: &Expression) -> String {
@@ -5310,6 +5322,7 @@ pub struct ArmPrinter<'t> {
     pub target: &'t Target,
     pub features: &'t BTreeSet<String>,
     pub comment: std::cell::RefCell<String>,
+    pub hexadecimal: bool,
 }
 
 impl<'t> ArmPrinter<'t> {
@@ -5318,6 +5331,7 @@ impl<'t> ArmPrinter<'t> {
             target,
             features,
             comment: std::cell::RefCell::new(String::new()),
+            hexadecimal: false,
         }
     }
 
@@ -5344,6 +5358,7 @@ impl<'t> ArmPrinter<'t> {
     }
 
     pub fn print(&self, instruction: &MachineInstruction) -> String {
+        PRINT_HEX.with(|held| held.set(self.hexadecimal));
         if let Some(text) = self.special(instruction) {
             return text;
         }
@@ -5644,9 +5659,15 @@ impl<'t> ArmPrinter<'t> {
         } else {
             (1u64 << width) - 1
         };
-        self.comment
-            .borrow_mut()
-            .push_str(&format!("={:#x}\n", extended as u64 & mask));
+        if self.hexadecimal {
+            self.comment
+                .borrow_mut()
+                .push_str(&format!("={extended}\n"));
+        } else {
+            self.comment
+                .borrow_mut()
+                .push_str(&format!("={:#x}\n", extended as u64 & mask));
+        }
         format!(
             "\tmov\t{}, #{}",
             self.register_text(instruction, 0),
@@ -6182,7 +6203,15 @@ impl<'s> Assembler<'s> {
             ".word" => Some(self.parse_directive_value(4)),
             ".dword" | ".xword" => Some(self.parse_directive_value(8)),
             ".align" => Some(self.parse_directive_align(true, 1)),
-            ".ltorg" | ".pool" => Some(self.parse_end_of_line()),
+            ".ltorg" | ".pool" => {
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                if let Some((section, _)) = self.context.current_section() {
+                    self.arm_pool_emit(section);
+                }
+                Some(false)
+            }
             ".variant_pcs" => {
                 let Some(name) = self.parse_identifier() else {
                     return Some(self.token_error("expected symbol name"));
@@ -9066,5 +9095,151 @@ impl<'s> Assembler<'s> {
         self.streamer
             .emit_arm_attribute(&vendor, tag, number, &text);
         false
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct PoolEntry {
+    pub label: usize,
+    pub value: Expression,
+    pub size: u32,
+    pub location: SourceLocation,
+}
+
+impl<'s> Assembler<'s> {
+    fn arm_parse_literal_load(&mut self, operands: &mut Vec<ParsedOperand>) -> bool {
+        let location = self.location();
+        if self.arm_mnemonic != "ldr" {
+            return self.token_error("unexpected token in operand");
+        }
+        self.lex();
+        let start = self.lexer.token.start;
+        let Ok((value, _)) = self.parse_expression() else {
+            return true;
+        };
+        let register = match operands.get(1).and_then(arm_of) {
+            Some(ArmOperand::Register {
+                register,
+                kind: RegKind::Scalar,
+                ..
+            }) => Some(*register),
+            _ => None,
+        };
+        let Some(register) = register else {
+            return self.error(location, "Only valid when first operand is register");
+        };
+        let wide = self.target.in_register_class("GPR64", register);
+        if let Expression::Constant(constant) = &value {
+            let mut immediate = *constant as u64;
+            let mut shift = 0u32;
+            let largest = if wide { 48 } else { 16 };
+            while immediate > 0xffff && immediate.trailing_zeros() >= 16 {
+                shift += 16;
+                immediate >>= 16;
+            }
+            if shift <= largest && immediate <= 0xffff {
+                operands[0].kind = ParsedKind::Token("movz".to_string());
+                self.arm_push(
+                    operands,
+                    start,
+                    ArmOperand::Immediate(Expression::Constant(immediate as i64)),
+                );
+                if shift != 0 {
+                    self.arm_push(
+                        operands,
+                        start,
+                        ArmOperand::ShiftExtend(ShiftExtendOperand {
+                            kind: ShiftExtendKind::Lsl,
+                            amount: shift,
+                            explicit: true,
+                        }),
+                    );
+                }
+                return false;
+            }
+            let shifted = (immediate << shift) as i64;
+            if !wide && !(i64::from(shifted as i32) == shifted || (shifted as u64) <= 0xffff_ffff) {
+                return self.error(location, "Immediate too large for register");
+            }
+        }
+        let size = if wide { 8 } else { 4 };
+        let label = self.arm_pool_add(value, size, location);
+        let name = self.context.symbols[label].name.clone();
+        self.arm_push(
+            operands,
+            start,
+            ArmOperand::Immediate(Expression::symbol(&name)),
+        );
+        false
+    }
+
+    fn arm_pool_add(&mut self, value: Expression, size: u32, location: SourceLocation) -> usize {
+        let section = self
+            .context
+            .current_section()
+            .map(|(section, _)| section)
+            .unwrap_or(0);
+        let slot = match self.arm_pools.iter().position(|(held, _)| *held == section) {
+            Some(slot) => slot,
+            None => {
+                self.arm_pools.push((section, Vec::new()));
+                self.arm_pools.len() - 1
+            }
+        };
+        let cacheable = match &value {
+            Expression::Constant(_) => true,
+            Expression::Symbol { specifier, .. } => specifier.is_none(),
+            _ => false,
+        };
+        if cacheable {
+            if let Some(entry) = self.arm_pools[slot]
+                .1
+                .iter()
+                .find(|entry| entry.value == value && entry.size == size)
+            {
+                return entry.label;
+            }
+        }
+        let label = self.context.temporary_symbol();
+        self.arm_pools[slot].1.push(PoolEntry {
+            label,
+            value,
+            size,
+            location,
+        });
+        label
+    }
+
+    fn arm_pool_emit(&mut self, section: usize) {
+        let Some(slot) = self.arm_pools.iter().position(|(held, _)| *held == section) else {
+            return;
+        };
+        let entries = std::mem::take(&mut self.arm_pools[slot].1);
+        for entry in entries {
+            self.streamer.emit_value_to_alignment(
+                &mut self.context,
+                u64::from(entry.size),
+                0,
+                1,
+                0,
+            );
+            self.streamer
+                .emit_label(&mut self.context, entry.label, Some(entry.location));
+            self.streamer
+                .emit_value(&mut self.context, &entry.value, entry.size, entry.location);
+        }
+    }
+
+    pub(super) fn arm_pool_finish(&mut self) {
+        let sections: Vec<usize> = self
+            .arm_pools
+            .iter()
+            .filter(|(_, entries)| !entries.is_empty())
+            .map(|(section, _)| *section)
+            .collect();
+        for section in sections {
+            self.streamer.switch_section(&mut self.context, section, 0);
+            self.arm_pool_emit(section);
+        }
     }
 }
