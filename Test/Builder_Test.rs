@@ -72985,3 +72985,135 @@ block3(%unexpected: i64):
         agree(&program(body), "main", "objects");
     }
 }
+
+mod armv8_assembly {
+    use crate::compilers::table_gen::TableValue;
+    use crate::compilers::x86_64::armv8;
+
+    fn value_text(value: &TableValue) -> String {
+        match value {
+            TableValue::Unset => "?".to_string(),
+            TableValue::Bit(bit) => (*bit as u8).to_string(),
+            TableValue::Integer(number) => number.to_string(),
+            TableValue::String(text) => format!("{text:?}"),
+            TableValue::Code(text) => format!("code {text:?}"),
+            TableValue::Bits(bits) => {
+                let listed: Vec<String> = bits.iter().map(value_text).collect();
+                format!("{{{}}}", listed.join(", "))
+            }
+            TableValue::List(items) => {
+                let listed: Vec<String> = items.iter().map(value_text).collect();
+                format!("[{}]", listed.join(", "))
+            }
+            TableValue::Dag {
+                operator,
+                name,
+                arguments,
+            } => {
+                let listed: Vec<String> = arguments
+                    .iter()
+                    .map(|(argument, label)| match label {
+                        Some(label) => format!("{}:${label}", value_text(argument)),
+                        None => value_text(argument),
+                    })
+                    .collect();
+                format!(
+                    "({}{} {})",
+                    value_text(operator),
+                    name.as_ref()
+                        .map(|name| format!(":{name}"))
+                        .unwrap_or_default(),
+                    listed.join(", ")
+                )
+            }
+            TableValue::Record(name) => name.clone(),
+            TableValue::Variable(name) => format!("${name}"),
+            TableValue::VariableBit { variable, bit } => format!("{variable}{{{bit}}}"),
+            TableValue::Expression(text) => format!("expr {text:?}"),
+        }
+    }
+
+    #[test]
+    fn the_armv8_tables_load_and_hold_the_instructions() {
+        let table = armv8::table().expect("the table reads");
+        assert_eq!(table.target, "AArch64");
+        let add = table.record("ADDWrr").expect("ADDWrr is a record");
+        assert!(add.is_a("Instruction"));
+        assert!(table.records.len() > 10_000);
+    }
+
+    #[test]
+    fn the_armv8_matcher_is_built_from_the_tables() {
+        let target = armv8::target().expect("the target loads");
+        assert!(target.instructions.len() > 5_000);
+        let matcher = armv8::matcher();
+        eprintln!(
+            "instructions {} matchables {} classes {} maximum operands {}",
+            target.instructions.len(),
+            matcher.matchables.len(),
+            matcher.classes.len(),
+            matcher.maximum_operands
+        );
+        for mnemonic in [
+            "add", "ldr", "b", "movz", "fadd", "mov", "cmp", "ld1b", "pfalse", "smstart", "zero",
+        ] {
+            assert!(
+                matcher.ranges.contains_key(&(0, mnemonic.to_string())),
+                "{mnemonic} has matchables"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_operand_classes() {
+        let table = armv8::table().expect("the table reads");
+        let mut seen = std::collections::BTreeSet::new();
+        for record in &table.records {
+            if !record.is_a("AsmOperandClass") {
+                continue;
+            }
+            let text = |name: &str| match record.field(name) {
+                Some(TableValue::String(text)) => text.clone(),
+                Some(other) => value_text(other),
+                None => String::new(),
+            };
+            seen.insert(format!(
+                "{} | name={} | pred={} | render={} | parse={} | diag={} | super={}",
+                record.name,
+                text("Name"),
+                text("PredicateMethod"),
+                text("RenderMethod"),
+                text("ParserMethod"),
+                text("DiagnosticType"),
+                text("SuperClasses")
+            ));
+        }
+        for line in seen {
+            eprintln!("{line}");
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_records_from_environment() {
+        let table = armv8::table().expect("the table reads");
+        let names = std::env::var("APK_BUILDER_RECORDS").unwrap_or_default();
+        for name in names.split(',').filter(|name| !name.is_empty()) {
+            match table.record(name) {
+                None => eprintln!("{name}: no such record"),
+                Some(record) => {
+                    eprintln!("def {} : {}", record.name, record.classes.join(", "));
+                    for field in &record.fields {
+                        eprintln!(
+                            "  {} {} = {}",
+                            field.field_type,
+                            field.name,
+                            value_text(&field.value)
+                        );
+                    }
+                }
+            }
+        }
+    }
+}

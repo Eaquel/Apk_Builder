@@ -434,9 +434,21 @@ pub struct AssemblyOperandClass {
     pub super_classes: Vec<String>,
     pub predicate_method: String,
     pub render_method: String,
+    pub parser_method: String,
+    pub diagnostic_type: String,
+    pub diagnostic_string: String,
+    pub optional: bool,
+    pub default_method: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Isa {
+    X86,
+    Armv8,
 }
 
 pub struct Target {
+    pub isa: Isa,
     pub registers: Vec<Register>,
     pub register_by_record: BTreeMap<String, RegisterId>,
     pub register_by_name: BTreeMap<String, RegisterId>,
@@ -737,8 +749,16 @@ impl Target {
     }
 
     fn load() -> Result<Target, Diagnostic> {
-        let records = read_records()?;
+        Target::load_with(Isa::X86, read_records()?, "X86Inst")
+    }
+
+    pub fn load_with(
+        isa: Isa,
+        records: BTreeMap<String, TableRecord>,
+        instruction_class: &str,
+    ) -> Result<Target, Diagnostic> {
         let mut target = Target {
+            isa,
             registers: vec![Register {
                 record: "NoRegister".to_string(),
                 assembly_name: String::new(),
@@ -908,6 +928,11 @@ impl Target {
                     super_classes: table_record_list(record, "SuperClasses"),
                     predicate_method: table_text(record, "PredicateMethod"),
                     render_method: table_text(record, "RenderMethod"),
+                    parser_method: table_text(record, "ParserMethod"),
+                    diagnostic_type: table_text(record, "DiagnosticType"),
+                    diagnostic_string: table_text(record, "DiagnosticString"),
+                    optional: table_bit(record, "IsOptional"),
+                    default_method: table_text(record, "DefaultMethod"),
                 });
             } else if record.is_a("TokenAlias") {
                 target.token_aliases.push((
@@ -919,7 +944,7 @@ impl Target {
         let instruction_names: Vec<String> = target
             .records
             .values()
-            .filter(|record| record.is_a("Instruction") && record.is_a("X86Inst"))
+            .filter(|record| record.is_a("Instruction") && record.is_a(instruction_class))
             .map(|record| record.name.clone())
             .collect();
         for name in instruction_names {
@@ -961,7 +986,7 @@ impl Target {
             target.mnemonic_aliases.push(MnemonicAlias {
                 from: table_text(record, "FromMnemonic"),
                 to: table_text(record, "ToMnemonic"),
-                modes: mode_validity(&target.records, &predicates),
+                modes: target.mode_validity_for(&predicates),
                 has_predicates,
                 variant_name: table_text(record, "AsmVariantName"),
             });
@@ -1033,7 +1058,7 @@ impl Target {
             }
         }
         let predicates = table_record_list(record, "Predicates");
-        let modes = mode_validity(&self.records, &predicates);
+        let modes = self.mode_validity_for(&predicates);
         let flags = match record.field("TSFlags") {
             Some(TableValue::Bits(bits)) => bits_value(bits),
             _ => 0,
@@ -1070,6 +1095,13 @@ impl Target {
             has_position_order: table_bit(record, "HasPositionOrder"),
             is_commutable: table_bit(record, "isCommutable"),
             intel_mnemonic: intel_mnemonic_of(&table_text(record, "AsmString")),
+        }
+    }
+
+    fn mode_validity_for(&self, predicates: &[String]) -> [bool; 3] {
+        match self.isa {
+            Isa::X86 => mode_validity(&self.records, predicates),
+            Isa::Armv8 => [true; 3],
         }
     }
 
@@ -1121,7 +1153,7 @@ impl Target {
             result,
             arguments,
             emit_priority: table_integer(record, "EmitPriority"),
-            modes: mode_validity(&self.records, &predicates),
+            modes: self.mode_validity_for(&predicates),
             predicates,
             variant_name: table_text(record, "AsmVariantName"),
             use_converter: table_bit(record, "UseInstAsmMatchConverter"),
@@ -1332,6 +1364,9 @@ impl Target {
             .and_then(|rest| rest.parse::<u32>().ok())
     }
 }
+
+#[path = "Armv8.rs"]
+pub mod armv8;
 
 pub fn target() -> Result<&'static Target, Diagnostic> {
     static TARGET: OnceLock<Result<Target, Diagnostic>> = OnceLock::new();
@@ -6841,6 +6876,12 @@ pub struct MatchClass {
     pub registers: BTreeSet<RegisterId>,
     pub super_classes: Vec<usize>,
     pub render: String,
+    pub predicate: String,
+    pub parser: String,
+    pub diagnostic: String,
+    pub diagnostic_string: String,
+    pub optional: bool,
+    pub default_method: String,
 }
 
 #[derive(Clone, Debug)]
@@ -6893,9 +6934,12 @@ pub struct Matcher {
     pub feature_names: BTreeMap<String, String>,
 }
 
-fn tokenize_assembly(text: &str) -> Vec<(String, bool)> {
+fn tokenize_assembly(isa: Isa, text: &str) -> Vec<(String, bool)> {
     let characters: Vec<char> = text.chars().collect();
-    let tokenizing = ['[', ']', '*', '!'];
+    let (tokenizing, breaking): (&[char], &[char]) = match isa {
+        Isa::X86 => (&['[', ']', '*', '!'], &[]),
+        Isa::Armv8 => (&['[', ']', '*', '!', '/'], &['.']),
+    };
     let separators = [' ', '\t', ','];
     let mut tokens: Vec<(String, bool)> = Vec::new();
     let mut previous = 0;
@@ -6905,6 +6949,16 @@ fn tokenize_assembly(text: &str) -> Vec<(String, bool)> {
     let slice = |from: usize, to: usize| -> String { characters[from..to].iter().collect() };
     while index < characters.len() {
         let character = characters[index];
+        if breaking.contains(&character) {
+            if in_token {
+                tokens.push((slice(previous, index), isolated));
+                previous = index;
+                isolated = false;
+            }
+            in_token = true;
+            index += 1;
+            continue;
+        }
         if tokenizing.contains(&character) {
             if in_token {
                 tokens.push((slice(previous, index), isolated));
@@ -7131,6 +7185,12 @@ impl<'t> MatcherBuilder<'t> {
             registers: BTreeSet::new(),
             super_classes: Vec::new(),
             render: String::new(),
+            predicate: String::new(),
+            parser: String::new(),
+            diagnostic: String::new(),
+            diagnostic_string: String::new(),
+            optional: false,
+            default_method: String::new(),
         });
         self.token_classes.insert(token.to_string(), made);
         made
@@ -7170,6 +7230,12 @@ impl<'t> MatcherBuilder<'t> {
             registers: registers.clone(),
             super_classes: Vec::new(),
             render: "addRegOperands".to_string(),
+            predicate: String::new(),
+            parser: String::new(),
+            diagnostic: String::new(),
+            diagnostic_string: String::new(),
+            optional: false,
+            default_method: String::new(),
         });
         self.register_set_classes.insert(key, made);
         made
@@ -7197,6 +7263,16 @@ impl<'t> MatcherBuilder<'t> {
             } else {
                 held.render_method.clone()
             },
+            predicate: if held.predicate_method.is_empty() {
+                format!("is{}", held.name)
+            } else {
+                held.predicate_method.clone()
+            },
+            parser: held.parser_method.clone(),
+            diagnostic: held.diagnostic_type.clone(),
+            diagnostic_string: held.diagnostic_string.clone(),
+            optional: held.optional,
+            default_method: held.default_method.clone(),
         });
         self.user_classes.insert(record.to_string(), made);
         let mut supers = Vec::new();
@@ -7241,7 +7317,10 @@ pub fn build_matcher(target: &Target) -> Matcher {
         register_set_classes: BTreeMap::new(),
         user_classes: BTreeMap::new(),
     };
-    let variants = [(0usize, "att", "%"), (1usize, "intel", "")];
+    let variants: &[(usize, &str, &str)] = match target.isa {
+        Isa::X86 => &[(0usize, "att", "%"), (1usize, "intel", "")],
+        Isa::Armv8 => &[(0usize, "generic", "")],
+    };
     let mut matchables: Vec<Matchable> = Vec::new();
     let is_mode_predicate = |predicate: &String| {
         matches!(
@@ -7252,7 +7331,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
             Some(TableValue::Dag { .. })
         )
     };
-    for (variant, variant_name, prefix) in variants {
+    for &(variant, variant_name, prefix) in variants {
         let mut prepared: Vec<(Matchable, Vec<(String, bool)>)> = Vec::new();
         for (opcode, instruction) in target.instructions.iter().enumerate() {
             if instruction.code_generation_only {
@@ -7262,7 +7341,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
                 continue;
             }
             let flat = flatten_variants(&instruction.assembly, variant);
-            let mut tokens = tokenize_assembly(&flat);
+            let mut tokens = tokenize_assembly(target.isa, &flat);
             if tokens.is_empty() {
                 continue;
             }
@@ -7302,7 +7381,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
                 continue;
             }
             let flat = flatten_variants(&alias.assembly, variant);
-            let mut tokens = tokenize_assembly(&flat);
+            let mut tokens = tokenize_assembly(target.isa, &flat);
             if tokens.is_empty() {
                 continue;
             }
@@ -7419,7 +7498,11 @@ pub fn build_matcher(target: &Target) -> Matcher {
         entry.1 = at + 1;
     }
     matcher.matchables = sorted;
-    for variant_name in ["att", "intel"] {
+    let variant_names: &[&str] = match target.isa {
+        Isa::X86 => &["att", "intel"],
+        Isa::Armv8 => &["generic"],
+    };
+    for &variant_name in variant_names {
         let mut aliases: BTreeMap<String, Vec<(String, [bool; 3], bool)>> = BTreeMap::new();
         for alias in &target.mnemonic_aliases {
             if alias.variant_name != variant_name && !alias.variant_name.is_empty() {
