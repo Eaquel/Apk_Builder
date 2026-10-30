@@ -25366,6 +25366,8 @@ pub mod object {
         sections: BTreeMap<usize, SectionState>,
         section_order: Vec<usize>,
         current: Option<(usize, usize)>,
+        arm_mapping_state: BTreeMap<usize, bool>,
+        arm_mapping_count: u64,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
         has_layout: bool,
@@ -25550,6 +25552,8 @@ pub mod object {
                 sections: BTreeMap::new(),
                 section_order: Vec::new(),
                 current: None,
+                arm_mapping_state: BTreeMap::new(),
+                arm_mapping_count: 0,
                 current_fragment: None,
                 symbols_in_order: Vec::new(),
                 has_layout: false,
@@ -25996,6 +26000,27 @@ pub mod object {
                 context.symbols[begin].offset = 0;
                 self.register_symbol(context, begin);
             }
+        }
+
+        fn arm_mapping(&mut self, context: &mut AssemblyContext, instruction: bool) {
+            if self.target.isa != Isa::Armv8 {
+                return;
+            }
+            let Some(section) = self.current_section() else {
+                return;
+            };
+            if self.arm_mapping_state.get(&section) == Some(&instruction) {
+                return;
+            }
+            self.arm_mapping_state.insert(section, instruction);
+            let name = format!(
+                "${}.{}",
+                if instruction { 'x' } else { 'd' },
+                self.arm_mapping_count
+            );
+            self.arm_mapping_count += 1;
+            let symbol = context.symbol(&name);
+            self.emit_label(context, symbol, None);
         }
 
         fn current_section(&self) -> Option<usize> {
@@ -29901,8 +29926,19 @@ pub mod object {
             context.symbols[symbol].size = Some(Expression::Constant(size as i64));
         }
 
-        fn emit_bytes(&mut self, _context: &mut AssemblyContext, data: &[u8]) {
+        fn emit_bytes(&mut self, context: &mut AssemblyContext, data: &[u8]) {
+            self.arm_mapping(context, false);
             self.append(data);
+        }
+
+        fn emit_inst(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: i64,
+            _location: SourceLocation,
+        ) {
+            self.arm_mapping(context, true);
+            self.append(&(value as u32).to_le_bytes());
         }
 
         fn emit_value(
@@ -29912,6 +29948,7 @@ pub mod object {
             size: u32,
             location: SourceLocation,
         ) {
+            self.arm_mapping(context, false);
             self.visit_used(context, value);
             if let Some(constant) = context.evaluate_absolute(value, Some(&*self)) {
                 let bits = size * 8;
@@ -29972,11 +30009,12 @@ pub mod object {
 
         fn emit_fill_bytes(
             &mut self,
-            _context: &mut AssemblyContext,
+            context: &mut AssemblyContext,
             count: &Expression,
             value: u64,
             location: SourceLocation,
         ) {
+            self.arm_mapping(context, false);
             if constant_of(count) == Some(0) {
                 return;
             }
@@ -29996,6 +30034,7 @@ pub mod object {
             value: i64,
             location: SourceLocation,
         ) {
+            self.arm_mapping(context, false);
             if let Some(count) = context.evaluate_absolute(count, Some(&*self)) {
                 if count < 0 {
                     context.report(
@@ -30076,6 +30115,7 @@ pub mod object {
                 return;
             }
             self.mode = mode;
+            self.arm_mapping(context, true);
             let padding = self.auto_padding() || self.pad_for_align || self.bundle_alignment != 0;
             if !padding {
                 self.object_emit_instruction(context, instruction, mode, Some(location));
