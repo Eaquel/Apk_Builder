@@ -987,7 +987,7 @@ pub fn feature_set(target: &Target, cpu: &str, attributes: &[String]) -> BTreeSe
         .find(|record| record.is_a("ProcessorModel") && table_text(record, "Name") == wanted)
     {
         for feature in table_record_list(processor, "Features") {
-            features.insert(feature);
+            set_feature(target, &mut features, &feature);
         }
     }
     for attribute in attributes {
@@ -1000,20 +1000,11 @@ pub fn feature_set(target: &Target, cpu: &str, attributes: &[String]) -> BTreeSe
             continue;
         }
         if let Some(record) = by_name(name) {
+            let held = record.name.clone();
             if enable {
-                features.insert(record.name.clone());
+                set_feature(target, &mut features, &held);
             } else {
-                features.remove(&record.name);
-            }
-        }
-    }
-    let mut pending: Vec<String> = features.iter().cloned().collect();
-    while let Some(name) = pending.pop() {
-        if let Some(record) = target.records.get(&name) {
-            for implied in table_record_list(record, "Implies") {
-                if features.insert(implied.clone()) {
-                    pending.push(implied);
-                }
+                clear_feature(target, &mut features, &held);
             }
         }
     }
@@ -1183,17 +1174,15 @@ fn classify_symbol(expression: &Expression) -> Option<(Option<String>, i64)> {
                 BinaryOperator::Subtract => -1,
                 _ => return None,
             };
-            match (left.as_ref(), right.as_ref()) {
-                (Expression::Symbol { specifier, .. }, Expression::Constant(value)) => {
-                    Some((specifier.clone(), sign * value))
-                }
-                (Expression::Constant(value), Expression::Symbol { specifier, .. })
-                    if sign == 1 =>
-                {
-                    Some((specifier.clone(), *value))
-                }
-                _ => None,
+            if let Expression::Constant(value) = right.as_ref() {
+                let (specifier, offset) = classify_symbol(left)?;
+                return Some((specifier, offset + sign * value));
             }
+            if let (1, Expression::Constant(value)) = (sign, left.as_ref()) {
+                let (specifier, offset) = classify_symbol(right)?;
+                return Some((specifier, offset + value));
+            }
+            None
         }
         _ => None,
     }
@@ -1966,12 +1955,46 @@ impl<'s> Assembler<'s> {
 
     fn arm_expression(&mut self) -> Result<Expression, ()> {
         let (expression, _) = self.parse_expression()?;
+        if self.arm_keep_symbols {
+            return Ok(self.arm_fold_constants(expression));
+        }
         if !matches!(expression, Expression::Constant(_)) {
             if let Some(value) = self.context.evaluate_absolute(&expression, None) {
                 return Ok(Expression::Constant(value));
             }
         }
         Ok(expression)
+    }
+
+    fn arm_fold_constants(&mut self, expression: Expression) -> Expression {
+        match expression {
+            Expression::Binary {
+                operator,
+                left,
+                right,
+            } => {
+                let left = self.arm_fold_constants(*left);
+                let right = self.arm_fold_constants(*right);
+                let combined = Expression::Binary {
+                    operator,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                };
+                match &combined {
+                    Expression::Binary { left, right, .. }
+                        if matches!(**left, Expression::Constant(_))
+                            && matches!(**right, Expression::Constant(_)) =>
+                    {
+                        match self.context.evaluate_absolute(&combined, None) {
+                            Some(value) => Expression::Constant(value),
+                            None => combined,
+                        }
+                    }
+                    _ => combined,
+                }
+            }
+            other => other,
+        }
     }
 
     fn arm_register_by_name(&self, name: &str, kind: RegKind) -> Option<RegisterId> {
@@ -2272,7 +2295,10 @@ impl<'s> Assembler<'s> {
                 return Err(());
             }
         }
-        let expression = self.arm_expression()?;
+        self.arm_keep_symbols = specifier.is_some();
+        let parsed = self.arm_expression();
+        self.arm_keep_symbols = false;
+        let expression = parsed?;
         match specifier {
             None => Ok(expression),
             Some(specifier) => match self.apply_specifier(&expression, &specifier) {
@@ -4510,6 +4536,206 @@ impl<'s> Assembler<'s> {
         false
     }
 
+    fn arm_register_key(&self, register: RegisterId) -> String {
+        let name = self.target.registers[register as usize]
+            .assembly_name
+            .to_ascii_lowercase();
+        match name.as_str() {
+            "sp" | "wsp" => "sp".to_string(),
+            "xzr" | "wzr" => "zr".to_string(),
+            _ => name
+                .strip_prefix(['x', 'w'])
+                .map(|rest| rest.to_string())
+                .unwrap_or(name),
+        }
+    }
+
+    fn arm_validate(
+        &mut self,
+        operands: &[ParsedOperand],
+        instruction: &MachineInstruction,
+    ) -> bool {
+        let name = self.target.instructions[instruction.opcode].record.clone();
+        let key = |this: &Self, index: usize| this.arm_register_key(instruction.register_at(index));
+        let place = |this: &Self, index: usize| {
+            operands
+                .get(index + 1)
+                .map(|operand| this.statement_location(operand.start))
+                .unwrap_or(this.statement_start)
+        };
+        let writeback = |name: &str, stems: &[&str]| -> bool {
+            stems.iter().any(|stem| {
+                name.strip_prefix(stem)
+                    .is_some_and(|rest| rest == "pre" || rest == "post")
+            })
+        };
+        let letters = |rest: &str, allowed: &[&str]| allowed.contains(&rest);
+        let flags = [
+            "", "WN", "RN", "N", "WT", "WTWN", "WTRN", "WTN", "RT", "RTWN", "RTRN", "RTN", "T",
+            "TWN", "TRN", "TN",
+        ];
+        let location_zero = place(self, 0);
+        let location_one = place(self, 1);
+        if writeback(&name, &["LDPSW", "LDPW", "LDPX"]) {
+            let base = key(self, 3);
+            if base == key(self, 1) {
+                return self.error(
+                    location_zero,
+                    "unpredictable LDP instruction, writeback base is also a destination",
+                );
+            }
+            if base == key(self, 2) {
+                return self.error(
+                    location_one,
+                    "unpredictable LDP instruction, writeback base is also a destination",
+                );
+            }
+        }
+        if matches!(
+            name.as_str(),
+            "LDPDi" | "LDPQi" | "LDPSi" | "LDPSWi" | "LDPWi" | "LDPXi"
+        ) && instruction.register_at(0) == instruction.register_at(1)
+        {
+            return self.error(location_one, "unpredictable LDP instruction, Rt2==Rt");
+        }
+        if (writeback(&name, &["LDPD", "LDPQ", "LDPS"]) || name == "LDPSWpost")
+            && instruction.register_at(1) == instruction.register_at(2)
+        {
+            return self.error(location_one, "unpredictable LDP instruction, Rt2==Rt");
+        }
+        if writeback(&name, &["STPD", "STPQ", "STPS", "STPW", "STPX"]) {
+            let base = key(self, 3);
+            if base == key(self, 1) {
+                return self.error(
+                    location_zero,
+                    "unpredictable STP instruction, writeback base is also a source",
+                );
+            }
+            if base == key(self, 2) {
+                return self.error(
+                    location_one,
+                    "unpredictable STP instruction, writeback base is also a source",
+                );
+            }
+        }
+        if writeback(
+            &name,
+            &[
+                "LDRBB", "LDRB", "LDRHH", "LDRH", "LDRSBW", "LDRSBX", "LDRSHW", "LDRSHX", "LDRSW",
+                "LDRW", "LDRX",
+            ],
+        ) && key(self, 2) == key(self, 1)
+        {
+            return self.error(
+                location_zero,
+                "unpredictable LDR instruction, writeback base is also a source",
+            );
+        }
+        if writeback(&name, &["STRBB", "STRB", "STRHH", "STRH", "STRW", "STRX"])
+            && key(self, 2) == key(self, 1)
+        {
+            return self.error(
+                location_zero,
+                "unpredictable STR instruction, writeback base is also a source",
+            );
+        }
+        if matches!(
+            name.as_str(),
+            "STXRB" | "STXRH" | "STXRW" | "STXRX" | "STLXRB" | "STLXRH" | "STLXRW" | "STLXRX"
+        ) {
+            let status = key(self, 0);
+            let base = key(self, 2);
+            if key(self, 1) == status || (base == status && base != "sp") {
+                return self.error(
+                    location_zero,
+                    "unpredictable STXR instruction, status is also a source",
+                );
+            }
+        }
+        if matches!(name.as_str(), "STXPW" | "STXPX" | "STLXPW" | "STLXPX") {
+            let status = key(self, 0);
+            let base = key(self, 3);
+            if key(self, 1) == status || key(self, 2) == status || (base == status && base != "sp")
+            {
+                return self.error(
+                    location_zero,
+                    "unpredictable STXP instruction, status is also a source",
+                );
+            }
+        }
+        if matches!(name.as_str(), "LDRABwriteback" | "LDRAAwriteback")
+            && instruction.register_at(0) == instruction.register_at(1)
+        {
+            return self.error(
+                location_zero,
+                "unpredictable LDRA instruction, writeback base is also a destination",
+            );
+        }
+        let copy_rest = name
+            .strip_prefix("CPYF")
+            .or_else(|| name.strip_prefix("CPY"))
+            .and_then(|rest| rest.strip_prefix(['P', 'M', 'E']));
+        if copy_rest.is_some_and(|rest| letters(rest, &flags)) {
+            let destination = instruction.register_at(3);
+            let source = instruction.register_at(4);
+            let size = instruction.register_at(5);
+            let text = if destination == source {
+                "invalid CPY instruction, destination and source registers are the same"
+            } else if destination == size {
+                "invalid CPY instruction, destination and size registers are the same"
+            } else if source == size {
+                "invalid CPY instruction, source and size registers are the same"
+            } else {
+                ""
+            };
+            if !text.is_empty() {
+                return self.error(location_zero, text);
+            }
+        }
+        let set_rest = |name: &str| -> Option<String> {
+            let rest = name
+                .strip_prefix("SETGO")
+                .map(|rest| ("O", rest))
+                .or_else(|| name.strip_prefix("SETG").map(|rest| ("", rest)))
+                .or_else(|| name.strip_prefix("SET").map(|rest| ("", rest)))
+                .or_else(|| name.strip_prefix("MOPSSETG").map(|rest| ("", rest)))?;
+            let tail = rest.1.strip_prefix(['P', 'M', 'E'])?;
+            matches!(tail, "" | "T" | "N" | "TN").then(|| rest.0.to_string())
+        };
+        if name.starts_with("SETGO")
+            || name.starts_with("SETG")
+            || name.starts_with("SET")
+            || name.starts_with("MOPSSETG")
+        {
+            if let Some(kind) = set_rest(&name) {
+                let destination = instruction.register_at(2);
+                let size = instruction.register_at(3);
+                if destination == size {
+                    return self.error(
+                        location_zero,
+                        "invalid SET instruction, destination and size registers are the same",
+                    );
+                }
+                if kind.is_empty() {
+                    let source = instruction.register_at(4);
+                    if destination == source {
+                        return self.error(
+                            location_zero,
+                            "invalid SET instruction, destination and source registers are the same",
+                        );
+                    }
+                    if size == source {
+                        return self.error(
+                            location_zero,
+                            "invalid SET instruction, source and size registers are the same",
+                        );
+                    }
+                }
+            }
+        }
+        false
+    }
+
     fn arm_match_and_emit(
         &mut self,
         location: SourceLocation,
@@ -4524,6 +4750,9 @@ impl<'s> Assembler<'s> {
                 let instruction = outcome
                     .instruction
                     .unwrap_or_else(|| MachineInstruction::new(0));
+                if self.arm_validate(operands, &instruction) {
+                    return true;
+                }
                 let locations = std::mem::take(&mut self.expression_locations);
                 self.streamer.note_expression_locations(&locations);
                 self.emit_instruction(&instruction, location);
@@ -5790,23 +6019,11 @@ fn generic_register_string(value: u32) -> String {
     format!("S{op0}_{op1}_C{crn}_C{crm}_{op2}")
 }
 
-fn extension_features(target: &Target, name: &str) -> Option<Vec<String>> {
-    let mut found = Vec::new();
-    for record in target.records.values() {
-        if !record.is_a("Extension") {
-            continue;
-        }
-        let visible = table_text(record, "UserVisibleName");
-        let alias = table_text(record, "UserVisibleAlias");
-        if visible == name || (!alias.is_empty() && alias == name) {
-            found.push(record.name.clone());
-        }
-    }
-    if found.is_empty() {
-        None
-    } else {
-        Some(found)
-    }
+fn extension_features(_target: &Target, name: &str) -> Option<Vec<String>> {
+    EXTENSION_DEFS
+        .iter()
+        .find(|(held, _)| *held == name)
+        .map(|(_, features)| features.iter().map(|feature| feature.to_string()).collect())
 }
 
 fn set_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
@@ -6074,7 +6291,142 @@ impl<'s> Assembler<'s> {
     }
 }
 
-fn required_features_text(target: &Target, requires: &[String]) -> String {
+const EXTENSION_DEFS: &[(&str, &[&str])] = &[
+    ("crc", &["FeatureCRC"]),
+    ("sm4", &["FeatureSM4"]),
+    ("sha3", &["FeatureSHA3"]),
+    ("sha2", &["FeatureSHA2"]),
+    ("aes", &["FeatureAES"]),
+    ("crypto", &["FeatureCrypto"]),
+    ("fp", &["FeatureFPARMv8"]),
+    ("simd", &["FeatureNEON"]),
+    ("ras", &["FeatureRAS"]),
+    ("rasv2", &["FeatureRASv2"]),
+    ("lse", &["FeatureLSE"]),
+    ("predres", &["FeaturePredRes"]),
+    ("predres2", &["FeatureSPECRES2"]),
+    ("ccdp", &["FeatureCacheDeepPersist"]),
+    ("mte", &["FeatureMTE"]),
+    ("memtag", &["FeatureMTE"]),
+    ("tlb-rmi", &["FeatureTLB_RMI"]),
+    ("pan", &["FeaturePAN"]),
+    ("pan-rwv", &["FeaturePAN_RWV"]),
+    ("ccpp", &["FeatureCCPP"]),
+    ("rcpc", &["FeatureRCPC"]),
+    ("rng", &["FeatureRandGen"]),
+    ("sve", &["FeatureSVE"]),
+    ("sve-b16b16", &["FeatureSVEB16B16"]),
+    ("sve2", &["FeatureSVE2"]),
+    ("sve-aes", &["FeatureSVEAES"]),
+    ("sve2-aes", &["FeatureAliasSVE2AES", "FeatureSVEAES"]),
+    ("sve-sm4", &["FeatureSVESM4"]),
+    ("sve2-sm4", &["FeatureAliasSVE2SM4", "FeatureSVESM4"]),
+    ("sve-sha3", &["FeatureSVESHA3"]),
+    ("sve2-sha3", &["FeatureAliasSVE2SHA3", "FeatureSVESHA3"]),
+    ("sve-bitperm", &["FeatureSVEBitPerm"]),
+    (
+        "sve2-bitperm",
+        &[
+            "FeatureAliasSVE2BitPerm",
+            "FeatureSVEBitPerm",
+            "FeatureSVE2",
+        ],
+    ),
+    ("sve2p1", &["FeatureSVE2p1"]),
+    ("ls64", &["FeatureLS64"]),
+    ("xs", &["FeatureXS"]),
+    ("pauth", &["FeaturePAuth"]),
+    ("flagm", &["FeatureFlagM"]),
+    ("rme", &["FeatureRME"]),
+    ("sme", &["FeatureSME"]),
+    ("sme-f64f64", &["FeatureSMEF64F64"]),
+    ("sme-f16f16", &["FeatureSMEF16F16"]),
+    ("sme-i16i64", &["FeatureSMEI16I64"]),
+    ("sme2", &["FeatureSME2"]),
+    ("sme2p1", &["FeatureSME2p1"]),
+    ("sme-b16b16", &["FeatureSMEB16B16"]),
+    ("hbc", &["FeatureHBC"]),
+    ("mops", &["FeatureMOPS"]),
+    ("mec", &["FeatureMEC"]),
+    ("the", &["FeatureTHE"]),
+    ("d128", &["FeatureD128"]),
+    ("lse128", &["FeatureLSE128"]),
+    ("ite", &["FeatureITE"]),
+    ("cssc", &["FeatureCSSC"]),
+    ("rcpc3", &["FeatureRCPC3"]),
+    ("gcs", &["FeatureGCS"]),
+    ("bf16", &["FeatureBF16"]),
+    ("compnum", &["FeatureComplxNum"]),
+    ("dotprod", &["FeatureDotProd"]),
+    ("f32mm", &["FeatureMatMulFP32"]),
+    ("f64mm", &["FeatureMatMulFP64"]),
+    ("fp16", &["FeatureFullFP16"]),
+    ("fp16fml", &["FeatureFP16FML"]),
+    ("i8mm", &["FeatureMatMulInt8"]),
+    ("lor", &["FeatureLOR"]),
+    ("profile", &["FeatureSPE"]),
+    ("rdm", &["FeatureRDM"]),
+    ("rdma", &["FeatureRDM"]),
+    ("sb", &["FeatureSB"]),
+    ("ssbs", &["FeatureSSBS"]),
+    ("fp8", &["FeatureFP8"]),
+    ("faminmax", &["FeatureFAMINMAX"]),
+    ("fp8fma", &["FeatureFP8FMA"]),
+    ("ssve-fp8fma", &["FeatureSSVE_FP8FMA"]),
+    ("fp8dot2", &["FeatureFP8DOT2"]),
+    ("ssve-fp8dot2", &["FeatureSSVE_FP8DOT2"]),
+    ("fp8dot4", &["FeatureFP8DOT4"]),
+    ("ssve-fp8dot4", &["FeatureSSVE_FP8DOT4"]),
+    ("lut", &["FeatureLUT"]),
+    ("sme-lutv2", &["FeatureSME_LUTv2"]),
+    ("sme-f8f16", &["FeatureSMEF8F16"]),
+    ("sme-f8f32", &["FeatureSMEF8F32"]),
+    ("sme-fa64", &["FeatureSMEFA64"]),
+    ("cpa", &["FeatureCPA"]),
+    ("tlbiw", &["FeatureTLBIW"]),
+    ("pops", &["FeaturePoPS"]),
+    ("cmpbr", &["FeatureCMPBR"]),
+    ("f8f32mm", &["FeatureF8F32MM"]),
+    ("f8f16mm", &["FeatureF8F16MM"]),
+    ("fprcvt", &["FeatureFPRCVT"]),
+    ("lsfe", &["FeatureLSFE"]),
+    ("sme2p2", &["FeatureSME2p2"]),
+    ("ssve-aes", &["FeatureSSVE_AES"]),
+    ("sve2p2", &["FeatureSVE2p2"]),
+    ("sve-aes2", &["FeatureSVEAES2"]),
+    ("sve-bfscale", &["FeatureSVEBFSCALE"]),
+    ("sve-f16f32mm", &["FeatureSVE_F16F32MM"]),
+    ("lsui", &["FeatureLSUI"]),
+    ("occmo", &["FeatureOCCMO"]),
+    ("ssve-bitperm", &["FeatureSSVE_BitPerm"]),
+    ("sme-mop4", &["FeatureSME_MOP4"]),
+    ("sme-tmop", &["FeatureSME_TMOP"]),
+    ("lscp", &["FeatureLSCP"]),
+    ("tlbid", &["FeatureTLBID"]),
+    ("mtetc", &["FeatureMTETC"]),
+    ("gcie", &["FeatureGCIE"]),
+    ("sme2p3", &["FeatureSME2p3"]),
+    ("sve2p3", &["FeatureSVE2p3"]),
+    ("sve-b16mm", &["FeatureSVE_B16MM"]),
+    ("f16mm", &["FeatureF16MM"]),
+    ("f16f32dot", &["FeatureF16F32DOT"]),
+    ("f16f32mm", &["FeatureF16F32MM"]),
+    ("mops-go", &["FeatureMOPS_GO"]),
+    ("poe2", &["FeatureS1POE2"]),
+    ("tev", &["FeatureTEV"]),
+    ("btie", &["FeatureBTIE"]),
+    ("hinte", &["FeatureHINTE"]),
+    ("dit", &["FeatureDIT"]),
+    ("brbe", &["FeatureBRBE"]),
+    ("bti", &["FeatureBranchTargetId"]),
+    ("fcma", &["FeatureComplxNum"]),
+    ("jscvt", &["FeatureJS"]),
+    ("pauth-lr", &["FeaturePAuthLR"]),
+    ("ssve-fexpa", &["FeatureSSVE_FEXPA"]),
+    ("wfxt", &["FeatureWFxT"]),
+];
+
+fn required_features_text(_target: &Target, requires: &[String]) -> String {
     for (feature, text) in [
         ("HasV8_0aOps", "ARMv8a"),
         ("HasV8_1aOps", "ARMv8.1a"),
@@ -6097,29 +6449,19 @@ fn required_features_text(target: &Target, requires: &[String]) -> String {
             return text.to_string();
         }
     }
-    let mut names: Vec<(u64, String)> = Vec::new();
-    for record in target.records.values() {
-        if !record.is_a("Extension") || !requires.contains(&record.name) {
-            continue;
-        }
-        let visible = table_text(record, "UserVisibleName");
-        let alias = table_text(record, "UserVisibleAlias");
-        if !visible.is_empty() {
-            names.push((record.definition_order, visible));
-        }
-        if !alias.is_empty() {
-            names.push((record.definition_order, alias));
-        }
-    }
-    names.sort();
+    let names: Vec<&str> = EXTENSION_DEFS
+        .iter()
+        .filter(|(_, features)| {
+            features
+                .iter()
+                .any(|feature| requires.iter().any(|held| held == feature))
+        })
+        .map(|(name, _)| *name)
+        .collect();
     if names.is_empty() {
         "(unknown)".to_string()
     } else {
-        names
-            .into_iter()
-            .map(|(_, name)| name)
-            .collect::<Vec<_>>()
-            .join(", ")
+        names.join(", ")
     }
 }
 

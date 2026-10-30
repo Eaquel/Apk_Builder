@@ -9784,6 +9784,7 @@ pub struct AssemblyContext {
     pub symbols: Vec<Symbol>,
     pub symbol_index: BTreeMap<String, usize>,
     pub used_names: BTreeSet<String>,
+    pub named_temporaries: bool,
     pub unique_counters: BTreeMap<String, u64>,
     pub directional_instances: BTreeMap<i64, u64>,
     pub directional_symbols: BTreeMap<(i64, u64), usize>,
@@ -9803,6 +9804,7 @@ impl AssemblyContext {
             symbols: Vec::new(),
             symbol_index: BTreeMap::new(),
             used_names: BTreeSet::new(),
+            named_temporaries: true,
             unique_counters: BTreeMap::new(),
             directional_instances: BTreeMap::new(),
             directional_symbols: BTreeMap::new(),
@@ -9906,7 +9908,11 @@ impl AssemblyContext {
     }
 
     pub fn temporary_symbol(&mut self) -> usize {
-        let base = format!("{}tmp", self.private_prefix());
+        let base = if self.named_temporaries {
+            format!("{}tmp", self.private_prefix())
+        } else {
+            format!("{}omni_tmp", self.private_prefix())
+        };
         self.renamable_symbol(&base, true, true)
     }
 
@@ -10722,6 +10728,7 @@ pub struct Assembler<'s> {
     pub arm_mnemonic: String,
     pub arm_suffixes: BTreeSet<usize>,
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
+    pub arm_keep_symbols: bool,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
     conditions: Vec<ConditionState>,
@@ -10867,12 +10874,17 @@ impl<'s> Assembler<'s> {
         let mut lexer = Lexer::new(&options.source_name, source);
         lexer.masm_integers = options.masm_integers;
         lexer.hash_token = triple.isa == Isa::Armv8;
+        let unnamed_temporaries = triple.isa == Isa::Armv8 && options.output == OutputKind::Object;
         Ok(Assembler {
             target,
             matcher,
             options,
             lexer,
-            context: AssemblyContext::new(triple),
+            context: {
+                let mut context = AssemblyContext::new(triple);
+                context.named_temporaries = !unnamed_temporaries;
+                context
+            },
             streamer,
             mode,
             dialect,
@@ -10880,6 +10892,7 @@ impl<'s> Assembler<'s> {
             arm_mnemonic: String::new(),
             arm_suffixes: BTreeSet::new(),
             arm_aliases: BTreeMap::new(),
+            arm_keep_symbols: false,
             pending_errors: Vec::new(),
             condition: ConditionState {
                 kind: ConditionKind::None,
@@ -11176,7 +11189,7 @@ impl<'s> Assembler<'s> {
             end = self.lexer.token.end_location();
             self.lex();
         }
-        if !matches!(expression, Expression::Constant(_)) {
+        if !matches!(expression, Expression::Constant(_)) && !self.arm_keep_symbols {
             if let Some(value) = self
                 .context
                 .evaluate_absolute(&expression, self.streamer.symbol_layout())
@@ -25903,6 +25916,11 @@ pub mod object {
             if context.sections[section].flags & ELF_FLAG_GNU_RETAIN != 0 {
                 self.seen_gnu_abi = true;
             }
+            if self.target.isa == Isa::Armv8
+                && context.sections[section].flags & ELF_FLAG_EXECUTE != 0
+            {
+                context.sections[section].alignment = context.sections[section].alignment.max(4);
+            }
             let new_section = !self.sections.contains_key(&section);
             if new_section {
                 let name = context.sections[section].name.clone();
@@ -27972,6 +27990,13 @@ pub mod object {
         }
 
         fn write_nops(&self, out: &mut Vec<u8>, count: u64, offset: u64, maximum: u64, mode: Mode) {
+            if self.target.isa == Isa::Armv8 {
+                out.extend(std::iter::repeat_n(0u8, (count % 4) as usize));
+                for _ in 0..count / 4 {
+                    out.extend_from_slice(&0xd503201fu32.to_le_bytes());
+                }
+                return;
+            }
             let mut remaining = count;
             let mut offset = offset;
             while remaining > 0 {
