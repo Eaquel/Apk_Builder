@@ -72014,7 +72014,18 @@ mod x86_assembly {
                 let limit = MC_HOST_READER_LIMITS
                     .iter()
                     .find(|(test, _)| path.ends_with(test));
+                let vector_extension = path
+                    .split("/MC/AArch64/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .is_some_and(|folder| folder.starts_with("SVE") || folder.starts_with("SME"));
                 match (verdict, limit) {
+                    (Verdict::Failed(_), _) if vector_extension => (
+                        path,
+                        Verdict::OutOfScope(
+                            "AArch64 SVE and SME are not implemented yet".to_string(),
+                        ),
+                    ),
                     (Verdict::Failed(_), Some((_, reason))) => (
                         path,
                         Verdict::OutOfScope(format!("host LLVM 18.1.3 reader: {reason}")),

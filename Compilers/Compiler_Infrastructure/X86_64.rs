@@ -736,6 +736,33 @@ impl Target {
                             .map(|first| first.iter().copied().take(count).collect())
                             .unwrap_or_default()
                     }
+                    "rotl" | "rotr" => {
+                        let first = sets.first().cloned().unwrap_or_default();
+                        if first.is_empty() {
+                            return first;
+                        }
+                        let amount = (integer(1).max(0) as usize) % first.len();
+                        let mut rotated = first.clone();
+                        if operator == "rotl" {
+                            rotated.rotate_left(amount);
+                        } else {
+                            rotated.rotate_right(amount);
+                        }
+                        rotated
+                    }
+                    "decimate" => {
+                        let stride = integer(1).max(1) as usize;
+                        let offset = if arguments.len() > 2 {
+                            integer(2).max(0) as usize
+                        } else {
+                            0
+                        };
+                        sets.first()
+                            .map(|first| {
+                                first.iter().copied().skip(offset).step_by(stride).collect()
+                            })
+                            .unwrap_or_default()
+                    }
                     "shl" => {
                         let count = integer(1).max(0) as usize;
                         sets.first()
@@ -10646,6 +10673,12 @@ pub trait Streamer {
     fn emit_identifier(&mut self, context: &mut AssemblyContext, text: &[u8]);
     fn emit_file(&mut self, context: &mut AssemblyContext, name: &[u8]);
     fn emit_raw_text(&mut self, context: &mut AssemblyContext, text: &str);
+    fn emit_inst(&mut self, context: &mut AssemblyContext, value: i64, location: SourceLocation) {
+        self.emit_value(context, &Expression::Constant(value), 4, location);
+    }
+    fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
+        context.symbols[symbol].other |= 0x80;
+    }
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
     fn emit_mode_change(&mut self, context: &mut AssemblyContext, mode: Mode);
     fn emit_coff_directive(
@@ -19493,6 +19526,15 @@ impl Streamer for TextStreamer {
     fn emit_raw_text(&mut self, _context: &mut AssemblyContext, text: &str) {
         let trimmed = text.strip_suffix('\n').unwrap_or(text);
         self.line(trimmed);
+    }
+
+    fn emit_inst(&mut self, _context: &mut AssemblyContext, value: i64, _location: SourceLocation) {
+        self.line(&format!("\t.inst\t{value:#x}"));
+    }
+
+    fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
+        let name = self.symbol(context, symbol);
+        self.line(&format!("\t.variant_pcs\t{name}"));
     }
 
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>) {

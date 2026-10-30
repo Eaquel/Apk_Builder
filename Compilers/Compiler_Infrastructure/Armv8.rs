@@ -509,6 +509,19 @@ pub fn encode(
     instruction: &MachineInstruction,
 ) -> Result<Encoded, Diagnostic> {
     let description = &target.instructions[instruction.opcode];
+    if description.record == "TLSDESCCALL" {
+        if let MachineOperand::Expression(expression) = instruction.operand(0) {
+            return Ok(Encoded {
+                bytes: Vec::new(),
+                fixups: vec![Fixup {
+                    offset: 0,
+                    expression: expression.clone(),
+                    kind: FixupKind::Literal(569),
+                    pc_relative: false,
+                }],
+            });
+        }
+    }
     let plan = match &encoding_plans(target)[instruction.opcode] {
         Ok(plan) => plan,
         Err(cause) => {
@@ -5160,6 +5173,14 @@ impl<'t> ArmPrinter<'t> {
 
     fn special(&self, instruction: &MachineInstruction) -> Option<String> {
         let record = self.target.instructions[instruction.opcode].record.as_str();
+        if record == "TLSDESCCALL" {
+            if let MachineOperand::Expression(expression) = instruction.operand(0) {
+                return Some(format!(
+                    "\t.tlsdesccall {}",
+                    arm_expression_text(self.target, expression)
+                ));
+            }
+        }
         if record == "SYSxt" {
             if let Some(text) = self.sys_alias(instruction) {
                 return Some(text);
@@ -5900,14 +5921,29 @@ impl<'s> Assembler<'s> {
                 let Some(name) = self.parse_identifier() else {
                     return Some(self.token_error("expected symbol name"));
                 };
-                let _ = name;
-                Some(self.parse_end_of_line())
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                let symbol = self.context.symbol(&name);
+                self.streamer.emit_variant_pcs(&mut self.context, symbol);
+                Some(false)
             }
             ".tlsdesccall" => {
-                let Ok((_, _)) = self.parse_expression() else {
+                let Some(name) = self.parse_identifier() else {
+                    return Some(self.token_error("expected symbol name"));
+                };
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                let Some(opcode) = self.target.instruction_by_record.get("TLSDESCCALL") else {
                     return Some(true);
                 };
-                Some(self.parse_end_of_line())
+                let mut instruction = MachineInstruction::new(*opcode);
+                instruction
+                    .operands
+                    .push(MachineOperand::Expression(Expression::symbol(&name)));
+                self.emit_instruction(&instruction, location);
+                Some(false)
             }
             ".inst" => {
                 if self.is(TokenKind::EndOfStatement) {
@@ -5926,12 +5962,7 @@ impl<'s> Assembler<'s> {
                     if !(0..=0xffff_ffff).contains(&constant) && constant < -(1i64 << 31) {
                         return parser.error(at, "out of range literal value");
                     }
-                    parser.streamer.emit_value(
-                        &mut parser.context,
-                        &Expression::Constant(constant),
-                        4,
-                        at,
-                    );
+                    parser.streamer.emit_inst(&mut parser.context, constant, at);
                     false
                 }))
             }
