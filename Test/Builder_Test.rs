@@ -72066,6 +72066,10 @@ mod x86_assembly {
             "llvm-objdump 18 does not know R_AARCH64_PATCHINST",
         ),
         (
+            "MC/AArch64/armv9.6a-lsui.s",
+            "llvm-objdump 18 does not decode the LSUI instructions",
+        ),
+        (
             "MC/AArch64/armv9.7a-mpamv2.s",
             "llvm-objdump 18 prints the MPAMv2 system registers by their encoding",
         ),
