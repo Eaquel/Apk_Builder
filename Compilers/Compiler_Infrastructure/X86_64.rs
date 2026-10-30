@@ -18816,7 +18816,7 @@ impl TextStreamer {
         for (index, register) in self.target.registers.iter().enumerate().skip(1) {
             if register.dwarf_numbers.get(flavour).copied() == Some(number) {
                 let name = self.target.register_name(index as RegisterId);
-                return if self.syntax == Syntax::Att {
+                return if self.syntax == Syntax::Att && self.target.isa == Isa::X86 {
                     format!("%{name}")
                 } else {
                     name.to_string()
