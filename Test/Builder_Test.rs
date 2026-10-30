@@ -71957,6 +71957,14 @@ mod x86_assembly {
 
     const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
         (
+            "MC/AArch64/build-attributes-asm-arch-specific-empty.s",
+            "llvm-readelf 18 prints nothing for --arch-specific on AArch64 objects",
+        ),
+        (
+            "MC/AArch64/build-attributes-asm-arch-specific.s",
+            "llvm-readelf 18 prints nothing for --arch-specific on AArch64 objects",
+        ),
+        (
             "MC/AArch64/armv9.4a-gcs.s",
             "llvm-objdump 18 prints the GCSSTR operand without the brackets the test names",
         ),

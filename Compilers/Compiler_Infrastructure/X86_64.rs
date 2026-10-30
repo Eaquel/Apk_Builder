@@ -10685,6 +10685,8 @@ pub trait Streamer {
     fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
         context.symbols[symbol].other |= 0x80;
     }
+    fn emit_arm_subsection(&mut self, _name: &str, _optional: u8, _kind: u8) {}
+    fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
     fn emit_mode_change(&mut self, context: &mut AssemblyContext, mode: Mode);
     fn emit_coff_directive(
@@ -10729,6 +10731,7 @@ pub struct Assembler<'s> {
     pub arm_suffixes: BTreeSet<usize>,
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pub arm_keep_symbols: bool,
+    pub arm_attributes: armv8::AttributeSet,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
     conditions: Vec<ConditionState>,
@@ -10893,6 +10896,7 @@ impl<'s> Assembler<'s> {
             arm_suffixes: BTreeSet::new(),
             arm_aliases: BTreeMap::new(),
             arm_keep_symbols: false,
+            arm_attributes: armv8::AttributeSet::default(),
             pending_errors: Vec::new(),
             condition: ConditionState {
                 kind: ConditionKind::None,
@@ -19550,6 +19554,33 @@ impl Streamer for TextStreamer {
         self.line(&format!("\t.variant_pcs\t{name}"));
     }
 
+    fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
+        let optional = if optional == 1 {
+            "optional"
+        } else {
+            "required"
+        };
+        let kind = if kind == 0 { "uleb128" } else { "ntbs" };
+        self.line(&format!("\t.aeabi_subsection\t{name}, {optional}, {kind}"));
+    }
+
+    fn emit_arm_attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {
+        let known = match (vendor, tag) {
+            ("aeabi_feature_and_bits", 0) => Some("Tag_Feature_BTI"),
+            ("aeabi_feature_and_bits", 1) => Some("Tag_Feature_PAC"),
+            ("aeabi_feature_and_bits", 2) => Some("Tag_Feature_GCS"),
+            ("aeabi_pauthabi", 1) => Some("Tag_PAuth_Platform"),
+            ("aeabi_pauthabi", 2) => Some("Tag_PAuth_Schema"),
+            _ => None,
+        };
+        let body = match value {
+            Some(value) => value.to_string(),
+            None => text.to_string(),
+        };
+        let comment = known.map(|name| format!("\t// {name}")).unwrap_or_default();
+        self.line(&format!("\t.aeabi_attribute\t{tag}, {body}{comment}"));
+    }
+
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>) {
         match symbol {
             Some(symbol) => {
@@ -25380,6 +25411,7 @@ pub mod object {
         section_order: Vec<usize>,
         current: Option<(usize, usize)>,
         arm_mapping_state: BTreeMap<usize, bool>,
+        arm_attributes: armv8::AttributeSet,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
         has_layout: bool,
@@ -25565,6 +25597,7 @@ pub mod object {
                 section_order: Vec::new(),
                 current: None,
                 arm_mapping_state: BTreeMap::new(),
+                arm_attributes: armv8::AttributeSet::default(),
                 current_fragment: None,
                 symbols_in_order: Vec::new(),
                 has_layout: false,
@@ -29611,6 +29644,12 @@ pub mod object {
             if self.emit_debug_frame {
                 self.emit_frames(context, false);
             }
+            let attributes = self.arm_attributes.encode();
+            if !attributes.is_empty() {
+                let section = context.elf_section(".ARM.attributes", 0x7000_0003, 0, 0, "", None);
+                self.switch_section(context, section, 0);
+                self.emit_bytes(context, &attributes);
+            }
             self.layout(context);
             if context.had_error {
                 return;
@@ -29622,6 +29661,14 @@ pub mod object {
     impl Streamer for ObjectStreamer {
         fn symbol_layout(&self) -> Option<&dyn SymbolLayout> {
             Some(self)
+        }
+
+        fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
+            self.arm_attributes.subsection(name, optional, kind);
+        }
+
+        fn emit_arm_attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {
+            self.arm_attributes.attribute(vendor, tag, value, text);
         }
 
         fn note_expression_locations(

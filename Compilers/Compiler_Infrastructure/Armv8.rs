@@ -6173,6 +6173,8 @@ impl<'s> Assembler<'s> {
         location: SourceLocation,
     ) -> Option<bool> {
         match identifier {
+            ".aeabi_subsection" => Some(self.arm_directive_subsection()),
+            ".aeabi_attribute" => Some(self.arm_directive_attribute()),
             ".hword" => Some(self.parse_directive_value(2)),
             ".word" => Some(self.parse_directive_value(4)),
             ".dword" | ".xword" => Some(self.parse_directive_value(8)),
@@ -6710,7 +6712,10 @@ impl<'s> Assembler<'s> {
             self.token_error("invalid operand for TLBIP instruction");
             return Err(());
         };
-        if !predicates_features(&entry.requires, &self.arm_features) {
+        let permitted = self.arm_features.contains("FeatureAll")
+            || self.arm_features.contains("FeatureD128")
+            || (entry.allow_tlbid && self.arm_features.contains("FeatureTLBID"));
+        if !predicates_features(&entry.requires, &self.arm_features) || !permitted {
             let text = if entry.allow_tlbid {
                 "instruction requires: tlbid or d128"
             } else {
@@ -6797,7 +6802,11 @@ impl<'t> ArmPrinter<'t> {
             .get("TLBIP")?
             .iter()
             .filter(|entry| {
-                entry.encoding == encoding && predicates_features(&entry.requires, self.features)
+                entry.encoding == encoding
+                    && predicates_features(&entry.requires, self.features)
+                    && (self.features.contains("FeatureAll")
+                        || self.features.contains("FeatureD128")
+                        || (entry.allow_tlbid && self.features.contains("FeatureTLBID")))
             })
             .min_by_key(|entry| entry.order)?;
         let pair = if self.register_text(instruction, 4) == "xzr" {
@@ -8784,5 +8793,274 @@ pub mod native {
         let support = assemble(&emit_assembly(&runtime)?)?;
         let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
         shared::link_program(user, support, start)
+    }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AttributeSubsection {
+    pub name: String,
+    pub optional: u8,
+    pub kind: u8,
+    pub active: bool,
+    pub content: Vec<(u32, Option<u32>, String)>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AttributeSet {
+    pub subsections: Vec<AttributeSubsection>,
+}
+
+impl AttributeSet {
+    pub fn subsection(&mut self, name: &str, optional: u8, kind: u8) {
+        if !self.subsections.iter().any(|held| held.name == name) {
+            self.subsections.push(AttributeSubsection {
+                name: name.to_string(),
+                optional,
+                kind,
+                active: false,
+                content: Vec::new(),
+            });
+        }
+        for held in &mut self.subsections {
+            held.active = held.name == name;
+        }
+    }
+
+    pub fn active(&self) -> Option<&AttributeSubsection> {
+        self.subsections.iter().find(|held| held.active)
+    }
+
+    pub fn by_name(&self, name: &str) -> Option<&AttributeSubsection> {
+        self.subsections.iter().find(|held| held.name == name)
+    }
+
+    pub fn attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {
+        let Some(held) = self
+            .subsections
+            .iter_mut()
+            .find(|held| held.name == vendor && held.active)
+        else {
+            return;
+        };
+        if let Some(item) = held.content.iter_mut().find(|item| item.0 == tag) {
+            item.1 = value;
+            item.2 = if value.is_some() {
+                String::new()
+            } else {
+                text.to_string()
+            };
+            return;
+        }
+        held.content.push((tag, value, text.to_string()));
+    }
+
+    pub fn encode(&self) -> Vec<u8> {
+        if self.subsections.is_empty() {
+            return Vec::new();
+        }
+        fn uleb(out: &mut Vec<u8>, mut value: u64) {
+            loop {
+                let byte = (value & 0x7f) as u8;
+                value >>= 7;
+                if value == 0 {
+                    out.push(byte);
+                    return;
+                }
+                out.push(byte | 0x80);
+            }
+        }
+        let mut out = vec![b'A'];
+        for held in &self.subsections {
+            let mut payload = Vec::new();
+            payload.extend_from_slice(held.name.as_bytes());
+            payload.push(0);
+            payload.push(held.optional);
+            payload.push(held.kind);
+            for (tag, value, text) in &held.content {
+                uleb(&mut payload, u64::from(*tag));
+                match value {
+                    Some(value) => uleb(&mut payload, u64::from(*value)),
+                    None => {
+                        payload.extend_from_slice(text.as_bytes());
+                        payload.push(0);
+                    }
+                }
+            }
+            out.extend_from_slice(&((payload.len() + 4) as u32).to_le_bytes());
+            out.extend_from_slice(&payload);
+        }
+        out
+    }
+}
+
+impl<'s> Assembler<'s> {
+    fn arm_directive_subsection(&mut self) -> bool {
+        if !self.is(TokenKind::Identifier) {
+            return self.token_error("subsection name not found");
+        }
+        let name = self.lexer.token.text.clone();
+        self.lex();
+        let existing = self.arm_attributes.by_name(&name).cloned();
+        if self.is(TokenKind::EndOfStatement) {
+            return match existing {
+                Some(held) => {
+                    self.arm_attributes.subsection(&name, held.optional, held.kind);
+                    self.streamer
+                        .emit_arm_subsection(&name, held.optional, held.kind);
+                    false
+                }
+                None => self.token_error(&format!(
+                    "Could not switch to subsection '{name}' using subsection name, subsection has not been defined"
+                )),
+            };
+        }
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let optional_text = |value: u8| if value == 1 { "optional" } else { "required" };
+        let optional;
+        if self.is(TokenKind::Identifier) {
+            optional =
+                match self.lexer.token.text.as_str() {
+                    "required" => 0u8,
+                    "optional" => 1u8,
+                    _ => return self.token_error(
+                        "unknown AArch64 build attributes optionality, expected required|optional",
+                    ),
+                };
+            if let Some(held) = &existing {
+                if held.optional != optional {
+                    return self.token_error(&format!(
+                        "optionality mismatch! subsection '{name}' already exists with optionality defined as '{}' and not '{}'",
+                        optional_text(held.optional),
+                        optional_text(optional)
+                    ));
+                }
+            }
+        } else {
+            return self.token_error("optionality parameter not found, expected required|optional");
+        }
+        if name == "aeabi_feature_and_bits" && optional == 0 {
+            return self.token_error("aeabi_feature_and_bits must be marked as optional");
+        }
+        if name == "aeabi_pauthabi" && optional == 1 {
+            return self.token_error("aeabi_pauthabi must be marked as required");
+        }
+        self.lex();
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let kind_text = |value: u8| if value == 0 { "uleb128" } else { "ntbs" };
+        let kind;
+        if self.is(TokenKind::Identifier) {
+            kind = match self.lexer.token.text.as_str() {
+                "uleb128" => 0u8,
+                "ntbs" => 1u8,
+                _ => {
+                    return self.token_error(
+                        "unknown AArch64 build attributes type, expected uleb128|ntbs",
+                    )
+                }
+            };
+            if let Some(held) = &existing {
+                if held.kind != kind {
+                    return self.token_error(&format!(
+                        "type mismatch! subsection '{name}' already exists with type defined as '{}' and not '{}'",
+                        kind_text(held.kind),
+                        kind_text(kind)
+                    ));
+                }
+            }
+        } else {
+            return self.token_error("type parameter not found, expected uleb128|ntbs");
+        }
+        if matches!(name.as_str(), "aeabi_feature_and_bits" | "aeabi_pauthabi") && kind == 1 {
+            return self.token_error(&format!("{name} must be marked as ULEB128"));
+        }
+        self.lex();
+        if !self.is(TokenKind::EndOfStatement) {
+            return self.token_error(
+                "unexpected token for AArch64 build attributes subsection header directive",
+            );
+        }
+        self.arm_attributes.subsection(&name, optional, kind);
+        self.streamer.emit_arm_subsection(&name, optional, kind);
+        false
+    }
+
+    fn arm_directive_attribute(&mut self) -> bool {
+        let Some(active) = self.arm_attributes.active().cloned() else {
+            return self.token_error("no active subsection, build attribute can not be added");
+        };
+        let vendor = active.name.clone();
+        let tag_name;
+        let tag: u32;
+        if self.is(TokenKind::Integer) {
+            tag_name = String::new();
+            tag = self.lexer.token.integer() as u32;
+        } else if self.is(TokenKind::Identifier) {
+            tag_name = self.lexer.token.text.clone();
+            let found = match (vendor.as_str(), tag_name.as_str()) {
+                ("aeabi_pauthabi", "Tag_PAuth_Platform") => Some(1),
+                ("aeabi_pauthabi", "Tag_PAuth_Schema") => Some(2),
+                ("aeabi_feature_and_bits", "Tag_Feature_BTI") => Some(0),
+                ("aeabi_feature_and_bits", "Tag_Feature_PAC") => Some(1),
+                ("aeabi_feature_and_bits", "Tag_Feature_GCS") => Some(2),
+                _ => None,
+            };
+            match found {
+                Some(value) => tag = value,
+                None if matches!(vendor.as_str(), "aeabi_pauthabi" | "aeabi_feature_and_bits") => {
+                    return self.token_error(&format!(
+                        "unknown AArch64 build attribute '{tag_name}' for subsection '{vendor}'"
+                    ));
+                }
+                None => {
+                    return self.token_error(&format!(
+                        "unrecognized Tag: '{tag_name}' \nExcept for public subsections, tags have to be an unsigned int."
+                    ));
+                }
+            }
+        } else {
+            return self.token_error("AArch64 build attributes tag not found");
+        }
+        self.lex();
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let mut number: Option<u32> = None;
+        let mut text = String::new();
+        if self.is(TokenKind::Integer) {
+            if active.kind == 1 {
+                return self.token_error(
+                    "active subsection type is NTBS (string), found ULEB128 (unsigned)",
+                );
+            }
+            number = Some(self.lexer.token.integer() as u32);
+        } else if self.is(TokenKind::Identifier) || self.is(TokenKind::String) {
+            if active.kind == 0 {
+                return self.token_error(
+                    "active subsection type is ULEB128 (unsigned), found NTBS (string)",
+                );
+            }
+            text = self.lexer.token.text.clone();
+        } else {
+            return self.token_error("AArch64 build attributes value not found");
+        }
+        if vendor == "aeabi_feature_and_bits" && number.is_some_and(|value| value > 1) {
+            return self.token_error(&format!(
+                "unknown AArch64 build attributes Value for Tag '{tag_name}' options are 0|1"
+            ));
+        }
+        self.lex();
+        if !self.is(TokenKind::EndOfStatement) {
+            return self.token_error(
+                "unexpected token for AArch64 build attributes tag and value attribute directive",
+            );
+        }
+        self.arm_attributes.attribute(&vendor, tag, number, &text);
+        self.streamer
+            .emit_arm_attribute(&vendor, tag, number, &text);
+        false
     }
 }
