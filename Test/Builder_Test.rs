@@ -73306,12 +73306,9 @@ mod armv8_assembly {
         for message in &result.messages {
             eprintln!("{:?}: {}", message.kind, message.text);
         }
-        let hex: Vec<String> = result
-            .output
-            .iter()
-            .map(|byte| format!("{byte:02x}"))
-            .collect();
-        eprintln!("{}", hex.join(""));
+        if let Ok(path) = std::env::var("APK_BUILDER_OUTPUT") {
+            std::fs::write(path, &result.output).expect("the object is written");
+        }
     }
 
     #[test]

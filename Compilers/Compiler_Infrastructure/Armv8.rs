@@ -4488,3 +4488,336 @@ impl<'s> Assembler<'s> {
         self.arm_match_and_emit(identifier_token.location(), &mut operands)
     }
 }
+
+pub fn elf_relocation(
+    kind: FixupKind,
+    specifier: &str,
+    pc_relative: bool,
+) -> Result<u32, &'static str> {
+    let specifier = specifier.to_ascii_lowercase();
+    let spec = specifier.as_str();
+    let by_specifier =
+        |table: &[(&str, u32)], message: &'static str| -> Result<u32, &'static str> {
+            table
+                .iter()
+                .find(|(held, _)| *held == spec)
+                .map(|(_, number)| *number)
+                .ok_or(message)
+        };
+    match kind {
+        FixupKind::Data1 => Err("1-byte data relocations not supported"),
+        FixupKind::Data2 => Ok(if pc_relative { 262 } else { 259 }),
+        FixupKind::Data4 => Ok(if pc_relative { 261 } else { 258 }),
+        FixupKind::Data8 => Ok(if pc_relative {
+            260
+        } else if spec == "dtprel" {
+            1030
+        } else {
+            257
+        }),
+        FixupKind::Arm(fixup) => match fixup {
+            ArmFixup::PcrelAdrImm21 => by_specifier(
+                &[("", 274), ("abs", 274)],
+                "invalid symbol kind for ADR relocation",
+            ),
+            ArmFixup::PcrelAdrpImm21 => by_specifier(
+                &[
+                    ("", 275),
+                    ("pg_hi21", 275),
+                    ("pg_hi21_nc", 276),
+                    ("got", 311),
+                    ("gottprel", 541),
+                    ("tlsdesc", 562),
+                ],
+                "invalid symbol kind for ADRP relocation",
+            ),
+            ArmFixup::PcrelBranch26 => Ok(282),
+            ArmFixup::PcrelCall26 => Ok(283),
+            ArmFixup::PcrelBranch14 => Ok(279),
+            ArmFixup::PcrelBranch19 => Ok(280),
+            ArmFixup::PcrelBranch16 => Err("relocation of PAC/AUT instructions is not supported"),
+            ArmFixup::PcrelBranch9 => {
+                Err("relocation of compare-and-branch instructions not supported")
+            }
+            ArmFixup::LdrPcrelImm19 => by_specifier(
+                &[("", 273), ("gottprel", 543), ("got", 309)],
+                "invalid symbol kind for LDR relocation",
+            ),
+            ArmFixup::AddImm12 => by_specifier(
+                &[
+                    ("dtprel_hi12", 528),
+                    ("tprel_hi12", 549),
+                    ("dtprel_lo12_nc", 530),
+                    ("dtprel_lo12", 529),
+                    ("tprel_lo12_nc", 551),
+                    ("tprel_lo12", 550),
+                    ("tlsdesc_lo12", 564),
+                    ("lo12", 277),
+                ],
+                "invalid fixup for add (uimm12) instruction",
+            ),
+            ArmFixup::LdStImm12Scale1 => by_specifier(
+                &[
+                    ("lo12", 278),
+                    ("dtprel_lo12", 531),
+                    ("dtprel_lo12_nc", 532),
+                    ("tprel_lo12", 552),
+                    ("tprel_lo12_nc", 553),
+                ],
+                "invalid fixup for 8-bit load/store instruction",
+            ),
+            ArmFixup::LdStImm12Scale2 => by_specifier(
+                &[
+                    ("lo12", 284),
+                    ("dtprel_lo12", 533),
+                    ("dtprel_lo12_nc", 534),
+                    ("tprel_lo12", 554),
+                    ("tprel_lo12_nc", 555),
+                ],
+                "invalid fixup for 16-bit load/store instruction",
+            ),
+            ArmFixup::LdStImm12Scale4 => by_specifier(
+                &[
+                    ("lo12", 285),
+                    ("dtprel_lo12", 535),
+                    ("dtprel_lo12_nc", 536),
+                    ("tprel_lo12", 556),
+                    ("tprel_lo12_nc", 557),
+                ],
+                "invalid fixup for 32-bit load/store instruction fixup_aarch64_ldst_imm12_scale4",
+            ),
+            ArmFixup::LdStImm12Scale8 => by_specifier(
+                &[
+                    ("lo12", 286),
+                    ("got_lo12", 312),
+                    ("gotpage_lo15", 313),
+                    ("dtprel_lo12", 537),
+                    ("dtprel_lo12_nc", 538),
+                    ("tprel_lo12", 558),
+                    ("tprel_lo12_nc", 559),
+                    ("gottprel_lo12", 542),
+                    ("tlsdesc_lo12", 563),
+                ],
+                "invalid fixup for 64-bit load/store instruction",
+            ),
+            ArmFixup::LdStImm12Scale16 => by_specifier(
+                &[
+                    ("lo12", 299),
+                    ("dtprel_lo12", 572),
+                    ("dtprel_lo12_nc", 573),
+                    ("tprel_lo12", 570),
+                    ("tprel_lo12_nc", 571),
+                ],
+                "invalid fixup for 128-bit load/store instruction",
+            ),
+            ArmFixup::Movw => by_specifier(
+                &[
+                    ("abs_g3", 269),
+                    ("abs_g2", 267),
+                    ("abs_g2_nc", 268),
+                    ("abs_g2_s", 272),
+                    ("abs_g1", 265),
+                    ("abs_g1_nc", 266),
+                    ("abs_g1_s", 271),
+                    ("abs_g0", 263),
+                    ("abs_g0_nc", 264),
+                    ("abs_g0_s", 270),
+                    ("prel_g3", 293),
+                    ("prel_g2", 291),
+                    ("prel_g2_nc", 292),
+                    ("prel_g1", 289),
+                    ("prel_g1_nc", 290),
+                    ("prel_g0", 287),
+                    ("prel_g0_nc", 288),
+                    ("dtprel_g2", 523),
+                    ("dtprel_g1", 524),
+                    ("dtprel_g1_nc", 525),
+                    ("dtprel_g0", 526),
+                    ("dtprel_g0_nc", 527),
+                    ("tprel_g2", 544),
+                    ("tprel_g1", 545),
+                    ("tprel_g1_nc", 546),
+                    ("tprel_g0", 547),
+                    ("tprel_g0_nc", 548),
+                    ("gottprel_g1", 539),
+                    ("gottprel_g0_nc", 540),
+                ],
+                "invalid fixup for movz/movk instruction",
+            ),
+        },
+        _ => Err("Unsupported fixup kind"),
+    }
+}
+
+pub fn fixup_target_offset(kind: FixupKind) -> u32 {
+    match kind {
+        FixupKind::Arm(fixup) => match fixup {
+            ArmFixup::PcrelAdrImm21
+            | ArmFixup::PcrelAdrpImm21
+            | ArmFixup::PcrelBranch26
+            | ArmFixup::PcrelCall26 => 0,
+            ArmFixup::AddImm12
+            | ArmFixup::LdStImm12Scale1
+            | ArmFixup::LdStImm12Scale2
+            | ArmFixup::LdStImm12Scale4
+            | ArmFixup::LdStImm12Scale8
+            | ArmFixup::LdStImm12Scale16 => 10,
+            ArmFixup::LdrPcrelImm19
+            | ArmFixup::Movw
+            | ArmFixup::PcrelBranch9
+            | ArmFixup::PcrelBranch14
+            | ArmFixup::PcrelBranch16
+            | ArmFixup::PcrelBranch19 => 5,
+        },
+        _ => 0,
+    }
+}
+
+pub fn adjust_fixup_value(
+    kind: FixupKind,
+    specifier: &str,
+    value: u64,
+) -> Result<u64, &'static str> {
+    let signed = value as i64;
+    let fits = |bits: u32| -> bool {
+        let limit = 1i64 << (bits - 1);
+        signed >= -limit && signed < limit
+    };
+    let adr_bits = |value: u64| -> u64 {
+        let low = value & 3;
+        let high = (value & 0x1f_fffc) >> 2;
+        (high << 5) | (low << 29)
+    };
+    let FixupKind::Arm(fixup) = kind else {
+        return Ok(value);
+    };
+    match fixup {
+        ArmFixup::PcrelAdrImm21 => {
+            if !fits(21) {
+                return Err("fixup value out of range");
+            }
+            Ok(adr_bits(value & 0x1f_ffff))
+        }
+        ArmFixup::PcrelAdrpImm21 => Ok(adr_bits((value & 0x1_ffff_f000) >> 12)),
+        ArmFixup::LdrPcrelImm19 | ArmFixup::PcrelBranch19 => {
+            if !fits(21) {
+                return Err("fixup value out of range");
+            }
+            if value & 3 != 0 {
+                return Err("fixup not sufficiently aligned");
+            }
+            Ok((value >> 2) & 0x7_ffff)
+        }
+        ArmFixup::AddImm12 | ArmFixup::LdStImm12Scale1 => {
+            if value >> 12 != 0 {
+                return Err("fixup value out of range");
+            }
+            Ok(value)
+        }
+        ArmFixup::LdStImm12Scale2
+        | ArmFixup::LdStImm12Scale4
+        | ArmFixup::LdStImm12Scale8
+        | ArmFixup::LdStImm12Scale16 => {
+            let shift = match fixup {
+                ArmFixup::LdStImm12Scale2 => 1,
+                ArmFixup::LdStImm12Scale4 => 2,
+                ArmFixup::LdStImm12Scale8 => 3,
+                _ => 4,
+            };
+            if value >> (12 + shift) != 0 {
+                return Err("fixup value out of range");
+            }
+            if value & ((1 << shift) - 1) != 0 {
+                return Err(match shift {
+                    1 => "fixup must be 2-byte aligned",
+                    2 => "fixup must be 4-byte aligned",
+                    3 => "fixup must be 8-byte aligned",
+                    _ => "fixup must be 16-byte aligned",
+                });
+            }
+            Ok(value >> shift)
+        }
+        ArmFixup::Movw => {
+            let spec = specifier.to_ascii_lowercase();
+            let group = |name: &str| -> u32 {
+                if name.contains("_g3") {
+                    3
+                } else if name.contains("_g2") {
+                    2
+                } else if name.contains("_g1") {
+                    1
+                } else {
+                    0
+                }
+            };
+            let absolute = spec.starts_with("abs_g");
+            let signed_absolute = absolute && spec.ends_with("_s");
+            if !absolute {
+                if spec.is_empty() {
+                    if !(-0xffff..=0xffff).contains(&signed) {
+                        return Err("fixup value out of range [-0xFFFF, 0xFFFF]");
+                    }
+                    return Ok(if signed < 0 { !signed as u64 } else { value });
+                }
+                return Err("relocation for a thread-local variable points to an absolute symbol");
+            }
+            let shift = group(&spec) * 16;
+            if signed_absolute {
+                let shifted = signed >> shift;
+                if !(-0xffff..=0xffff).contains(&shifted) {
+                    return Err("fixup value out of range");
+                }
+                return Ok(if shifted < 0 {
+                    !shifted as u64
+                } else {
+                    shifted as u64
+                });
+            }
+            let shifted = value >> shift;
+            if spec.ends_with("_nc") {
+                Ok(shifted & 0xffff)
+            } else if shifted > 0xffff {
+                Err("fixup value out of range")
+            } else {
+                Ok(shifted)
+            }
+        }
+        ArmFixup::PcrelBranch9 => {
+            if !fits(11) {
+                return Err("fixup value out of range");
+            }
+            if value & 3 != 0 {
+                return Err("fixup not sufficiently aligned");
+            }
+            Ok((value >> 2) & 0x1ff)
+        }
+        ArmFixup::PcrelBranch14 => {
+            if !fits(16) {
+                return Err("fixup value out of range");
+            }
+            if value & 3 != 0 {
+                return Err("fixup not sufficiently aligned");
+            }
+            Ok((value >> 2) & 0x3fff)
+        }
+        ArmFixup::PcrelBranch16 => {
+            let negated = signed.wrapping_neg();
+            if !(0..=((1 << 18) - 1)).contains(&negated) {
+                return Err("fixup value out of range");
+            }
+            if negated & 3 != 0 {
+                return Err("fixup not sufficiently aligned");
+            }
+            Ok(((negated as u64) >> 2) & 0xffff)
+        }
+        ArmFixup::PcrelBranch26 | ArmFixup::PcrelCall26 => {
+            if !fits(28) {
+                return Err("fixup value out of range");
+            }
+            if value & 3 != 0 {
+                return Err("fixup not sufficiently aligned");
+            }
+            Ok((value >> 2) & 0x3ff_ffff)
+        }
+    }
+}

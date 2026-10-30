@@ -25507,7 +25507,9 @@ pub mod object {
         }
 
         fn machine(&self, context: &AssemblyContext) -> u16 {
-            if context.triple.is_64_bit() {
+            if context.triple.isa == Isa::Armv8 {
+                183
+            } else if context.triple.is_64_bit() {
                 62
             } else if context.triple.system == "elfiamcu" {
                 6
@@ -27124,7 +27126,7 @@ pub mod object {
                 }
                 return (None, 0, false);
             };
-            if fixup.fixup.pc_relative {
+            if fixup.fixup.pc_relative && context.triple.isa == Isa::X86 {
                 let adjust = match fixup.fixup.kind {
                     FixupKind::Data1 => 1,
                     FixupKind::Data2 => 2,
@@ -27176,6 +27178,9 @@ pub mod object {
                 }
             } else {
                 resolved = target.is_absolute();
+            }
+            if fixup.fixup.kind == FixupKind::Arm(armv8::ArmFixup::PcrelAdrpImm21) {
+                resolved = false;
             }
             (Some(target), value, resolved)
         }
@@ -27235,6 +27240,34 @@ pub mod object {
             if literal {
                 return;
             }
+            if let FixupKind::Arm(_) = fixup.fixup.kind {
+                if value == 0 {
+                    return;
+                }
+                let specifier = target.specifier.clone().unwrap_or_default();
+                let adjusted = match armv8::adjust_fixup_value(fixup.fixup.kind, &specifier, value)
+                {
+                    Ok(adjusted) => adjusted,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        return;
+                    }
+                };
+                let adjusted = adjusted << armv8::fixup_target_offset(fixup.fixup.kind);
+                let held = &mut self.fragments[fragment];
+                let (buffer, start) = if variable {
+                    let base = held.fixed.len();
+                    (&mut held.variable, fixup.fixup.offset - base)
+                } else {
+                    (&mut held.fixed, fixup.fixup.offset)
+                };
+                for byte in 0..4 {
+                    if let Some(slot) = buffer.get_mut(start + byte) {
+                        *slot |= (adjusted >> (byte * 8)) as u8;
+                    }
+                }
+                return;
+            }
             let size = fixup.fixup.kind.size();
             if size > 0 && size < 8 {
                 let signed = resolved && fixup.fixup.pc_relative;
@@ -27286,6 +27319,16 @@ pub mod object {
             pc_relative: bool,
         ) -> u32 {
             let kind = fixup.fixup.kind;
+            if context.triple.isa == Isa::Armv8 {
+                let specifier = target.specifier.clone().unwrap_or_default();
+                return match armv8::elf_relocation(kind, &specifier, pc_relative) {
+                    Ok(number) => number,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        0
+                    }
+                };
+            }
             let mut specifier = Self::specifier_of(target);
             if matches!(
                 specifier.as_str(),
