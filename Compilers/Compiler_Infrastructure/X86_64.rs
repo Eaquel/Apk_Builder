@@ -3806,6 +3806,7 @@ pub enum AliasCondition {
     TiedRegister(usize),
     Immediate(i32),
     RegisterClass(String),
+    InvertibleCondition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4032,6 +4033,12 @@ fn alias_patterns(target: &Target, variant: usize) -> BTreeMap<usize, Vec<AliasP
                         } else {
                             mapped.insert(name.clone(), (operand_number, method));
                             count = target.operand_count_of_record(record);
+                            if record == "inv_ccode" {
+                                while conditions.len() < operand_number {
+                                    conditions.push(AliasCondition::Ignore);
+                                }
+                                conditions.push(AliasCondition::InvertibleCondition);
+                            }
                         }
                     }
                     ResultOperand::Immediate(value) => {
@@ -4841,6 +4848,9 @@ impl<'t> Printer<'t> {
                 index += 1;
                 match condition {
                     AliasCondition::Ignore => true,
+                    AliasCondition::InvertibleCondition => {
+                        matches!(operand, MachineOperand::Immediate(held) if *held != 14 && *held != 15)
+                    }
                     AliasCondition::Immediate(value) => {
                         matches!(operand, MachineOperand::Immediate(held) if *held == *value as i64)
                     }
@@ -19456,6 +19466,8 @@ impl Streamer for TextStreamer {
         if self.target.isa == Isa::Armv8 {
             let mut printer = armv8::ArmPrinter::new(self.target, &self.arm_features);
             printer.hexadecimal = self.hexadecimal_immediates;
+            printer.variant = self.syntax.variant();
+            printer.markup = self.markup;
             let text = printer.print(instruction);
             self.comments.push_str(&printer.comment.borrow());
             self.write(&text);
@@ -20196,8 +20208,14 @@ pub fn disassemble_source(
     source: &[u8],
     hexadecimal_bytes: bool,
 ) -> Result<AssemblyResult, Diagnostic> {
-    let target = target()?;
     let triple = TargetTriple::parse(&options.triple);
+    let arm = triple.isa == Isa::Armv8;
+    let target = if arm { armv8::target()? } else { target()? };
+    let arm_features = if arm {
+        armv8::feature_set(target, &options.cpu, &options.features)
+    } else {
+        BTreeSet::new()
+    };
     let mode = triple.mode;
     let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);
     let mut streamer: Box<dyn Streamer> = match options.output {
@@ -20210,6 +20228,7 @@ pub fn disassemble_source(
                 options.comment_column,
             );
             text.markup = options.markup;
+            text.arm_features = arm_features.clone();
             Box::new(text)
         }
         _ => Box::new(NullStreamer::new()),
@@ -20317,6 +20336,51 @@ pub fn disassemble_source(
         }
         let mut index = 0usize;
         while index < bytes.len() {
+            if arm {
+                let remaining = &bytes[index..];
+                let decoded = if remaining.len() >= 4 {
+                    let word = u32::from_le_bytes([
+                        remaining[0],
+                        remaining[1],
+                        remaining[2],
+                        remaining[3],
+                    ]);
+                    armv8::disassembler::decode(target, &arm_features, word)
+                } else {
+                    None
+                };
+                let size = if remaining.len() >= 4 { 4 } else { 1 };
+                match decoded {
+                    Some(decoded) => {
+                        if decoded.soft_fail {
+                            context.report(
+                                MessageKind::Warning,
+                                Some(at(origins[index])),
+                                "potentially undefined instruction encoding",
+                            );
+                        }
+                        streamer.emit_instruction(
+                            &mut context,
+                            &decoded.instruction,
+                            mode,
+                            at(origins[index]),
+                        );
+                    }
+                    None => {
+                        context.report(
+                            MessageKind::Warning,
+                            Some(at(origins[index])),
+                            "invalid instruction encoding",
+                        );
+                        if atomic {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                index += size;
+                continue;
+            }
             let (decoded, size) = decoder::decode_instruction(target, mode, &bytes[index..]);
             match decoded {
                 Some(instruction) => {

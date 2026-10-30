@@ -71790,6 +71790,8 @@ mod x86_assembly {
                 let replaced = match architecture.as_str() {
                     "x86" => Some("i386"),
                     "x86-64" => Some("x86_64"),
+                    "aarch64" => Some("aarch64"),
+                    "arm64" => Some("arm64"),
                     _ => None,
                 };
                 match (replaced, triple.split_once('-')) {
@@ -71801,6 +71803,7 @@ mod x86_assembly {
             (Some(triple), None) => triple,
             (None, Some(architecture)) => match architecture.as_str() {
                 "x86" => "i386-unknown-unknown".to_string(),
+                "aarch64" | "arm64" => format!("{architecture}-unknown-unknown"),
                 _ => "x86_64-unknown-unknown".to_string(),
             },
             (None, None) => "x86_64-unknown-linux-gnu".to_string(),
@@ -71820,9 +71823,6 @@ mod x86_assembly {
             unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
         }
         if triple.starts_with("aarch64") || triple.starts_with("arm64") {
-            if disassemble {
-                unsupported.get_or_insert("llvm-mc AArch64 disassembler".to_string());
-            }
             if options.features.iter().any(|feature| {
                 let name = feature.trim_start_matches(['+', '-']);
                 name.starts_with("sve") || name.starts_with("sme") || name.starts_with("ssve")
@@ -71973,6 +71973,7 @@ mod x86_assembly {
         "MC/AArch64/directive-arch_extension.s",
         "MC/AArch64/FP8/directive-arch.s",
         "MC/AArch64/FP8/directive-arch-negative.s",
+        "MC/Disassembler/AArch64/mattr-all.txt",
     ];
 
     const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
@@ -72183,6 +72184,12 @@ mod x86_assembly {
     #[ignore]
     fn suite_mc_aarch64() {
         mc_suite("mc-aarch64", "MC/AArch64");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_aarch64_disassembler() {
+        mc_suite("mc-aarch64-disassembler", "MC/Disassembler/AArch64");
     }
 
     #[test]

@@ -1024,6 +1024,12 @@ pub fn feature_set(target: &Target, cpu: &str, attributes: &[String]) -> BTreeSe
             .values()
             .find(|record| record.is_a("SubtargetFeature") && table_text(record, "Name") == name)
     };
+    let default_architecture = [String::from("+v8a")];
+    let attributes = if cpu.is_empty() && attributes.is_empty() {
+        &default_architecture[..]
+    } else {
+        attributes
+    };
     let wanted = if cpu.is_empty() { "generic" } else { cpu };
     if let Some(processor) = target
         .records
@@ -5661,17 +5667,19 @@ pub struct PrintedInstruction {
     pub comment: String,
 }
 
-fn arm_print_tables() -> &'static PrintTables {
-    static CELL: OnceLock<PrintTables> = OnceLock::new();
-    CELL.get_or_init(|| {
+fn arm_print_tables(variant: usize) -> &'static PrintTables {
+    static GENERIC: OnceLock<PrintTables> = OnceLock::new();
+    static APPLE: OnceLock<PrintTables> = OnceLock::new();
+    let cell = if variant == 0 { &GENERIC } else { &APPLE };
+    cell.get_or_init(|| {
         let target = target().expect("the ARMv8 tables load");
         PrintTables {
             programs: target
                 .instructions
                 .iter()
-                .map(|instruction| print_program(target, instruction, 0))
+                .map(|instruction| print_program(target, instruction, variant))
                 .collect(),
-            aliases: alias_patterns(target, 0),
+            aliases: alias_patterns(target, variant),
         }
     })
 }
@@ -5709,6 +5717,414 @@ pub struct ArmPrinter<'t> {
     pub features: &'t BTreeSet<String>,
     pub comment: std::cell::RefCell<String>,
     pub hexadecimal: bool,
+    pub variant: usize,
+    pub markup: bool,
+}
+
+const LDSTN_DESCRIPTIONS: &[(&str, &str, &str, usize, bool, i64)] = &[
+    ("LD1i8", "ld1", ".b", 1, true, 0),
+    ("LD1i16", "ld1", ".h", 1, true, 0),
+    ("LD1i32", "ld1", ".s", 1, true, 0),
+    ("LD1i64", "ld1", ".d", 1, true, 0),
+    ("LD1i8_POST", "ld1", ".b", 2, true, 1),
+    ("LD1i16_POST", "ld1", ".h", 2, true, 2),
+    ("LD1i32_POST", "ld1", ".s", 2, true, 4),
+    ("LD1i64_POST", "ld1", ".d", 2, true, 8),
+    ("LD1Rv16b", "ld1r", ".16b", 0, false, 0),
+    ("LD1Rv8h", "ld1r", ".8h", 0, false, 0),
+    ("LD1Rv4s", "ld1r", ".4s", 0, false, 0),
+    ("LD1Rv2d", "ld1r", ".2d", 0, false, 0),
+    ("LD1Rv8b", "ld1r", ".8b", 0, false, 0),
+    ("LD1Rv4h", "ld1r", ".4h", 0, false, 0),
+    ("LD1Rv2s", "ld1r", ".2s", 0, false, 0),
+    ("LD1Rv1d", "ld1r", ".1d", 0, false, 0),
+    ("LD1Rv16b_POST", "ld1r", ".16b", 1, false, 1),
+    ("LD1Rv8h_POST", "ld1r", ".8h", 1, false, 2),
+    ("LD1Rv4s_POST", "ld1r", ".4s", 1, false, 4),
+    ("LD1Rv2d_POST", "ld1r", ".2d", 1, false, 8),
+    ("LD1Rv8b_POST", "ld1r", ".8b", 1, false, 1),
+    ("LD1Rv4h_POST", "ld1r", ".4h", 1, false, 2),
+    ("LD1Rv2s_POST", "ld1r", ".2s", 1, false, 4),
+    ("LD1Rv1d_POST", "ld1r", ".1d", 1, false, 8),
+    ("LD1Onev16b", "ld1", ".16b", 0, false, 0),
+    ("LD1Onev8h", "ld1", ".8h", 0, false, 0),
+    ("LD1Onev4s", "ld1", ".4s", 0, false, 0),
+    ("LD1Onev2d", "ld1", ".2d", 0, false, 0),
+    ("LD1Onev8b", "ld1", ".8b", 0, false, 0),
+    ("LD1Onev4h", "ld1", ".4h", 0, false, 0),
+    ("LD1Onev2s", "ld1", ".2s", 0, false, 0),
+    ("LD1Onev1d", "ld1", ".1d", 0, false, 0),
+    ("LD1Onev16b_POST", "ld1", ".16b", 1, false, 16),
+    ("LD1Onev8h_POST", "ld1", ".8h", 1, false, 16),
+    ("LD1Onev4s_POST", "ld1", ".4s", 1, false, 16),
+    ("LD1Onev2d_POST", "ld1", ".2d", 1, false, 16),
+    ("LD1Onev8b_POST", "ld1", ".8b", 1, false, 8),
+    ("LD1Onev4h_POST", "ld1", ".4h", 1, false, 8),
+    ("LD1Onev2s_POST", "ld1", ".2s", 1, false, 8),
+    ("LD1Onev1d_POST", "ld1", ".1d", 1, false, 8),
+    ("LD1Twov16b", "ld1", ".16b", 0, false, 0),
+    ("LD1Twov8h", "ld1", ".8h", 0, false, 0),
+    ("LD1Twov4s", "ld1", ".4s", 0, false, 0),
+    ("LD1Twov2d", "ld1", ".2d", 0, false, 0),
+    ("LD1Twov8b", "ld1", ".8b", 0, false, 0),
+    ("LD1Twov4h", "ld1", ".4h", 0, false, 0),
+    ("LD1Twov2s", "ld1", ".2s", 0, false, 0),
+    ("LD1Twov1d", "ld1", ".1d", 0, false, 0),
+    ("LD1Twov16b_POST", "ld1", ".16b", 1, false, 32),
+    ("LD1Twov8h_POST", "ld1", ".8h", 1, false, 32),
+    ("LD1Twov4s_POST", "ld1", ".4s", 1, false, 32),
+    ("LD1Twov2d_POST", "ld1", ".2d", 1, false, 32),
+    ("LD1Twov8b_POST", "ld1", ".8b", 1, false, 16),
+    ("LD1Twov4h_POST", "ld1", ".4h", 1, false, 16),
+    ("LD1Twov2s_POST", "ld1", ".2s", 1, false, 16),
+    ("LD1Twov1d_POST", "ld1", ".1d", 1, false, 16),
+    ("LD1Threev16b", "ld1", ".16b", 0, false, 0),
+    ("LD1Threev8h", "ld1", ".8h", 0, false, 0),
+    ("LD1Threev4s", "ld1", ".4s", 0, false, 0),
+    ("LD1Threev2d", "ld1", ".2d", 0, false, 0),
+    ("LD1Threev8b", "ld1", ".8b", 0, false, 0),
+    ("LD1Threev4h", "ld1", ".4h", 0, false, 0),
+    ("LD1Threev2s", "ld1", ".2s", 0, false, 0),
+    ("LD1Threev1d", "ld1", ".1d", 0, false, 0),
+    ("LD1Threev16b_POST", "ld1", ".16b", 1, false, 48),
+    ("LD1Threev8h_POST", "ld1", ".8h", 1, false, 48),
+    ("LD1Threev4s_POST", "ld1", ".4s", 1, false, 48),
+    ("LD1Threev2d_POST", "ld1", ".2d", 1, false, 48),
+    ("LD1Threev8b_POST", "ld1", ".8b", 1, false, 24),
+    ("LD1Threev4h_POST", "ld1", ".4h", 1, false, 24),
+    ("LD1Threev2s_POST", "ld1", ".2s", 1, false, 24),
+    ("LD1Threev1d_POST", "ld1", ".1d", 1, false, 24),
+    ("LD1Fourv16b", "ld1", ".16b", 0, false, 0),
+    ("LD1Fourv8h", "ld1", ".8h", 0, false, 0),
+    ("LD1Fourv4s", "ld1", ".4s", 0, false, 0),
+    ("LD1Fourv2d", "ld1", ".2d", 0, false, 0),
+    ("LD1Fourv8b", "ld1", ".8b", 0, false, 0),
+    ("LD1Fourv4h", "ld1", ".4h", 0, false, 0),
+    ("LD1Fourv2s", "ld1", ".2s", 0, false, 0),
+    ("LD1Fourv1d", "ld1", ".1d", 0, false, 0),
+    ("LD1Fourv16b_POST", "ld1", ".16b", 1, false, 64),
+    ("LD1Fourv8h_POST", "ld1", ".8h", 1, false, 64),
+    ("LD1Fourv4s_POST", "ld1", ".4s", 1, false, 64),
+    ("LD1Fourv2d_POST", "ld1", ".2d", 1, false, 64),
+    ("LD1Fourv8b_POST", "ld1", ".8b", 1, false, 32),
+    ("LD1Fourv4h_POST", "ld1", ".4h", 1, false, 32),
+    ("LD1Fourv2s_POST", "ld1", ".2s", 1, false, 32),
+    ("LD1Fourv1d_POST", "ld1", ".1d", 1, false, 32),
+    ("LD2i8", "ld2", ".b", 1, true, 0),
+    ("LD2i16", "ld2", ".h", 1, true, 0),
+    ("LD2i32", "ld2", ".s", 1, true, 0),
+    ("LD2i64", "ld2", ".d", 1, true, 0),
+    ("LD2i8_POST", "ld2", ".b", 2, true, 2),
+    ("LD2i16_POST", "ld2", ".h", 2, true, 4),
+    ("LD2i32_POST", "ld2", ".s", 2, true, 8),
+    ("LD2i64_POST", "ld2", ".d", 2, true, 16),
+    ("LD2Rv16b", "ld2r", ".16b", 0, false, 0),
+    ("LD2Rv8h", "ld2r", ".8h", 0, false, 0),
+    ("LD2Rv4s", "ld2r", ".4s", 0, false, 0),
+    ("LD2Rv2d", "ld2r", ".2d", 0, false, 0),
+    ("LD2Rv8b", "ld2r", ".8b", 0, false, 0),
+    ("LD2Rv4h", "ld2r", ".4h", 0, false, 0),
+    ("LD2Rv2s", "ld2r", ".2s", 0, false, 0),
+    ("LD2Rv1d", "ld2r", ".1d", 0, false, 0),
+    ("LD2Rv16b_POST", "ld2r", ".16b", 1, false, 2),
+    ("LD2Rv8h_POST", "ld2r", ".8h", 1, false, 4),
+    ("LD2Rv4s_POST", "ld2r", ".4s", 1, false, 8),
+    ("LD2Rv2d_POST", "ld2r", ".2d", 1, false, 16),
+    ("LD2Rv8b_POST", "ld2r", ".8b", 1, false, 2),
+    ("LD2Rv4h_POST", "ld2r", ".4h", 1, false, 4),
+    ("LD2Rv2s_POST", "ld2r", ".2s", 1, false, 8),
+    ("LD2Rv1d_POST", "ld2r", ".1d", 1, false, 16),
+    ("LD2Twov16b", "ld2", ".16b", 0, false, 0),
+    ("LD2Twov8h", "ld2", ".8h", 0, false, 0),
+    ("LD2Twov4s", "ld2", ".4s", 0, false, 0),
+    ("LD2Twov2d", "ld2", ".2d", 0, false, 0),
+    ("LD2Twov8b", "ld2", ".8b", 0, false, 0),
+    ("LD2Twov4h", "ld2", ".4h", 0, false, 0),
+    ("LD2Twov2s", "ld2", ".2s", 0, false, 0),
+    ("LD2Twov16b_POST", "ld2", ".16b", 1, false, 32),
+    ("LD2Twov8h_POST", "ld2", ".8h", 1, false, 32),
+    ("LD2Twov4s_POST", "ld2", ".4s", 1, false, 32),
+    ("LD2Twov2d_POST", "ld2", ".2d", 1, false, 32),
+    ("LD2Twov8b_POST", "ld2", ".8b", 1, false, 16),
+    ("LD2Twov4h_POST", "ld2", ".4h", 1, false, 16),
+    ("LD2Twov2s_POST", "ld2", ".2s", 1, false, 16),
+    ("LD3i8", "ld3", ".b", 1, true, 0),
+    ("LD3i16", "ld3", ".h", 1, true, 0),
+    ("LD3i32", "ld3", ".s", 1, true, 0),
+    ("LD3i64", "ld3", ".d", 1, true, 0),
+    ("LD3i8_POST", "ld3", ".b", 2, true, 3),
+    ("LD3i16_POST", "ld3", ".h", 2, true, 6),
+    ("LD3i32_POST", "ld3", ".s", 2, true, 12),
+    ("LD3i64_POST", "ld3", ".d", 2, true, 24),
+    ("LD3Rv16b", "ld3r", ".16b", 0, false, 0),
+    ("LD3Rv8h", "ld3r", ".8h", 0, false, 0),
+    ("LD3Rv4s", "ld3r", ".4s", 0, false, 0),
+    ("LD3Rv2d", "ld3r", ".2d", 0, false, 0),
+    ("LD3Rv8b", "ld3r", ".8b", 0, false, 0),
+    ("LD3Rv4h", "ld3r", ".4h", 0, false, 0),
+    ("LD3Rv2s", "ld3r", ".2s", 0, false, 0),
+    ("LD3Rv1d", "ld3r", ".1d", 0, false, 0),
+    ("LD3Rv16b_POST", "ld3r", ".16b", 1, false, 3),
+    ("LD3Rv8h_POST", "ld3r", ".8h", 1, false, 6),
+    ("LD3Rv4s_POST", "ld3r", ".4s", 1, false, 12),
+    ("LD3Rv2d_POST", "ld3r", ".2d", 1, false, 24),
+    ("LD3Rv8b_POST", "ld3r", ".8b", 1, false, 3),
+    ("LD3Rv4h_POST", "ld3r", ".4h", 1, false, 6),
+    ("LD3Rv2s_POST", "ld3r", ".2s", 1, false, 12),
+    ("LD3Rv1d_POST", "ld3r", ".1d", 1, false, 24),
+    ("LD3Threev16b", "ld3", ".16b", 0, false, 0),
+    ("LD3Threev8h", "ld3", ".8h", 0, false, 0),
+    ("LD3Threev4s", "ld3", ".4s", 0, false, 0),
+    ("LD3Threev2d", "ld3", ".2d", 0, false, 0),
+    ("LD3Threev8b", "ld3", ".8b", 0, false, 0),
+    ("LD3Threev4h", "ld3", ".4h", 0, false, 0),
+    ("LD3Threev2s", "ld3", ".2s", 0, false, 0),
+    ("LD3Threev16b_POST", "ld3", ".16b", 1, false, 48),
+    ("LD3Threev8h_POST", "ld3", ".8h", 1, false, 48),
+    ("LD3Threev4s_POST", "ld3", ".4s", 1, false, 48),
+    ("LD3Threev2d_POST", "ld3", ".2d", 1, false, 48),
+    ("LD3Threev8b_POST", "ld3", ".8b", 1, false, 24),
+    ("LD3Threev4h_POST", "ld3", ".4h", 1, false, 24),
+    ("LD3Threev2s_POST", "ld3", ".2s", 1, false, 24),
+    ("LD4i8", "ld4", ".b", 1, true, 0),
+    ("LD4i16", "ld4", ".h", 1, true, 0),
+    ("LD4i32", "ld4", ".s", 1, true, 0),
+    ("LD4i64", "ld4", ".d", 1, true, 0),
+    ("LD4i8_POST", "ld4", ".b", 2, true, 4),
+    ("LD4i16_POST", "ld4", ".h", 2, true, 8),
+    ("LD4i32_POST", "ld4", ".s", 2, true, 16),
+    ("LD4i64_POST", "ld4", ".d", 2, true, 32),
+    ("LD4Rv16b", "ld4r", ".16b", 0, false, 0),
+    ("LD4Rv8h", "ld4r", ".8h", 0, false, 0),
+    ("LD4Rv4s", "ld4r", ".4s", 0, false, 0),
+    ("LD4Rv2d", "ld4r", ".2d", 0, false, 0),
+    ("LD4Rv8b", "ld4r", ".8b", 0, false, 0),
+    ("LD4Rv4h", "ld4r", ".4h", 0, false, 0),
+    ("LD4Rv2s", "ld4r", ".2s", 0, false, 0),
+    ("LD4Rv1d", "ld4r", ".1d", 0, false, 0),
+    ("LD4Rv16b_POST", "ld4r", ".16b", 1, false, 4),
+    ("LD4Rv8h_POST", "ld4r", ".8h", 1, false, 8),
+    ("LD4Rv4s_POST", "ld4r", ".4s", 1, false, 16),
+    ("LD4Rv2d_POST", "ld4r", ".2d", 1, false, 32),
+    ("LD4Rv8b_POST", "ld4r", ".8b", 1, false, 4),
+    ("LD4Rv4h_POST", "ld4r", ".4h", 1, false, 8),
+    ("LD4Rv2s_POST", "ld4r", ".2s", 1, false, 16),
+    ("LD4Rv1d_POST", "ld4r", ".1d", 1, false, 32),
+    ("LD4Fourv16b", "ld4", ".16b", 0, false, 0),
+    ("LD4Fourv8h", "ld4", ".8h", 0, false, 0),
+    ("LD4Fourv4s", "ld4", ".4s", 0, false, 0),
+    ("LD4Fourv2d", "ld4", ".2d", 0, false, 0),
+    ("LD4Fourv8b", "ld4", ".8b", 0, false, 0),
+    ("LD4Fourv4h", "ld4", ".4h", 0, false, 0),
+    ("LD4Fourv2s", "ld4", ".2s", 0, false, 0),
+    ("LD4Fourv16b_POST", "ld4", ".16b", 1, false, 64),
+    ("LD4Fourv8h_POST", "ld4", ".8h", 1, false, 64),
+    ("LD4Fourv4s_POST", "ld4", ".4s", 1, false, 64),
+    ("LD4Fourv2d_POST", "ld4", ".2d", 1, false, 64),
+    ("LD4Fourv8b_POST", "ld4", ".8b", 1, false, 32),
+    ("LD4Fourv4h_POST", "ld4", ".4h", 1, false, 32),
+    ("LD4Fourv2s_POST", "ld4", ".2s", 1, false, 32),
+    ("ST1i8", "st1", ".b", 0, true, 0),
+    ("ST1i16", "st1", ".h", 0, true, 0),
+    ("ST1i32", "st1", ".s", 0, true, 0),
+    ("ST1i64", "st1", ".d", 0, true, 0),
+    ("ST1i8_POST", "st1", ".b", 1, true, 1),
+    ("ST1i16_POST", "st1", ".h", 1, true, 2),
+    ("ST1i32_POST", "st1", ".s", 1, true, 4),
+    ("ST1i64_POST", "st1", ".d", 1, true, 8),
+    ("ST1Onev16b", "st1", ".16b", 0, false, 0),
+    ("ST1Onev8h", "st1", ".8h", 0, false, 0),
+    ("ST1Onev4s", "st1", ".4s", 0, false, 0),
+    ("ST1Onev2d", "st1", ".2d", 0, false, 0),
+    ("ST1Onev8b", "st1", ".8b", 0, false, 0),
+    ("ST1Onev4h", "st1", ".4h", 0, false, 0),
+    ("ST1Onev2s", "st1", ".2s", 0, false, 0),
+    ("ST1Onev1d", "st1", ".1d", 0, false, 0),
+    ("ST1Onev16b_POST", "st1", ".16b", 1, false, 16),
+    ("ST1Onev8h_POST", "st1", ".8h", 1, false, 16),
+    ("ST1Onev4s_POST", "st1", ".4s", 1, false, 16),
+    ("ST1Onev2d_POST", "st1", ".2d", 1, false, 16),
+    ("ST1Onev8b_POST", "st1", ".8b", 1, false, 8),
+    ("ST1Onev4h_POST", "st1", ".4h", 1, false, 8),
+    ("ST1Onev2s_POST", "st1", ".2s", 1, false, 8),
+    ("ST1Onev1d_POST", "st1", ".1d", 1, false, 8),
+    ("ST1Twov16b", "st1", ".16b", 0, false, 0),
+    ("ST1Twov8h", "st1", ".8h", 0, false, 0),
+    ("ST1Twov4s", "st1", ".4s", 0, false, 0),
+    ("ST1Twov2d", "st1", ".2d", 0, false, 0),
+    ("ST1Twov8b", "st1", ".8b", 0, false, 0),
+    ("ST1Twov4h", "st1", ".4h", 0, false, 0),
+    ("ST1Twov2s", "st1", ".2s", 0, false, 0),
+    ("ST1Twov1d", "st1", ".1d", 0, false, 0),
+    ("ST1Twov16b_POST", "st1", ".16b", 1, false, 32),
+    ("ST1Twov8h_POST", "st1", ".8h", 1, false, 32),
+    ("ST1Twov4s_POST", "st1", ".4s", 1, false, 32),
+    ("ST1Twov2d_POST", "st1", ".2d", 1, false, 32),
+    ("ST1Twov8b_POST", "st1", ".8b", 1, false, 16),
+    ("ST1Twov4h_POST", "st1", ".4h", 1, false, 16),
+    ("ST1Twov2s_POST", "st1", ".2s", 1, false, 16),
+    ("ST1Twov1d_POST", "st1", ".1d", 1, false, 16),
+    ("ST1Threev16b", "st1", ".16b", 0, false, 0),
+    ("ST1Threev8h", "st1", ".8h", 0, false, 0),
+    ("ST1Threev4s", "st1", ".4s", 0, false, 0),
+    ("ST1Threev2d", "st1", ".2d", 0, false, 0),
+    ("ST1Threev8b", "st1", ".8b", 0, false, 0),
+    ("ST1Threev4h", "st1", ".4h", 0, false, 0),
+    ("ST1Threev2s", "st1", ".2s", 0, false, 0),
+    ("ST1Threev1d", "st1", ".1d", 0, false, 0),
+    ("ST1Threev16b_POST", "st1", ".16b", 1, false, 48),
+    ("ST1Threev8h_POST", "st1", ".8h", 1, false, 48),
+    ("ST1Threev4s_POST", "st1", ".4s", 1, false, 48),
+    ("ST1Threev2d_POST", "st1", ".2d", 1, false, 48),
+    ("ST1Threev8b_POST", "st1", ".8b", 1, false, 24),
+    ("ST1Threev4h_POST", "st1", ".4h", 1, false, 24),
+    ("ST1Threev2s_POST", "st1", ".2s", 1, false, 24),
+    ("ST1Threev1d_POST", "st1", ".1d", 1, false, 24),
+    ("ST1Fourv16b", "st1", ".16b", 0, false, 0),
+    ("ST1Fourv8h", "st1", ".8h", 0, false, 0),
+    ("ST1Fourv4s", "st1", ".4s", 0, false, 0),
+    ("ST1Fourv2d", "st1", ".2d", 0, false, 0),
+    ("ST1Fourv8b", "st1", ".8b", 0, false, 0),
+    ("ST1Fourv4h", "st1", ".4h", 0, false, 0),
+    ("ST1Fourv2s", "st1", ".2s", 0, false, 0),
+    ("ST1Fourv1d", "st1", ".1d", 0, false, 0),
+    ("ST1Fourv16b_POST", "st1", ".16b", 1, false, 64),
+    ("ST1Fourv8h_POST", "st1", ".8h", 1, false, 64),
+    ("ST1Fourv4s_POST", "st1", ".4s", 1, false, 64),
+    ("ST1Fourv2d_POST", "st1", ".2d", 1, false, 64),
+    ("ST1Fourv8b_POST", "st1", ".8b", 1, false, 32),
+    ("ST1Fourv4h_POST", "st1", ".4h", 1, false, 32),
+    ("ST1Fourv2s_POST", "st1", ".2s", 1, false, 32),
+    ("ST1Fourv1d_POST", "st1", ".1d", 1, false, 32),
+    ("ST2i8", "st2", ".b", 0, true, 0),
+    ("ST2i16", "st2", ".h", 0, true, 0),
+    ("ST2i32", "st2", ".s", 0, true, 0),
+    ("ST2i64", "st2", ".d", 0, true, 0),
+    ("ST2i8_POST", "st2", ".b", 1, true, 2),
+    ("ST2i16_POST", "st2", ".h", 1, true, 4),
+    ("ST2i32_POST", "st2", ".s", 1, true, 8),
+    ("ST2i64_POST", "st2", ".d", 1, true, 16),
+    ("ST2Twov16b", "st2", ".16b", 0, false, 0),
+    ("ST2Twov8h", "st2", ".8h", 0, false, 0),
+    ("ST2Twov4s", "st2", ".4s", 0, false, 0),
+    ("ST2Twov2d", "st2", ".2d", 0, false, 0),
+    ("ST2Twov8b", "st2", ".8b", 0, false, 0),
+    ("ST2Twov4h", "st2", ".4h", 0, false, 0),
+    ("ST2Twov2s", "st2", ".2s", 0, false, 0),
+    ("ST2Twov16b_POST", "st2", ".16b", 1, false, 32),
+    ("ST2Twov8h_POST", "st2", ".8h", 1, false, 32),
+    ("ST2Twov4s_POST", "st2", ".4s", 1, false, 32),
+    ("ST2Twov2d_POST", "st2", ".2d", 1, false, 32),
+    ("ST2Twov8b_POST", "st2", ".8b", 1, false, 16),
+    ("ST2Twov4h_POST", "st2", ".4h", 1, false, 16),
+    ("ST2Twov2s_POST", "st2", ".2s", 1, false, 16),
+    ("ST3i8", "st3", ".b", 0, true, 0),
+    ("ST3i16", "st3", ".h", 0, true, 0),
+    ("ST3i32", "st3", ".s", 0, true, 0),
+    ("ST3i64", "st3", ".d", 0, true, 0),
+    ("ST3i8_POST", "st3", ".b", 1, true, 3),
+    ("ST3i16_POST", "st3", ".h", 1, true, 6),
+    ("ST3i32_POST", "st3", ".s", 1, true, 12),
+    ("ST3i64_POST", "st3", ".d", 1, true, 24),
+    ("ST3Threev16b", "st3", ".16b", 0, false, 0),
+    ("ST3Threev8h", "st3", ".8h", 0, false, 0),
+    ("ST3Threev4s", "st3", ".4s", 0, false, 0),
+    ("ST3Threev2d", "st3", ".2d", 0, false, 0),
+    ("ST3Threev8b", "st3", ".8b", 0, false, 0),
+    ("ST3Threev4h", "st3", ".4h", 0, false, 0),
+    ("ST3Threev2s", "st3", ".2s", 0, false, 0),
+    ("ST3Threev16b_POST", "st3", ".16b", 1, false, 48),
+    ("ST3Threev8h_POST", "st3", ".8h", 1, false, 48),
+    ("ST3Threev4s_POST", "st3", ".4s", 1, false, 48),
+    ("ST3Threev2d_POST", "st3", ".2d", 1, false, 48),
+    ("ST3Threev8b_POST", "st3", ".8b", 1, false, 24),
+    ("ST3Threev4h_POST", "st3", ".4h", 1, false, 24),
+    ("ST3Threev2s_POST", "st3", ".2s", 1, false, 24),
+    ("ST4i8", "st4", ".b", 0, true, 0),
+    ("ST4i16", "st4", ".h", 0, true, 0),
+    ("ST4i32", "st4", ".s", 0, true, 0),
+    ("ST4i64", "st4", ".d", 0, true, 0),
+    ("ST4i8_POST", "st4", ".b", 1, true, 4),
+    ("ST4i16_POST", "st4", ".h", 1, true, 8),
+    ("ST4i32_POST", "st4", ".s", 1, true, 16),
+    ("ST4i64_POST", "st4", ".d", 1, true, 32),
+    ("ST4Fourv16b", "st4", ".16b", 0, false, 0),
+    ("ST4Fourv8h", "st4", ".8h", 0, false, 0),
+    ("ST4Fourv4s", "st4", ".4s", 0, false, 0),
+    ("ST4Fourv2d", "st4", ".2d", 0, false, 0),
+    ("ST4Fourv8b", "st4", ".8b", 0, false, 0),
+    ("ST4Fourv4h", "st4", ".4h", 0, false, 0),
+    ("ST4Fourv2s", "st4", ".2s", 0, false, 0),
+    ("ST4Fourv16b_POST", "st4", ".16b", 1, false, 64),
+    ("ST4Fourv8h_POST", "st4", ".8h", 1, false, 64),
+    ("ST4Fourv4s_POST", "st4", ".4s", 1, false, 64),
+    ("ST4Fourv2d_POST", "st4", ".2d", 1, false, 64),
+    ("ST4Fourv8b_POST", "st4", ".8b", 1, false, 32),
+    ("ST4Fourv4h_POST", "st4", ".4h", 1, false, 32),
+    ("ST4Fourv2s_POST", "st4", ".2s", 1, false, 32),
+];
+
+fn is_register_word(word: &str) -> bool {
+    if matches!(word, "sp" | "wsp" | "xzr" | "wzr" | "zt0" | "za" | "ffr") {
+        return true;
+    }
+    let digits = word.trim_start_matches(|character: char| character.is_ascii_alphabetic());
+    let letters = &word[..word.len() - digits.len()];
+    !digits.is_empty()
+        && digits.bytes().all(|byte| byte.is_ascii_digit())
+        && matches!(
+            letters,
+            "x" | "w" | "b" | "h" | "s" | "d" | "q" | "v" | "z" | "p" | "pn" | "za" | "zah" | "zav"
+        )
+}
+
+fn apply_markup(text: &str) -> String {
+    let characters: Vec<char> = text.chars().collect();
+    let mut out = String::new();
+    let mut at = 0;
+    while at < characters.len() && characters[at] == '\t' {
+        out.push('\t');
+        at += 1;
+    }
+    while at < characters.len() && !characters[at].is_whitespace() {
+        out.push(characters[at]);
+        at += 1;
+    }
+    let mut previous = ' ';
+    while at < characters.len() {
+        let character = characters[at];
+        if character == '#' {
+            let mut end = at + 1;
+            while end < characters.len() && !matches!(characters[end], ',' | ' ' | ']' | '}' | '!')
+            {
+                end += 1;
+            }
+            let token: String = characters[at..end].iter().collect();
+            out.push_str(&format!("<imm:{token}>"));
+            previous = characters[end - 1];
+            at = end;
+        } else if character.is_ascii_alphanumeric() || character == '_' {
+            let mut end = at;
+            while end < characters.len()
+                && (characters[end].is_ascii_alphanumeric() || characters[end] == '_')
+            {
+                end += 1;
+            }
+            let word: String = characters[at..end].iter().collect();
+            if previous != '.' && is_register_word(&word) {
+                out.push_str(&format!("<reg:{word}>"));
+            } else {
+                out.push_str(&word);
+            }
+            previous = characters[end - 1];
+            at = end;
+        } else {
+            out.push(character);
+            previous = character;
+            at += 1;
+        }
+    }
+    out
 }
 
 impl<'t> ArmPrinter<'t> {
@@ -5718,6 +6134,8 @@ impl<'t> ArmPrinter<'t> {
             features,
             comment: std::cell::RefCell::new(String::new()),
             hexadecimal: false,
+            variant: 0,
+            markup: false,
         }
     }
 
@@ -5744,11 +6162,89 @@ impl<'t> ArmPrinter<'t> {
     }
 
     pub fn print(&self, instruction: &MachineInstruction) -> String {
+        let text = self.print_plain(instruction);
+        if self.markup {
+            apply_markup(&text)
+        } else {
+            text
+        }
+    }
+
+    fn apple_vector_instruction(&self, instruction: &MachineInstruction) -> Option<String> {
+        let record = self.target.instructions[instruction.opcode].record.as_str();
+        let table_layout = |name: &str| -> Option<(bool, &'static str)> {
+            let (rest, layout) = if let Some(rest) = name.strip_prefix("TBXv8i8") {
+                (rest, ".8b")
+            } else if let Some(rest) = name.strip_prefix("TBLv8i8") {
+                (rest, ".8b")
+            } else if let Some(rest) = name.strip_prefix("TBXv16i8") {
+                (rest, ".16b")
+            } else {
+                (name.strip_prefix("TBLv16i8")?, ".16b")
+            };
+            matches!(rest, "One" | "Two" | "Three" | "Four")
+                .then(|| (name.starts_with("TBX"), layout))
+        };
+        let mut out = String::from("\t");
+        if let Some((is_tbx, layout)) = table_layout(record) {
+            out.push_str(if is_tbx { "tbx" } else { "tbl" });
+            out.push_str(layout);
+            out.push('\t');
+            out.push_str(&self.vector_register_text(instruction, 0));
+            out.push_str(", ");
+            let list = if is_tbx { 2 } else { 1 };
+            self.vector_list(instruction, list, "", &mut out);
+            out.push_str(", ");
+            out.push_str(&self.vector_register_text(instruction, list + 1));
+            return Some(out);
+        }
+        let (_, mnemonic, layout, list, has_lane, natural) = LDSTN_DESCRIPTIONS
+            .iter()
+            .find(|(name, ..)| *name == record)?;
+        out.push_str(mnemonic);
+        out.push_str(layout);
+        out.push('\t');
+        let mut at = *list;
+        self.vector_list(instruction, at, "", &mut out);
+        at += 1;
+        if *has_lane {
+            out.push_str(&format!("[{}]", instruction.operand(at).immediate()));
+            at += 1;
+        }
+        out.push_str(", [");
+        out.push_str(&self.register_text(instruction, at));
+        at += 1;
+        out.push(']');
+        if *natural != 0 {
+            let register = self.register_text(instruction, at);
+            out.push_str(", ");
+            if register == "xzr" {
+                out.push_str(&format!("#{natural}"));
+            } else {
+                out.push_str(&register);
+            }
+        }
+        Some(out)
+    }
+
+    fn vector_register_text(&self, instruction: &MachineInstruction, index: usize) -> String {
+        match instruction.operand(index) {
+            MachineOperand::Register(register) => self.vector_register_name(*register),
+            _ => String::new(),
+        }
+    }
+
+    fn print_plain(&self, instruction: &MachineInstruction) -> String {
         PRINT_HEX.with(|held| held.set(self.hexadecimal));
+        if self.variant == 1 {
+            if let Some(text) = self.apple_vector_instruction(instruction) {
+                return text;
+            }
+        }
         if let Some(text) = self.special(instruction) {
             return text;
         }
-        let tables = arm_print_tables();
+        let tables = arm_print_tables(self.variant);
         if let Some(text) = self.alias(tables, instruction) {
             return text;
         }
@@ -5783,6 +6279,9 @@ impl<'t> ArmPrinter<'t> {
                 index += 1;
                 match condition {
                     AliasCondition::Ignore => true,
+                    AliasCondition::InvertibleCondition => {
+                        matches!(operand, MachineOperand::Immediate(held) if *held != 14 && *held != 15)
+                    }
                     AliasCondition::Immediate(value) => {
                         matches!(operand, MachineOperand::Immediate(held) if *held == i64::from(*value))
                     }
@@ -6265,7 +6764,7 @@ impl<'t> ArmPrinter<'t> {
                     .get(1)
                     .map(|text| text.trim_matches('\''))
                     .unwrap_or("0");
-                if kind == "0" {
+                if kind == "0" || self.variant == 1 {
                     self.vector_list(instruction, index, "", out);
                 } else if lanes != 0 {
                     self.vector_list(instruction, index, &format!(".{lanes}{kind}"), out);
@@ -6370,7 +6869,7 @@ impl<'t> ArmPrinter<'t> {
                         value
                     }
                 });
-                out.push_str(&format!("#{value:#018x}"));
+                out.push_str(&format!("#{value:#016x}"));
             }
             "printComplexRotationOp" => {
                 out.push_str(&format!("#{}", operand.immediate() * number(0) + number(1)))
@@ -9704,5 +10203,887 @@ impl<'s> Assembler<'s> {
             self.streamer.switch_section(&mut self.context, section, 0);
             self.arm_pool_emit(section);
         }
+    }
+}
+
+pub mod disassembler {
+    use super::*;
+
+    pub struct Decoded {
+        pub instruction: MachineInstruction,
+        pub soft_fail: bool,
+    }
+
+    struct Variable {
+        slot: usize,
+        decoder: String,
+        base: u64,
+        bits: Vec<(u32, u32)>,
+    }
+
+    struct Entry {
+        index: usize,
+        mask: u32,
+        value: u32,
+        soft_mask: u32,
+        soft_value: u32,
+        variables: Vec<Variable>,
+        method: String,
+        fallback: bool,
+    }
+
+    fn field(word: u32, start: u32, length: u32) -> u32 {
+        (word >> start) & (((1u64 << length) - 1) as u32)
+    }
+
+    fn valid_logical_immediate(value: u32, wide: bool) -> bool {
+        let n = (value >> 12) & 1;
+        let imms = value & 0x3f;
+        if !wide && n != 0 {
+            return false;
+        }
+        let pattern = (n << 6) | (!imms & 0x3f);
+        if pattern == 0 {
+            return false;
+        }
+        let length = 31 - pattern.leading_zeros();
+        let size = 1u32 << length;
+        imms & (size - 1) != size - 1
+    }
+
+    fn sign_extend(value: u64, bits: u32) -> i64 {
+        let shift = 64 - bits;
+        ((value << shift) as i64) >> shift
+    }
+
+    fn record_decoder(target: &Target, name: &str) -> String {
+        let Some(record) = target.records.get(name) else {
+            return String::new();
+        };
+        let own = table_text(record, "DecoderMethod");
+        if !own.is_empty() {
+            return own;
+        }
+        if record.is_a("RegisterOperand") {
+            if let Some(TableValue::Record(class)) = record.field("RegClass") {
+                return record_decoder(target, class);
+            }
+        }
+        if record.is_a("RegisterClass") {
+            return match name {
+                "GPR64x8Class" => "DecodeGPR64x8ClassRegisterClass".to_string(),
+                "WSeqPairsClass" => "DecodeWSeqPairsClassRegisterClass".to_string(),
+                "XSeqPairsClass" => "DecodeXSeqPairsClassRegisterClass".to_string(),
+                _ => format!("DecodeSimpleRegisterClass<AArch64::{name}RegClassID, 0, 65536>"),
+            };
+        }
+        String::new()
+    }
+
+    fn locate(target: &Target, index: usize, variable: &str) -> Option<(usize, String)> {
+        let instruction = &target.instructions[index];
+        if let Some(at) = instruction.named_group(variable) {
+            let group = &instruction.groups[at];
+            return Some((group.first, record_decoder(target, &group.record)));
+        }
+        for group in &instruction.groups {
+            let Some(sub) = group.sub_names.iter().position(|name| name == variable) else {
+                continue;
+            };
+            let operand = &target.records[&group.record];
+            let own = table_text(operand, "DecoderMethod");
+            let method = if sub == 0 && !own.is_empty() {
+                own
+            } else {
+                match operand.field("MIOperandInfo") {
+                    Some(TableValue::Dag { arguments, .. }) => match arguments.get(sub) {
+                        Some((TableValue::Record(name), _)) => record_decoder(target, name),
+                        _ => String::new(),
+                    },
+                    _ => String::new(),
+                }
+            };
+            return Some((group.first + sub, method));
+        }
+        None
+    }
+
+    fn entries(target: &'static Target) -> &'static Vec<Entry> {
+        static CELL: OnceLock<Vec<Entry>> = OnceLock::new();
+        CELL.get_or_init(|| {
+            let mut found = Vec::new();
+            for (index, instruction) in target.instructions.iter().enumerate() {
+                if instruction.pseudo
+                    || instruction.code_generation_only
+                    || instruction.assembly_parser_only
+                {
+                    continue;
+                }
+                let record = &target.records[&instruction.record];
+                let Some(TableValue::Bits(bits)) = record.field("Inst") else {
+                    continue;
+                };
+                let soft: Vec<bool> = match record.field("SoftFail") {
+                    Some(TableValue::Bits(held)) => held
+                        .iter()
+                        .map(|bit| matches!(bit, TableValue::Bit(true)))
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                let method = table_text(record, "DecoderMethod");
+                let mut entry = Entry {
+                    index,
+                    mask: 0,
+                    value: 0,
+                    soft_mask: 0,
+                    soft_value: 0,
+                    variables: Vec::new(),
+                    method,
+                    fallback: instruction.decoder_namespace == "Fallback",
+                };
+                let mut names: Vec<String> = Vec::new();
+                let mut usable = true;
+                for (position, bit) in bits.iter().enumerate().take(32) {
+                    let position = position as u32;
+                    let soft_bit = soft.get(position as usize).copied().unwrap_or(false);
+                    match bit {
+                        TableValue::Bit(held) => {
+                            if soft_bit {
+                                entry.soft_mask |= 1 << position;
+                                if *held {
+                                    entry.soft_value |= 1 << position;
+                                }
+                            } else {
+                                entry.mask |= 1 << position;
+                                if *held {
+                                    entry.value |= 1 << position;
+                                }
+                            }
+                        }
+                        TableValue::Unset => {}
+                        TableValue::VariableBit { .. } | TableValue::Variable(_) => {
+                            let (variable, source) = match bit {
+                                TableValue::VariableBit { variable, bit } => (variable, *bit),
+                                TableValue::Variable(variable) => (variable, 0),
+                                _ => unreachable!(),
+                            };
+                            if entry.method.is_empty() {
+                                let at = match names.iter().position(|name| name == variable) {
+                                    Some(at) => at,
+                                    None => match locate(target, index, variable) {
+                                        Some((slot, decoder)) => {
+                                            names.push(variable.clone());
+                                            let base = match record.field(variable) {
+                                                Some(TableValue::Bits(held)) => held
+                                                    .iter()
+                                                    .enumerate()
+                                                    .filter(|(_, bit)| {
+                                                        matches!(bit, TableValue::Bit(true))
+                                                    })
+                                                    .fold(0u64, |value, (at, _)| value | 1 << at),
+                                                _ => 0,
+                                            };
+                                            entry.variables.push(Variable {
+                                                slot,
+                                                decoder,
+                                                base,
+                                                bits: Vec::new(),
+                                            });
+                                            names.len() - 1
+                                        }
+                                        None => {
+                                            usable = false;
+                                            break;
+                                        }
+                                    },
+                                };
+                                entry.variables[at].bits.push((source, position));
+                            }
+                        }
+                        _ => {}
+                    }
+                }
+                if usable && entry.mask != 0 {
+                    found.push(entry);
+                }
+            }
+            found
+        })
+    }
+
+    struct Context<'a> {
+        target: &'static Target,
+        index: usize,
+        features: &'a BTreeSet<String>,
+    }
+
+    impl Context<'_> {
+        fn instruction(&self) -> &Instruction {
+            &self.target.instructions[self.index]
+        }
+
+        fn record(&self) -> &str {
+            &self.instruction().record
+        }
+
+        fn slot_decoder(&self, slot: usize) -> String {
+            match self.instruction().operand_records.get(slot) {
+                Some(record) => record_decoder(self.target, record),
+                None => String::new(),
+            }
+        }
+
+        fn decode(&self, decoder: &str, value: u64, out: &mut Vec<MachineOperand>) -> bool {
+            let (name, arguments) = split_method(decoder);
+            let number = |at: usize| -> i64 {
+                arguments
+                    .get(at)
+                    .and_then(|text| text.parse::<i64>().ok())
+                    .unwrap_or(0)
+            };
+            let bits = |at: usize| number(at).max(0) as u32;
+            let class_register = |class: &str, index: u64| -> Option<MachineOperand> {
+                self.target
+                    .register_classes
+                    .get(class)
+                    .and_then(|held| held.members.get(index as usize))
+                    .map(|register| MachineOperand::Register(*register))
+            };
+            let class_of = |text: &str| -> String {
+                text.trim()
+                    .trim_start_matches("AArch64::")
+                    .trim_end_matches("RegClassID")
+                    .to_string()
+            };
+            match name.as_str() {
+                "" => out.push(MachineOperand::Immediate(value as i64)),
+                "DecodeSimpleRegisterClass" => {
+                    let class = class_of(arguments.first().map(String::as_str).unwrap_or(""));
+                    let first = number(1) as u64;
+                    let count = number(2) as u64;
+                    if value >= count {
+                        return false;
+                    }
+                    match class_register(&class, value + first) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeGPR64x8ClassRegisterClass" => {
+                    if value > 22 || value & 1 == 1 {
+                        return false;
+                    }
+                    match class_register("GPR64x8Class", value >> 1) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeWSeqPairsClassRegisterClass" | "DecodeXSeqPairsClassRegisterClass" => {
+                    if value & 1 == 1 {
+                        return false;
+                    }
+                    let class = if name.starts_with("DecodeW") {
+                        "WSeqPairsClass"
+                    } else {
+                        "XSeqPairsClass"
+                    };
+                    match class_register(class, value / 2) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeMulMinMaxRegisterClass" => {
+                    let class = class_of(arguments.first().map(String::as_str).unwrap_or(""));
+                    let (multiple, minimum, maximum) = (number(1), number(2), number(3));
+                    let register = value as i64 * multiple + minimum;
+                    if register < minimum || register > maximum || register % multiple != 0 {
+                        return false;
+                    }
+                    match class_register(&class, register as u64) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeZPR2Mul2RegisterClass" => {
+                    let (minimum, maximum) = (number(0), number(1));
+                    let register = value as i64 * 2 + minimum;
+                    if register < minimum || register > maximum || register & 1 == 1 {
+                        return false;
+                    }
+                    match class_register("ZPR2", register as u64) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodePPR2Mul2RegisterClass" => {
+                    if value * 2 > 14 {
+                        return false;
+                    }
+                    match class_register("PPR2", value * 2) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeZPR4Mul4RegisterClass" => {
+                    if value * 4 > 28 {
+                        return false;
+                    }
+                    match class_register("ZPR4", value * 4) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeZK" => {
+                    if value > 7 {
+                        return false;
+                    }
+                    match class_register("ZPR_K", value) {
+                        Some(register) => out.push(register),
+                        None => return false,
+                    }
+                }
+                "DecodeMatrixTileListRegisterClass" => {
+                    if value > 0xff {
+                        return false;
+                    }
+                    out.push(MachineOperand::Immediate(value as i64));
+                }
+                "DecodeSImm" => {
+                    let width = bits(0);
+                    if value >> width != 0 {
+                        return false;
+                    }
+                    out.push(MachineOperand::Immediate(sign_extend(value, width)));
+                }
+                "DecodeImm8OptLsl" => {
+                    let shift = if value & 0x100 != 0 { 8 } else { 0 };
+                    if number(0) == 8 && shift != 0 {
+                        return false;
+                    }
+                    out.push(MachineOperand::Immediate((value & 0xff) as i64));
+                    out.push(MachineOperand::Immediate(shift));
+                }
+                "DecodeFixedPointScaleImm32" => {
+                    out.push(MachineOperand::Immediate(64 - (value | 0x20) as i64));
+                }
+                "DecodeFixedPointScaleImm64" => {
+                    out.push(MachineOperand::Immediate(64 - value as i64));
+                }
+                "DecodePCRelLabel16" => {
+                    if value > (1 << 16) {
+                        return false;
+                    }
+                    out.push(MachineOperand::Immediate((value as i64).wrapping_neg()));
+                }
+                "DecodePCRelLabel19" => {
+                    out.push(MachineOperand::Immediate(sign_extend(value, 19)));
+                }
+                "DecodePCRelLabel9" => {
+                    out.push(MachineOperand::Immediate(sign_extend(value, 9)));
+                }
+                "DecodeMemExtend" => {
+                    out.push(MachineOperand::Immediate(((value >> 1) & 1) as i64));
+                    out.push(MachineOperand::Immediate((value & 1) as i64));
+                }
+                "DecodeMRSSystemRegister" | "DecodeMSRSystemRegister" => {
+                    out.push(MachineOperand::Immediate(value as i64));
+                }
+                "DecodeHinteUImm16" => {
+                    if value > 65535
+                        || ((12319..=16383).contains(&value) && (value - 12319).is_multiple_of(32))
+                    {
+                        return false;
+                    }
+                    out.push(MachineOperand::Immediate(value as i64));
+                }
+                "DecodeSVEIncDecImm" => out.push(MachineOperand::Immediate(value as i64 + 1)),
+                "DecodeSVCROp" => {
+                    if !(1..=3).contains(&value) {
+                        return false;
+                    }
+                    out.push(MachineOperand::Immediate(value as i64));
+                }
+                "DecodeVecShiftR64Imm" => out.push(MachineOperand::Immediate(64 - value as i64)),
+                "DecodeVecShiftR64ImmNarrow" => {
+                    out.push(MachineOperand::Immediate(64 - (value | 0x20) as i64))
+                }
+                "DecodeVecShiftR32Imm" => out.push(MachineOperand::Immediate(32 - value as i64)),
+                "DecodeVecShiftR32ImmNarrow" => {
+                    out.push(MachineOperand::Immediate(32 - (value | 0x10) as i64))
+                }
+                "DecodeVecShiftR16Imm" => out.push(MachineOperand::Immediate(16 - value as i64)),
+                "DecodeVecShiftR16ImmNarrow" => {
+                    out.push(MachineOperand::Immediate(16 - (value | 0x8) as i64))
+                }
+                "DecodeVecShiftR8Imm" => out.push(MachineOperand::Immediate(8 - value as i64)),
+                "DecodeVecShiftL64Imm" => {
+                    out.push(MachineOperand::Immediate(((value + 64) & 63) as i64))
+                }
+                "DecodeVecShiftL32Imm" => {
+                    out.push(MachineOperand::Immediate(((value + 32) & 31) as i64))
+                }
+                "DecodeVecShiftL16Imm" => {
+                    out.push(MachineOperand::Immediate(((value + 16) & 15) as i64))
+                }
+                "DecodeVecShiftL8Imm" => {
+                    out.push(MachineOperand::Immediate(((value + 8) & 7) as i64))
+                }
+                _ => return false,
+            }
+            true
+        }
+
+        fn register(&self, out: &mut Vec<MachineOperand>, number: u32) -> bool {
+            let slot = out.len();
+            let decoder = self.slot_decoder(slot);
+            let (name, _) = split_method(&decoder);
+            if !name.starts_with("Decode") || name == "DecodeSImm" {
+                return false;
+            }
+            self.decode(&decoder, u64::from(number), out)
+        }
+
+        fn immediate(&self, out: &mut Vec<MachineOperand>, value: i64) {
+            out.push(MachineOperand::Immediate(value));
+        }
+
+        fn generic(&self, entry: &Entry, word: u32) -> Option<Vec<MachineOperand>> {
+            let instruction = self.instruction();
+            let count = instruction.operand_count();
+            let mut values: BTreeMap<usize, (u64, &str)> = BTreeMap::new();
+            for variable in &entry.variables {
+                let mut value = variable.base;
+                for (source, destination) in &variable.bits {
+                    if (word >> destination) & 1 == 1 {
+                        value |= 1 << source;
+                    }
+                }
+                values.insert(variable.slot, (value, variable.decoder.as_str()));
+            }
+            let mut out = Vec::new();
+            let mut slot = 0;
+            while slot < count {
+                let decoder = self.slot_decoder(slot);
+                if let Some((value, own)) = values.get(&slot) {
+                    let before = out.len();
+                    if !self.decode(own, *value, &mut out) {
+                        return None;
+                    }
+                    slot += (out.len() - before).max(1);
+                    continue;
+                }
+                let partner = instruction
+                    .tied_to
+                    .get(slot)
+                    .copied()
+                    .flatten()
+                    .or_else(|| (0..count).find(|other| instruction.tied_to[*other] == Some(slot)));
+                if let Some((value, _)) = partner.and_then(|other| values.get(&other)) {
+                    if !self.decode(&decoder, *value, &mut out) {
+                        return None;
+                    }
+                }
+                slot += 1;
+            }
+            Some(out)
+        }
+
+        fn pstate_known(&self, one: bool, encoding: u32) -> bool {
+            let tables = system_tables_for();
+            let entries = if one {
+                &tables.pstate_one
+            } else {
+                &tables.pstate_fifteen
+            };
+            entries.values().any(|entry| {
+                entry.encoding == encoding && predicates_features(&entry.requires, self.features)
+            })
+        }
+
+        fn method(&self, word: u32) -> Option<(Vec<MachineOperand>, bool)> {
+            let method = table_text(&self.target.records[self.record()], "DecoderMethod");
+            let name = self.record().to_string();
+            let mut out: Vec<MachineOperand> = Vec::new();
+            let rd = field(word, 0, 5);
+            let rn = field(word, 5, 5);
+            let mut soft = false;
+            match method.as_str() {
+                "DecodeAddSubERegInstruction" => {
+                    let rm = field(word, 16, 5);
+                    let extend = field(word, 10, 6);
+                    if extend & 7 > 4 {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd)
+                        || !self.register(&mut out, rn)
+                        || !self.register(&mut out, rm)
+                    {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(extend));
+                }
+                "DecodeAddSubImmShift" => {
+                    let imm = field(word, 10, 14);
+                    let shifter = (imm >> 12) & 3;
+                    if shifter > 1 {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd) || !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(imm & 0xfff));
+                    self.immediate(&mut out, i64::from(12 * shifter));
+                }
+                "DecodeAdrInstruction" => {
+                    let imm = sign_extend(
+                        u64::from((field(word, 5, 19) << 2) | field(word, 29, 2)),
+                        21,
+                    );
+                    if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    self.immediate(&mut out, imm);
+                }
+                "DecodeAuthLoadInstruction" => {
+                    let offset = (field(word, 22, 1) << 9) | field(word, 12, 9);
+                    let writeback = field(word, 11, 1) == 1;
+                    if name.ends_with("writeback") && !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd) || !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    self.immediate(&mut out, sign_extend(u64::from(offset), 10));
+                    if writeback && rd == rn && rn != 31 {
+                        soft = true;
+                    }
+                }
+                "DecodeCPYMemOpInstruction" => {
+                    let rs = field(word, 16, 5);
+                    if rd == rs || rs == rn || rd == rn {
+                        return None;
+                    }
+                    for value in [rd, rs, rn, rd, rs, rn] {
+                        if !self.register(&mut out, value) {
+                            return None;
+                        }
+                    }
+                }
+                "DecodeSETMemOpInstruction" => {
+                    let rm = field(word, 16, 5);
+                    if rd == rm || rm == rn || rd == rn {
+                        return None;
+                    }
+                    for value in [rd, rn, rd, rn, rm] {
+                        if !self.register(&mut out, value) {
+                            return None;
+                        }
+                    }
+                }
+                "DecodeSETMemGoOpInstruction" => {
+                    if rd == rn {
+                        return None;
+                    }
+                    for value in [rd, rn, rd, rn] {
+                        if !self.register(&mut out, value) {
+                            return None;
+                        }
+                    }
+                }
+                "DecodeExclusiveLdStInstruction" => {
+                    let rt2 = field(word, 10, 5);
+                    let rs = field(word, 16, 5);
+                    let store_status = name.starts_with("STLXR")
+                        || name.starts_with("STXR")
+                        || name.starts_with("STLXP")
+                        || name.starts_with("STXP");
+                    let pair = name.contains("XP");
+                    if store_status && !self.register(&mut out, rs) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    if pair && !self.register(&mut out, rt2) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    if pair && !store_status && rd == rt2 {
+                        soft = true;
+                    }
+                }
+                "DecodeFMOVLaneInstruction" => {
+                    if !self.register(&mut out, rd) || !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    self.immediate(&mut out, 1);
+                }
+                "DecodeLogicalImmInstruction" => {
+                    let wide = field(word, 31, 1) == 1;
+                    let imm = if wide {
+                        field(word, 10, 13)
+                    } else {
+                        field(word, 10, 12)
+                    };
+                    if !valid_logical_immediate(imm, wide) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd) || !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(imm));
+                }
+                "DecodeModImmInstruction" | "DecodeModImmTiedInstruction" => {
+                    let cmode = field(word, 12, 4);
+                    let imm = (field(word, 16, 3) << 5) | field(word, 5, 5);
+                    if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    if method == "DecodeModImmTiedInstruction" && !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(imm));
+                    if method == "DecodeModImmTiedInstruction" {
+                        self.immediate(&mut out, i64::from((cmode & 6) << 2));
+                    } else if name.contains("_msl") {
+                        self.immediate(&mut out, if cmode & 1 == 1 { 0x110 } else { 0x108 });
+                    } else if matches!(
+                        name.as_str(),
+                        "MOVIv4i16"
+                            | "MOVIv8i16"
+                            | "MVNIv4i16"
+                            | "MVNIv8i16"
+                            | "MOVIv2i32"
+                            | "MOVIv4i32"
+                            | "MVNIv2i32"
+                            | "MVNIv4i32"
+                    ) {
+                        self.immediate(&mut out, i64::from((cmode & 6) << 2));
+                    }
+                }
+                "DecodeMoveImmInstruction" => {
+                    let imm = field(word, 5, 16);
+                    let shift = field(word, 21, 2) << 4;
+                    if name.ends_with("Wi") && shift & (1 << 5) != 0 {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    if name.starts_with("MOVK") {
+                        let first = out[0].clone();
+                        out.push(first);
+                    }
+                    self.immediate(&mut out, i64::from(imm));
+                    self.immediate(&mut out, i64::from(shift));
+                }
+                "DecodePairLdStInstruction" => {
+                    let rt2 = field(word, 10, 5);
+                    let offset = sign_extend(u64::from(field(word, 15, 7)), 7);
+                    let is_load = field(word, 22, 1) == 1;
+                    let writeback = name.ends_with("pre") || name.ends_with("post");
+                    let disjoint = writeback
+                        && [
+                            "LDPX", "STPX", "LDPSW", "LDPW", "STPW", "STGP", "LDTPpre", "LDTPpost",
+                            "STTPpre", "STTPpost",
+                        ]
+                        .iter()
+                        .any(|prefix| name.starts_with(prefix));
+                    if writeback && !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd)
+                        || !self.register(&mut out, rt2)
+                        || !self.register(&mut out, rn)
+                    {
+                        return None;
+                    }
+                    self.immediate(&mut out, offset);
+                    if is_load && rd == rt2 {
+                        soft = true;
+                    }
+                    if disjoint && rn != 31 && (rd == rn || rt2 == rn) {
+                        soft = true;
+                    }
+                }
+                "DecodePRFMRegInstruction" => {
+                    if rd & 0x18 == 0x18 {
+                        return None;
+                    }
+                    let shift = field(word, 12, 1);
+                    let extend = field(word, 15, 1);
+                    let rm = field(word, 16, 5);
+                    self.immediate(&mut out, i64::from(rd));
+                    if !self.register(&mut out, rn) || !self.register(&mut out, rm) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(extend));
+                    self.immediate(&mut out, i64::from(shift));
+                }
+                "DecodeSVELogicalImmInstruction" => {
+                    let imm = field(word, 5, 13);
+                    if !valid_logical_immediate(imm, true) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    if name != "DUPM_ZI" && !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(imm));
+                }
+                "DecodeSignedLdStInstruction" => {
+                    let offset = sign_extend(u64::from(field(word, 12, 9)), 9);
+                    let writeback = name.ends_with("pre") || name.ends_with("post");
+                    if writeback && !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    if name == "PRFUMi" {
+                        self.immediate(&mut out, i64::from(rd));
+                    } else if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    self.immediate(&mut out, offset);
+                    let is_load = field(word, 22, 1) == 1;
+                    let indexed = field(word, 10, 2) != 0;
+                    let floating = field(word, 26, 1) == 1;
+                    if is_load && indexed && !floating && rn != 31 && rd == rn {
+                        soft = true;
+                    }
+                }
+                "DecodeSyspXzrInstruction" => {
+                    if rd != 31 {
+                        return None;
+                    }
+                    for (start, length) in [(16, 3), (12, 4), (8, 4), (5, 3)] {
+                        self.immediate(&mut out, i64::from(field(word, start, length)));
+                    }
+                    out.push(MachineOperand::Register(self.target.named_register("XZR")));
+                }
+                "DecodeSystemPStateImm0_15Instruction" | "DecodeSystemPStateImm0_1Instruction" => {
+                    let op1 = field(word, 16, 3);
+                    let op2 = field(word, 5, 3);
+                    if op1 == 0 && op2 <= 2 {
+                        return None;
+                    }
+                    let one = method.ends_with("0_1Instruction");
+                    let (field_value, imm) = if one {
+                        (
+                            (field(word, 9, 3) << 6) | (op1 << 3) | op2,
+                            field(word, 8, 1),
+                        )
+                    } else {
+                        ((op1 << 3) | op2, field(word, 8, 4))
+                    };
+                    self.immediate(&mut out, i64::from(field_value));
+                    self.immediate(&mut out, i64::from(imm));
+                    if !self.pstate_known(one, field_value) {
+                        return None;
+                    }
+                }
+                "DecodeTestAndBranch" => {
+                    let bit = (field(word, 31, 1) << 5) | field(word, 19, 5);
+                    let destination = sign_extend(u64::from(field(word, 5, 14)), 14);
+                    if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(bit));
+                    self.immediate(&mut out, destination);
+                }
+                "DecodeThreeAddrSRegInstruction" => {
+                    let rm = field(word, 16, 5);
+                    let high = field(word, 22, 2);
+                    let low = field(word, 10, 6);
+                    let wide_form = name.contains("Xrs");
+                    let arithmetic = name.starts_with("ADD") || name.starts_with("SUB");
+                    if arithmetic && high == 3 {
+                        return None;
+                    }
+                    if !wide_form && low >> 5 == 1 {
+                        return None;
+                    }
+                    if !self.register(&mut out, rd)
+                        || !self.register(&mut out, rn)
+                        || !self.register(&mut out, rm)
+                    {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from((high << 6) | low));
+                }
+                "DecodeUnconditionalBranch" => {
+                    self.immediate(&mut out, sign_extend(u64::from(field(word, 0, 26)), 26));
+                }
+                "DecodeUnsignedLdStInstruction" => {
+                    let offset = field(word, 10, 12);
+                    if name == "PRFMui" {
+                        self.immediate(&mut out, i64::from(rd));
+                    } else if !self.register(&mut out, rd) {
+                        return None;
+                    }
+                    if !self.register(&mut out, rn) {
+                        return None;
+                    }
+                    self.immediate(&mut out, i64::from(offset));
+                }
+                _ => return None,
+            }
+            Some((out, soft))
+        }
+    }
+
+    pub fn decode(
+        target: &'static Target,
+        features: &BTreeSet<String>,
+        word: u32,
+    ) -> Option<Decoded> {
+        let mut candidates: Vec<&Entry> = entries(target)
+            .iter()
+            .filter(|entry| word & entry.mask == entry.value)
+            .collect();
+        candidates.sort_by_key(|entry| {
+            (
+                entry.fallback,
+                std::cmp::Reverse(entry.mask.count_ones()),
+                entry.index,
+            )
+        });
+        for entry in candidates {
+            let instruction = &target.instructions[entry.index];
+            if !predicates_hold(target, &instruction.predicates, features) {
+                continue;
+            }
+            let context = Context {
+                target,
+                index: entry.index,
+                features,
+            };
+            let (operands, mut soft) = if entry.method.is_empty() {
+                match context.generic(entry, word) {
+                    Some(operands) => (operands, false),
+                    None => continue,
+                }
+            } else {
+                match context.method(word) {
+                    Some(result) => result,
+                    None => continue,
+                }
+            };
+            if word & entry.soft_mask != entry.soft_value {
+                soft = true;
+            }
+            let mut built = MachineInstruction::new(entry.index);
+            built.operands = operands;
+            return Some(Decoded {
+                instruction: built,
+                soft_fail: soft,
+            });
+        }
+        None
     }
 }

@@ -160,11 +160,12 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
   ve tablo güdümlü AArch64 kodlayıcı tamam (8871 komutun hepsi için kodlama planı); AArch64 ayrıştırıcı ve ELF
   nesne çıktısı çalışıyor (46 örnek komut ve etiketli/yeniden konumlandırmalı bir program host llvm-mc ile örtüşüyor);
   yazıcı (metin çıktısı), yönergeler (.arch/.cpu/.inst/.req...) ve sistem takma adları (dc/ic/at/tlbi) tamam;
-  `mc-aarch64` (ignored test `suite_mc_aarch64`): 295 geçti, 0 başarısız, 2063 kapsam dışı (SVE/SME 1811, AArch64
-  disassembler 50, big-endian/ILP32/LFI/COFF üçlüleri, host LLVM 18 okuyucu sınırları) ve taban çizgisine yazıldı.
+  `mc-aarch64` (ignored test `suite_mc_aarch64`): 345 geçti, 0 başarısız, 2013 kapsam dışı (SVE/SME 1811, big-endian/ILP32/LFI/COFF
+  üçlüleri, host LLVM 18 okuyucu sınırları) ve taban çizgisine yazıldı; AArch64 disassembler (tablo güdümlü kod çözücü + Apple
+  yazım türü + işaretli çıktı) `mc-aarch64-disassembler` 91/95 (0 başarısız, 4 kapsam dışı) ve taban çizgisinde.
   Eşleme sembolleri ($x/$d, `-implicit-mapsyms`), CFI kayıt adları ve yazım denetimi önerileri tamam.
   Omni IR → arm64 arka ucu ilk sürümde (`Armv8.rs` içinde `native`: derleme, bağlama ve host llvm-objdump ile çözme
-  doğrulandı; qemu olmadığından yürütme sınanamadı). Sırada: AArch64 disassembler (A6), sonra SVE/SME ve big-endian/ILP32. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
+  doğrulandı; qemu olmadığından yürütme sınanamadı). Sırada: SVE/SME ve big-endian/ILP32. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
