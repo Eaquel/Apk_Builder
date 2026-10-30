@@ -6299,6 +6299,7 @@ impl<'s> Assembler<'s> {
                 }
                 let name = self.lexer.token.text.to_ascii_lowercase();
                 self.arm_aliases.remove(&name);
+                self.lex();
                 Some(self.parse_end_of_line())
             }
             _ => None,

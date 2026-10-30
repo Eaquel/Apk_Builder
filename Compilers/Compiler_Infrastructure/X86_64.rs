@@ -10090,6 +10090,14 @@ impl AssemblyContext {
                         {
                             if let Some(specifier) = specifier {
                                 if inner.is_absolute() {
+                                    if self.triple.isa == Isa::Armv8 {
+                                        return Some(RelocatableValue {
+                                            add: None,
+                                            subtract: None,
+                                            constant: inner.constant,
+                                            specifier: Some(specifier.clone()),
+                                        });
+                                    }
                                     return Some(RelocatableValue {
                                         add: Some(index),
                                         subtract: None,
@@ -11280,6 +11288,13 @@ impl<'s> Assembler<'s> {
                 self.parse_binary_right(token_precedence + 1, &mut right, end)?;
             }
             let left = std::mem::replace(expression, Expression::Constant(0));
+            let operator = if self.target.isa == Isa::Armv8
+                && operator == BinaryOperator::ArithmeticShiftRight
+            {
+                BinaryOperator::LogicalShiftRight
+            } else {
+                operator
+            };
             *expression = Expression::Binary {
                 operator,
                 left: Box::new(left),
@@ -14321,7 +14336,7 @@ impl<'s> Assembler<'s> {
         location: SourceLocation,
     ) -> Option<bool> {
         if self.target.isa == Isa::Armv8 {
-            return self.arm_directive(identifier, location);
+            return self.arm_directive(&identifier.to_ascii_lowercase(), location);
         }
         if identifier.starts_with(".arch") {
             self.parse_string_to_end_of_statement();
@@ -27390,7 +27405,9 @@ pub mod object {
             if resolved && literal {
                 resolved = false;
             }
-            if target.specifier.is_some() {
+            if target.specifier.is_some()
+                && !(context.triple.isa == Isa::Armv8 && target.is_absolute())
+            {
                 resolved = false;
             }
             let mut value = value;
@@ -27424,6 +27441,18 @@ pub mod object {
                 for byte in 0..4 {
                     if let Some(slot) = buffer.get_mut(start + byte) {
                         *slot |= (adjusted >> (byte * 8)) as u8;
+                    }
+                }
+                if fixup.fixup.kind == FixupKind::Arm(armv8::ArmFixup::Movw) {
+                    let lower = specifier.to_ascii_lowercase();
+                    if lower.is_empty() || (lower.starts_with("abs_g") && lower.ends_with("_s")) {
+                        if let Some(slot) = buffer.get_mut(start + 3) {
+                            if (value as i64) < 0 {
+                                *slot &= !(1 << 6);
+                            } else {
+                                *slot |= 1 << 6;
+                            }
+                        }
                     }
                 }
                 return;
