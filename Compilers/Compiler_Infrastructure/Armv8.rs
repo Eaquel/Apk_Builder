@@ -6365,3 +6365,1840 @@ impl<'t> ArmPrinter<'t> {
         Some(text)
     }
 }
+
+pub mod native {
+    use super::*;
+    use crate::compilers::compiler_infrastructure::{
+        AtomicOp, BinaryOp, BlockCall, Comparison, Conversion, FloatComparison, Function,
+        FunctionId, Instruction, Linkage, Module, Operation, Signature, Terminator, Type, UnaryOp,
+        Value,
+    };
+    use crate::compilers::x86_64::codegen::{
+        self as shared, Emitter, ARRAY_HEADER, ARRAY_LENGTH_OFFSET, TRAP_ABSTRACT_METHOD,
+        TRAP_CONVERSION_RANGE, TRAP_DIVISION_BY_ZERO, TRAP_EXPLICIT, TRAP_INDEX_OUT_OF_BOUNDS,
+        TRAP_MISSING_IMPLEMENTATION, TRAP_NULL_REFERENCE, TRAP_OVERLAPPING_COPY, TRAP_UNREACHABLE,
+    };
+    use std::ops::{Deref, DerefMut};
+
+    const TRIPLE: &str = "aarch64-unknown-linux-gnu";
+    const A: &str = "x9";
+    const B: &str = "x10";
+    const C: &str = "x11";
+    const D: &str = "x12";
+    const E: &str = "x13";
+    const F: &str = "x14";
+
+    fn narrow(register: &str) -> String {
+        format!("w{}", &register[1..])
+    }
+
+    fn float_register(ty: Type, number: usize) -> String {
+        format!("{}{number}", if shared::single(ty) { 's' } else { 'd' })
+    }
+
+    #[derive(Clone, Copy)]
+    enum Place {
+        Integer(usize),
+        Float(usize),
+        Stack(usize),
+    }
+
+    fn classify(types: &[Type]) -> (Vec<Place>, usize) {
+        let mut integers = 0;
+        let mut floats = 0;
+        let mut stack = 0;
+        let mut places = Vec::with_capacity(types.len());
+        for ty in types {
+            if shared::is_float(*ty) {
+                if floats < 8 {
+                    places.push(Place::Float(floats));
+                    floats += 1;
+                } else {
+                    places.push(Place::Stack(stack));
+                    stack += 1;
+                }
+            } else if integers < 8 {
+                places.push(Place::Integer(integers));
+                integers += 1;
+            } else {
+                places.push(Place::Stack(stack));
+                stack += 1;
+            }
+        }
+        (places, stack)
+    }
+
+    struct Frame {
+        function: FunctionId,
+        slots: BTreeMap<usize, i64>,
+    }
+
+    struct Arm<'m> {
+        base: Emitter<'m>,
+    }
+
+    impl<'m> Deref for Arm<'m> {
+        type Target = Emitter<'m>;
+
+        fn deref(&self) -> &Self::Target {
+            &self.base
+        }
+    }
+
+    impl DerefMut for Arm<'_> {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.base
+        }
+    }
+
+    impl<'m> Arm<'m> {
+        fn slot(value: Value) -> i64 {
+            -16 * (i64::from(value.0) + 1)
+        }
+
+        fn access(&mut self, load: bool, register: &str, value: Value) {
+            let at = Self::slot(value);
+            if (-256..=255).contains(&at) {
+                let mnemonic = if load { "ldur" } else { "stur" };
+                self.line(&format!("{mnemonic} {register}, [x29, #{at}]"));
+            } else {
+                self.constant(at as u64, "x16");
+                let mnemonic = if load { "ldr" } else { "str" };
+                self.line(&format!("{mnemonic} {register}, [x29, x16]"));
+            }
+        }
+
+        fn load(&mut self, value: Value, register: &str) {
+            self.access(true, register, value);
+        }
+
+        fn store(&mut self, register: &str, value: Value) {
+            self.access(false, register, value);
+        }
+
+        fn store_result(&mut self, register: &str, result: Option<Value>) {
+            if let Some(result) = result {
+                self.store(register, result);
+            }
+        }
+
+        fn load_signed(&mut self, value: Value, register: &str, bits: u32) {
+            self.load(value, register);
+            self.sign_extend_register(register, bits);
+        }
+
+        fn load_float(&mut self, value: Value, ty: Type, number: usize) {
+            let register = float_register(ty, number);
+            self.access(true, &register, value);
+        }
+
+        fn store_float(&mut self, number: usize, value: Value, ty: Type) {
+            let register = float_register(ty, number);
+            self.access(false, &register, value);
+        }
+
+        fn mask(&mut self, register: &str, bits: u32) {
+            let low = narrow(register);
+            match bits {
+                1 => self.line(&format!("and {low}, {low}, #1")),
+                8 => self.line(&format!("uxtb {low}, {low}")),
+                16 => self.line(&format!("uxth {low}, {low}")),
+                32 => self.line(&format!("mov {low}, {low}")),
+                _ => {}
+            }
+        }
+
+        fn sign_extend_register(&mut self, register: &str, bits: u32) {
+            let low = narrow(register);
+            match bits {
+                1 => {
+                    self.line(&format!("and {register}, {register}, #1"));
+                    self.line(&format!("neg {register}, {register}"));
+                }
+                8 => self.line(&format!("sxtb {register}, {low}")),
+                16 => self.line(&format!("sxth {register}, {low}")),
+                32 => self.line(&format!("sxtw {register}, {low}")),
+                _ => {}
+            }
+        }
+
+        fn constant(&mut self, value: u64, register: &str) {
+            let chunk = |value: u64, at: u32| (value >> (16 * at)) & 0xffff;
+            let zeros = (0..4).filter(|at| chunk(value, *at) == 0).count();
+            let ones = (0..4).filter(|at| chunk(value, *at) == 0xffff).count();
+            let shift = |at: u32| {
+                if at == 0 {
+                    String::new()
+                } else {
+                    format!(", lsl #{}", 16 * at)
+                }
+            };
+            if ones > zeros {
+                let inverse = !value;
+                let first = (0..4).find(|at| chunk(inverse, *at) != 0).unwrap_or(0);
+                self.line(&format!(
+                    "movn {register}, #{}{}",
+                    chunk(inverse, first),
+                    shift(first)
+                ));
+                for at in (0..4).filter(|at| *at != first) {
+                    if chunk(value, at) != 0xffff {
+                        self.line(&format!(
+                            "movk {register}, #{}{}",
+                            chunk(value, at),
+                            shift(at)
+                        ));
+                    }
+                }
+            } else {
+                let first = (0..4).find(|at| chunk(value, *at) != 0).unwrap_or(0);
+                self.line(&format!(
+                    "movz {register}, #{}{}",
+                    chunk(value, first),
+                    shift(first)
+                ));
+                for at in (0..4).filter(|at| *at > first) {
+                    if chunk(value, at) != 0 {
+                        self.line(&format!(
+                            "movk {register}, #{}{}",
+                            chunk(value, at),
+                            shift(at)
+                        ));
+                    }
+                }
+            }
+        }
+
+        fn adjust(&mut self, destination: &str, source: &str, amount: i64) {
+            if amount == 0 {
+                if destination != source {
+                    self.line(&format!("mov {destination}, {source}"));
+                }
+            } else if (0..4096).contains(&amount) {
+                self.line(&format!("add {destination}, {source}, #{amount}"));
+            } else if (-4095..0).contains(&amount) {
+                self.line(&format!("sub {destination}, {source}, #{}", -amount));
+            } else {
+                self.constant(amount as u64, "x16");
+                self.line(&format!("add {destination}, {source}, x16"));
+            }
+        }
+
+        fn global_address(&mut self, symbol: &str, register: &str) {
+            self.line(&format!("adrp {register}, {symbol}"));
+            self.line(&format!("add {register}, {register}, :lo12:{symbol}"));
+        }
+
+        fn pending(&mut self, load: bool, register: &str) {
+            self.line("adrp x16, __omni_pending");
+            let mnemonic = if load { "ldr" } else { "str" };
+            self.line(&format!(
+                "{mnemonic} {register}, [x16, :lo12:__omni_pending]"
+            ));
+        }
+
+        fn memory(
+            &mut self,
+            load: bool,
+            suffix: &str,
+            register: &str,
+            address: &str,
+            offset: i64,
+            size: i64,
+        ) {
+            let plain = if load { "ldr" } else { "str" };
+            let unscaled = if load { "ldur" } else { "stur" };
+            if offset >= 0 && offset % size == 0 && offset / size <= 4095 {
+                if offset == 0 {
+                    self.line(&format!("{plain}{suffix} {register}, [{address}]"));
+                } else {
+                    self.line(&format!(
+                        "{plain}{suffix} {register}, [{address}, #{offset}]"
+                    ));
+                }
+            } else if (-256..=255).contains(&offset) {
+                self.line(&format!(
+                    "{unscaled}{suffix} {register}, [{address}, #{offset}]"
+                ));
+            } else {
+                self.constant(offset as u64, "x16");
+                self.line(&format!("add x16, {address}, x16"));
+                self.line(&format!("{plain}{suffix} {register}, [x16]"));
+            }
+        }
+
+        fn memory_load(&mut self, ty: Type, address: &str, offset: i64, register: &str) {
+            let size = self.layout.size_of(ty);
+            let low = narrow(register);
+            match size {
+                1 => self.memory(true, "b", &low, address, offset, 1),
+                2 => self.memory(true, "h", &low, address, offset, 2),
+                4 => self.memory(true, "", &low, address, offset, 4),
+                _ => self.memory(true, "", register, address, offset, 8),
+            }
+        }
+
+        fn memory_store(&mut self, ty: Type, register: &str, address: &str, offset: i64) {
+            let size = self.layout.size_of(ty);
+            let low = narrow(register);
+            match size {
+                1 => self.memory(false, "b", &low, address, offset, 1),
+                2 => self.memory(false, "h", &low, address, offset, 2),
+                4 => self.memory(false, "", &low, address, offset, 4),
+                _ => self.memory(false, "", register, address, offset, 8),
+            }
+        }
+
+        fn trap(&mut self, code: i64) {
+            self.constant(code as u64, "x0");
+            self.line("mov x1, xzr");
+            self.line("bl __omni_trap");
+        }
+
+        fn trap_unless_nonzero(&mut self, register: &str, code: i64) {
+            let skip = self.fresh();
+            self.line(&format!("cbnz {register}, {skip}"));
+            self.trap(code);
+            self.label(&skip);
+        }
+
+        fn nan_into(&mut self, ty: Type, number: usize) {
+            if shared::single(ty) {
+                self.line("movz w16, #0x7fc0, lsl #16");
+                self.line(&format!("fmov s{number}, w16"));
+            } else {
+                self.line("movz x16, #0x7ff8, lsl #48");
+                self.line(&format!("fmov d{number}, x16"));
+            }
+        }
+
+        fn canonical_nan(&mut self, number: usize, ty: Type) {
+            let skip = self.fresh();
+            let register = float_register(ty, number);
+            self.line(&format!("fcmp {register}, {register}"));
+            self.line(&format!("b.vc {skip}"));
+            self.nan_into(ty, number);
+            self.label(&skip);
+        }
+
+        fn emit_module(&mut self) -> Result<(), Diagnostic> {
+            shared::check_supported(self.module)?;
+            for index in 0..self.module.functions.len() {
+                let id = FunctionId(index as u32);
+                if !self.module.functions[index].is_declaration() {
+                    self.emit_function(id)?;
+                }
+            }
+            self.emit_globals();
+            self.emit_strings();
+            self.emit_classes();
+            Ok(())
+        }
+
+        fn emit_function(&mut self, id: FunctionId) -> Result<(), Diagnostic> {
+            let module = self.module;
+            let function = &module.functions[id.index()];
+            let symbol = shared::function_symbol(module, id);
+            let values = function.value_types.len() as i64;
+            let mut base = 16 * values;
+            let mut slots = BTreeMap::new();
+            let mut outgoing = 0usize;
+            let mut calls: Vec<&Instruction> = function.instructions.iter().collect();
+            for block in &function.blocks {
+                if let Terminator::Invoke { call, .. } = &block.terminator {
+                    calls.push(call);
+                }
+            }
+            for (index, instruction) in function.instructions.iter().enumerate() {
+                if let Operation::StackSlot { size, align } = instruction.operation {
+                    let align = i64::from(align.clamp(1, 16));
+                    base = (base + i64::from(size.max(1)) + align - 1) / align * align;
+                    slots.insert(index, -base);
+                }
+            }
+            for call in &calls {
+                let types: Vec<Type> = match &call.operation {
+                    Operation::Call(_) => call
+                        .arguments
+                        .iter()
+                        .map(|value| function.type_of(*value))
+                        .collect(),
+                    Operation::CallIndirect(_) => call.arguments[1..]
+                        .iter()
+                        .map(|value| function.type_of(*value))
+                        .collect(),
+                    _ => continue,
+                };
+                let (_, stack) = classify(&types);
+                outgoing = outgoing.max(stack);
+            }
+            let frame_size = (base + 15) / 16 * 16 + (outgoing as i64 * 8 + 15) / 16 * 16;
+            self.line(".text");
+            self.line(".p2align 2");
+            match function.linkage {
+                Linkage::Export => self.line(&format!(".globl {symbol}")),
+                Linkage::Weak => self.line(&format!(".weak {symbol}")),
+                _ => {}
+            }
+            self.line(&format!(".type {symbol}, @function"));
+            self.label(&symbol);
+            self.line("stp x29, x30, [sp, #-16]!");
+            self.line("mov x29, sp");
+            if frame_size > 0 {
+                self.stack_adjust(frame_size, false);
+            }
+            let parameters = function.blocks[0].parameters.clone();
+            let types: Vec<Type> = parameters
+                .iter()
+                .map(|value| function.type_of(*value))
+                .collect();
+            let (places, _) = classify(&types);
+            for ((parameter, ty), place) in parameters.iter().zip(&types).zip(&places) {
+                match place {
+                    Place::Integer(index) => self.store(&format!("x{index}"), *parameter),
+                    Place::Float(index) => self.store_float(*index, *parameter, *ty),
+                    Place::Stack(index) => {
+                        self.memory(true, "", A, "x29", 16 + 8 * *index as i64, 8);
+                        self.store(A, *parameter);
+                    }
+                }
+            }
+            let frame = Frame {
+                function: id,
+                slots,
+            };
+            for (index, block) in function.blocks.iter().enumerate() {
+                self.label(&Emitter::block_label(id, index));
+                for inst in &block.instructions {
+                    let instruction = &function.instructions[inst.index()];
+                    self.emit_instruction(&frame, function, inst.index(), instruction)?;
+                }
+                self.emit_terminator(&frame, function, &block.terminator)?;
+            }
+            self.label(&format!(".LF{}R", id.0));
+            self.line("mov sp, x29");
+            self.line("ldp x29, x30, [sp], #16");
+            self.line("ret");
+            self.label(&format!(".LF{}O", id.0));
+            self.line("mov x0, xzr");
+            self.line("mov sp, x29");
+            self.line("ldp x29, x30, [sp], #16");
+            self.line("ret");
+            self.line(&format!(".size {symbol}, .-{symbol}"));
+            Ok(())
+        }
+
+        fn stack_adjust(&mut self, amount: i64, grow: bool) {
+            let mnemonic = if grow { "add" } else { "sub" };
+            if amount < 4096 {
+                self.line(&format!("{mnemonic} sp, sp, #{amount}"));
+            } else {
+                self.constant(amount as u64, "x16");
+                self.line(&format!("{mnemonic} sp, sp, x16"));
+            }
+        }
+
+        fn edge(&mut self, frame: &Frame, function: &Function, call: &BlockCall, prefix: bool) {
+            let parameters = &function.blocks[call.block.index()].parameters;
+            let mut incoming = 0;
+            if prefix {
+                self.line(&format!("str {A}, [sp, #-16]!"));
+                incoming += 1;
+            }
+            for argument in &call.arguments {
+                self.load(*argument, A);
+                self.line(&format!("str {A}, [sp, #-16]!"));
+                incoming += 1;
+            }
+            for parameter in parameters.iter().take(incoming).rev() {
+                self.line(&format!("ldr {A}, [sp], #16"));
+                self.store(A, *parameter);
+            }
+            for _ in parameters.len()..incoming {
+                self.line("add sp, sp, #16");
+            }
+            let target = Emitter::block_label(frame.function, call.block.index());
+            self.line(&format!("b {target}"));
+        }
+
+        fn may_throw(&self, instruction: &Instruction) -> bool {
+            match &instruction.operation {
+                Operation::Call(callee) => !self.module.functions[callee.index()].is_declaration(),
+                Operation::CallIndirect(_) => true,
+                _ => false,
+            }
+        }
+
+        fn emit_call(
+            &mut self,
+            function: &Function,
+            instruction: &Instruction,
+        ) -> Result<(), Diagnostic> {
+            let (arguments, _signature, target): (&[Value], Signature, Option<FunctionId>) =
+                match &instruction.operation {
+                    Operation::Call(callee) => (
+                        &instruction.arguments,
+                        self.module.functions[callee.index()].signature.clone(),
+                        Some(*callee),
+                    ),
+                    Operation::CallIndirect(signature) => {
+                        (&instruction.arguments[1..], signature.clone(), None)
+                    }
+                    _ => return Ok(()),
+                };
+            if let Some(callee) = target {
+                let name = self.module.functions[callee.index()].name.as_str();
+                if self.module.functions[callee.index()].is_declaration() {
+                    match name {
+                        shared::INTRINSIC_SYSCALL => {
+                            for (at, argument) in arguments.iter().take(7).enumerate() {
+                                let register = if at == 0 {
+                                    "x8".to_string()
+                                } else {
+                                    format!("x{}", at - 1)
+                                };
+                                self.load(*argument, &register);
+                            }
+                            self.line("svc #0");
+                            self.store_result("x0", instruction.result);
+                            return Ok(());
+                        }
+                        shared::INTRINSIC_ADDRESS | shared::INTRINSIC_REFERENCE => {
+                            self.load(arguments[0], A);
+                            self.store_result(A, instruction.result);
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let types: Vec<Type> = arguments
+                .iter()
+                .map(|value| function.type_of(*value))
+                .collect();
+            let (places, _) = classify(&types);
+            for (argument, place) in arguments.iter().zip(&places) {
+                if let Place::Stack(index) = place {
+                    self.load(*argument, A);
+                    self.memory(false, "", A, "sp", 8 * *index as i64, 8);
+                }
+            }
+            if target.is_none() {
+                self.load(instruction.arguments[0], "x17");
+            }
+            for ((argument, place), ty) in arguments.iter().zip(&places).zip(&types) {
+                match place {
+                    Place::Integer(index) => self.load(*argument, &format!("x{index}")),
+                    Place::Float(index) => self.load_float(*argument, *ty, *index),
+                    Place::Stack(_) => {}
+                }
+            }
+            match target {
+                Some(callee) => {
+                    let symbol = shared::function_symbol(self.module, callee);
+                    self.line(&format!("bl {symbol}"));
+                }
+                None => self.line("blr x17"),
+            }
+            if let Some(result) = instruction.result {
+                let ty = function.type_of(result);
+                if shared::is_float(ty) {
+                    self.store_float(0, result, ty);
+                } else {
+                    self.mask("x0", shared::type_bits(ty));
+                    self.store("x0", result);
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_terminator(
+            &mut self,
+            frame: &Frame,
+            function: &Function,
+            terminator: &Terminator,
+        ) -> Result<(), Diagnostic> {
+            match terminator {
+                Terminator::Jump(call) => self.edge(frame, function, call, false),
+                Terminator::Branch {
+                    condition,
+                    taken,
+                    otherwise,
+                } => {
+                    let label = self.fresh();
+                    self.load(*condition, A);
+                    self.line(&format!("cbnz {A}, {label}"));
+                    self.edge(frame, function, otherwise, false);
+                    self.label(&label);
+                    self.edge(frame, function, taken, false);
+                }
+                Terminator::Switch {
+                    value,
+                    cases,
+                    default,
+                } => {
+                    let bits = shared::type_bits(function.type_of(*value));
+                    self.load(*value, A);
+                    let mut targets = Vec::new();
+                    for (case, _) in cases {
+                        let label = self.fresh();
+                        self.constant((*case as u64) & shared::all_ones(bits), B);
+                        self.line(&format!("cmp {A}, {B}"));
+                        self.line(&format!("b.eq {label}"));
+                        targets.push(label);
+                    }
+                    self.edge(frame, function, default, false);
+                    for ((_, call), label) in cases.iter().zip(targets) {
+                        self.label(&label);
+                        self.edge(frame, function, call, false);
+                    }
+                }
+                Terminator::Return(value) => {
+                    if let Some(value) = value {
+                        let ty = function.type_of(*value);
+                        if shared::is_float(ty) {
+                            self.load_float(*value, ty, 0);
+                        } else {
+                            self.load(*value, "x0");
+                        }
+                    }
+                    self.line(&format!("b .LF{}R", frame.function.0));
+                }
+                Terminator::Unreachable => self.trap(TRAP_UNREACHABLE),
+                Terminator::Throw(value) => {
+                    self.load(*value, A);
+                    self.trap_unless_nonzero(A, TRAP_NULL_REFERENCE);
+                    self.pending(false, A);
+                    self.line(&format!("b .LF{}O", frame.function.0));
+                }
+                Terminator::Invoke {
+                    call,
+                    normal,
+                    unwind,
+                } => {
+                    self.emit_call(function, call)?;
+                    if self.may_throw(call) {
+                        let caught = self.fresh();
+                        self.pending(true, A);
+                        self.line(&format!("cbnz {A}, {caught}"));
+                        self.edge(frame, function, normal, false);
+                        self.label(&caught);
+                        self.pending(false, "xzr");
+                        self.edge(frame, function, unwind, true);
+                    } else {
+                        self.edge(frame, function, normal, false);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_instruction(
+            &mut self,
+            frame: &Frame,
+            function: &Function,
+            index: usize,
+            instruction: &Instruction,
+        ) -> Result<(), Diagnostic> {
+            let arguments = &instruction.arguments;
+            let result = instruction.result;
+            let result_type = result.map(|value| function.type_of(value));
+            let argument_type = |at: usize| function.type_of(arguments[at]);
+            match &instruction.operation {
+                Operation::IntegerConstant(value) => {
+                    let bits = shared::type_bits(result_type.unwrap_or(Type::I64));
+                    self.constant((*value as u64) & shared::all_ones(bits), A);
+                    self.store_result(A, result);
+                }
+                Operation::FloatConstant(bits) => {
+                    let ty = result_type.unwrap_or(Type::F64);
+                    let raw = if shared::single(ty) {
+                        bits & 0xffff_ffff
+                    } else {
+                        *bits
+                    };
+                    self.constant(raw, A);
+                    self.store_result(A, result);
+                }
+                Operation::Null | Operation::Poison => {
+                    self.line(&format!("mov {A}, xzr"));
+                    self.store_result(A, result);
+                }
+                Operation::GlobalAddress(id) => {
+                    let symbol = shared::global_symbol(self.module, id.index());
+                    self.global_address(&symbol, A);
+                    self.store_result(A, result);
+                }
+                Operation::FunctionAddress(id) => {
+                    let symbol = shared::function_symbol(self.module, *id);
+                    self.global_address(&symbol, A);
+                    self.store_result(A, result);
+                }
+                Operation::StringConstant(index) => {
+                    self.global_address(&format!("__omni_s{index}"), A);
+                    self.store_result(A, result);
+                }
+                Operation::Binary(op) => {
+                    let ty = argument_type(0);
+                    if op.is_float() {
+                        self.float_binary(*op, ty, arguments[0], arguments[1], result);
+                    } else {
+                        self.integer_binary(
+                            *op,
+                            shared::type_bits(ty),
+                            arguments[0],
+                            arguments[1],
+                            result,
+                        );
+                    }
+                }
+                Operation::Unary(op) => {
+                    let ty = argument_type(0);
+                    if op.is_float() {
+                        self.float_unary(*op, ty, arguments[0], result);
+                    } else {
+                        self.integer_unary(*op, shared::type_bits(ty), arguments[0], result);
+                    }
+                }
+                Operation::Compare(comparison) => {
+                    let bits = shared::type_bits(argument_type(0));
+                    let signed = matches!(
+                        comparison,
+                        Comparison::LessSigned
+                            | Comparison::LessEqualSigned
+                            | Comparison::GreaterSigned
+                            | Comparison::GreaterEqualSigned
+                    );
+                    if signed {
+                        self.load_signed(arguments[0], A, bits);
+                        self.load_signed(arguments[1], B, bits);
+                    } else {
+                        self.load(arguments[0], A);
+                        self.load(arguments[1], B);
+                    }
+                    let condition = match comparison {
+                        Comparison::Equal => "eq",
+                        Comparison::NotEqual => "ne",
+                        Comparison::LessSigned => "lt",
+                        Comparison::LessEqualSigned => "le",
+                        Comparison::GreaterSigned => "gt",
+                        Comparison::GreaterEqualSigned => "ge",
+                        Comparison::LessUnsigned => "lo",
+                        Comparison::LessEqualUnsigned => "ls",
+                        Comparison::GreaterUnsigned => "hi",
+                        Comparison::GreaterEqualUnsigned => "hs",
+                    };
+                    self.line(&format!("cmp {A}, {B}"));
+                    self.line(&format!("cset w9, {condition}"));
+                    self.store_result(A, result);
+                }
+                Operation::FloatCompare(comparison) => {
+                    self.float_compare(*comparison, argument_type(0), arguments, result);
+                }
+                Operation::Convert(conversion) => {
+                    let to = result_type.unwrap_or(Type::I64);
+                    self.convert(*conversion, arguments[0], argument_type(0), to, result);
+                }
+                Operation::Select => {
+                    self.load(arguments[0], C);
+                    self.load(arguments[1], A);
+                    self.load(arguments[2], B);
+                    self.line(&format!("cmp {C}, #0"));
+                    self.line(&format!("csel {A}, {A}, {B}, ne"));
+                    self.store_result(A, result);
+                }
+                Operation::Splat | Operation::ExtractLane(_) | Operation::InsertLane(_) => {
+                    return Err(shared::unsupported("vector lanes"));
+                }
+                Operation::StackSlot { .. } => {
+                    let at = frame.slots.get(&index).copied().unwrap_or(0);
+                    self.adjust(A, "x29", at);
+                    self.store_result(A, result);
+                }
+                Operation::Load { .. } => {
+                    let ty = result_type.unwrap_or(Type::I64);
+                    self.load(arguments[0], B);
+                    self.memory_load(ty, B, 0, A);
+                    self.store_result(A, result);
+                }
+                Operation::Store { .. } => {
+                    let ty = argument_type(0);
+                    self.load(arguments[0], A);
+                    self.load(arguments[1], B);
+                    self.memory_store(ty, A, B, 0);
+                }
+                Operation::Offset => {
+                    let bits = shared::type_bits(argument_type(1));
+                    self.load(arguments[0], A);
+                    self.load_signed(arguments[1], B, bits);
+                    self.line(&format!("add {A}, {A}, {B}"));
+                    self.store_result(A, result);
+                }
+                Operation::FieldAddress(structure, field) => {
+                    let (offsets, _, _) = self
+                        .layout
+                        .struct_layout(&self.module.structs[structure.index()]);
+                    let offset = offsets.get(*field as usize).copied().unwrap_or(0);
+                    self.load(arguments[0], A);
+                    self.adjust(A, A, i64::from(offset));
+                    self.store_result(A, result);
+                }
+                Operation::ElementAddress(ty) => {
+                    let bits = shared::type_bits(argument_type(1));
+                    let size = self.layout.size_of(*ty);
+                    self.load(arguments[0], A);
+                    self.load_signed(arguments[1], B, bits);
+                    self.constant(u64::from(size), C);
+                    self.line(&format!("madd {A}, {B}, {C}, {A}"));
+                    self.store_result(A, result);
+                }
+                Operation::AtomicUpdate(op, _) => {
+                    let ty = argument_type(1);
+                    let bits = shared::type_bits(ty);
+                    self.load(arguments[0], D);
+                    self.memory_load(ty, D, 0, A);
+                    let signed = matches!(op, AtomicOp::MinimumSigned | AtomicOp::MaximumSigned);
+                    if signed {
+                        self.load_signed(arguments[1], B, bits);
+                        self.line(&format!("mov {C}, {A}"));
+                        self.sign_extend_register(C, bits);
+                    } else {
+                        self.load(arguments[1], B);
+                        self.line(&format!("mov {C}, {A}"));
+                    }
+                    match op {
+                        AtomicOp::Exchange => self.line(&format!("mov {C}, {B}")),
+                        AtomicOp::Add => self.line(&format!("add {C}, {C}, {B}")),
+                        AtomicOp::Subtract => self.line(&format!("sub {C}, {C}, {B}")),
+                        AtomicOp::And => self.line(&format!("and {C}, {C}, {B}")),
+                        AtomicOp::Nand => {
+                            self.line(&format!("and {C}, {C}, {B}"));
+                            self.line(&format!("mvn {C}, {C}"));
+                        }
+                        AtomicOp::Or => self.line(&format!("orr {C}, {C}, {B}")),
+                        AtomicOp::Xor => self.line(&format!("eor {C}, {C}, {B}")),
+                        AtomicOp::MinimumSigned => {
+                            self.line(&format!("cmp {C}, {B}"));
+                            self.line(&format!("csel {C}, {C}, {B}, lt"));
+                        }
+                        AtomicOp::MaximumSigned => {
+                            self.line(&format!("cmp {C}, {B}"));
+                            self.line(&format!("csel {C}, {C}, {B}, gt"));
+                        }
+                        AtomicOp::MinimumUnsigned => {
+                            self.line(&format!("cmp {C}, {B}"));
+                            self.line(&format!("csel {C}, {C}, {B}, lo"));
+                        }
+                        AtomicOp::MaximumUnsigned => {
+                            self.line(&format!("cmp {C}, {B}"));
+                            self.line(&format!("csel {C}, {C}, {B}, hi"));
+                        }
+                    }
+                    self.memory_store(ty, C, D, 0);
+                    self.store_result(A, result);
+                }
+                Operation::CompareExchange(..) => {
+                    let ty = argument_type(1);
+                    let skip = self.fresh();
+                    self.load(arguments[0], D);
+                    self.load(arguments[1], B);
+                    self.load(arguments[2], C);
+                    self.memory_load(ty, D, 0, A);
+                    self.line(&format!("cmp {A}, {B}"));
+                    self.line(&format!("b.ne {skip}"));
+                    self.memory_store(ty, C, D, 0);
+                    self.label(&skip);
+                    self.store_result(A, result);
+                }
+                Operation::Fence(_) => self.line("dmb ish"),
+                Operation::MemoryCopy => {
+                    let skip = self.fresh();
+                    let fine = self.fresh();
+                    let again = self.fresh();
+                    self.load(arguments[0], D);
+                    self.load(arguments[1], E);
+                    self.load(arguments[2], B);
+                    self.line(&format!("cbz {B}, {skip}"));
+                    self.line(&format!("add {A}, {E}, {B}"));
+                    self.line(&format!("cmp {D}, {A}"));
+                    self.line(&format!("b.hs {fine}"));
+                    self.line(&format!("add {A}, {D}, {B}"));
+                    self.line(&format!("cmp {E}, {A}"));
+                    self.line(&format!("b.hs {fine}"));
+                    self.trap(TRAP_OVERLAPPING_COPY);
+                    self.label(&fine);
+                    self.label(&again);
+                    self.line(&format!("ldrb w9, [{E}], #1"));
+                    self.line(&format!("strb w9, [{D}], #1"));
+                    self.line(&format!("subs {B}, {B}, #1"));
+                    self.line(&format!("b.ne {again}"));
+                    self.label(&skip);
+                }
+                Operation::MemoryMove => {
+                    let forward = self.fresh();
+                    let done = self.fresh();
+                    let up = self.fresh();
+                    let down = self.fresh();
+                    self.load(arguments[0], D);
+                    self.load(arguments[1], E);
+                    self.load(arguments[2], B);
+                    self.line(&format!("cbz {B}, {done}"));
+                    self.line(&format!("cmp {D}, {E}"));
+                    self.line(&format!("b.ls {forward}"));
+                    self.line(&format!("add {A}, {E}, {B}"));
+                    self.line(&format!("cmp {D}, {A}"));
+                    self.line(&format!("b.hs {forward}"));
+                    self.line(&format!("add {E}, {E}, {B}"));
+                    self.line(&format!("add {D}, {D}, {B}"));
+                    self.label(&down);
+                    self.line(&format!("ldrb w9, [{E}, #-1]!"));
+                    self.line(&format!("strb w9, [{D}, #-1]!"));
+                    self.line(&format!("subs {B}, {B}, #1"));
+                    self.line(&format!("b.ne {down}"));
+                    self.line(&format!("b {done}"));
+                    self.label(&forward);
+                    self.label(&up);
+                    self.line(&format!("ldrb w9, [{E}], #1"));
+                    self.line(&format!("strb w9, [{D}], #1"));
+                    self.line(&format!("subs {B}, {B}, #1"));
+                    self.line(&format!("b.ne {up}"));
+                    self.label(&done);
+                }
+                Operation::MemoryFill => {
+                    let done = self.fresh();
+                    let again = self.fresh();
+                    self.load(arguments[0], D);
+                    self.load(arguments[1], A);
+                    self.load(arguments[2], B);
+                    self.line(&format!("cbz {B}, {done}"));
+                    self.label(&again);
+                    self.line(&format!("strb w9, [{D}], #1"));
+                    self.line(&format!("subs {B}, {B}, #1"));
+                    self.line(&format!("b.ne {again}"));
+                    self.label(&done);
+                }
+                Operation::Call(_) | Operation::CallIndirect(_) => {
+                    self.emit_call(function, instruction)?;
+                    if self.may_throw(instruction) {
+                        self.pending(true, "x16");
+                        self.line(&format!("cbnz x16, .LF{}O", frame.function.0));
+                    }
+                }
+                Operation::Allocate(class) => {
+                    let (_, size) = self.field_layout(*class);
+                    self.constant(u64::from(size), "x0");
+                    self.global_address(&format!("__omni_c{}", class.0), "x1");
+                    self.line("bl __omni_allocate");
+                    self.store_result("x0", result);
+                }
+                Operation::AllocateArray(class) => {
+                    let element = self.module.classes[class.index()]
+                        .element
+                        .unwrap_or(Type::I8);
+                    let size = self.layout.size_of(element);
+                    let bits = shared::type_bits(argument_type(0));
+                    self.load_signed(arguments[0], "x0", bits);
+                    self.constant(u64::from(size), "x1");
+                    self.global_address(&format!("__omni_c{}", class.0), "x2");
+                    self.line("bl __omni_allocate_array");
+                    self.store_result("x0", result);
+                }
+                Operation::LoadField(class, field) | Operation::StoreField(class, field) => {
+                    let (offsets, _) = self.field_layout(*class);
+                    let offset = i64::from(offsets.get(*field as usize).copied().unwrap_or(0));
+                    let ty = self
+                        .module
+                        .field_types(*class)
+                        .get(*field as usize)
+                        .copied()
+                        .unwrap_or(Type::I64);
+                    self.load(arguments[0], B);
+                    self.trap_unless_nonzero(B, TRAP_NULL_REFERENCE);
+                    if matches!(instruction.operation, Operation::StoreField(..)) {
+                        self.load(arguments[1], A);
+                        self.memory_store(ty, A, B, offset);
+                    } else {
+                        self.memory_load(ty, B, offset, A);
+                        self.store_result(A, result);
+                    }
+                }
+                Operation::LoadElement(ty) | Operation::StoreElement(ty) => {
+                    let bits = shared::type_bits(argument_type(1));
+                    let size = u64::from(self.layout.size_of(*ty));
+                    let fine = self.fresh();
+                    self.load(arguments[0], B);
+                    self.trap_unless_nonzero(B, TRAP_NULL_REFERENCE);
+                    self.load_signed(arguments[1], C, bits);
+                    self.memory(true, "", D, B, i64::from(ARRAY_LENGTH_OFFSET), 8);
+                    self.line(&format!("cmp {C}, {D}"));
+                    self.line(&format!("b.lo {fine}"));
+                    self.trap(TRAP_INDEX_OUT_OF_BOUNDS);
+                    self.label(&fine);
+                    self.constant(size, D);
+                    self.line(&format!("madd {B}, {C}, {D}, {B}"));
+                    let offset = i64::from(ARRAY_HEADER);
+                    if matches!(instruction.operation, Operation::StoreElement(_)) {
+                        self.load(arguments[2], A);
+                        self.memory_store(*ty, A, B, offset);
+                    } else {
+                        self.memory_load(*ty, B, offset, A);
+                        self.store_result(A, result);
+                    }
+                }
+                Operation::ArrayLength => {
+                    let bits = shared::type_bits(result_type.unwrap_or(Type::I32));
+                    self.load(arguments[0], B);
+                    self.trap_unless_nonzero(B, TRAP_NULL_REFERENCE);
+                    self.memory(true, "", A, B, i64::from(ARRAY_LENGTH_OFFSET), 8);
+                    self.mask(A, bits);
+                    self.store_result(A, result);
+                }
+                Operation::InstanceOf(class) => {
+                    let done = self.fresh();
+                    let scan = self.fresh();
+                    let found = self.fresh();
+                    self.load(arguments[0], B);
+                    self.line(&format!("mov {A}, xzr"));
+                    self.line(&format!("cbz {B}, {done}"));
+                    self.constant(u64::from(class.0), F);
+                    self.line(&format!("ldr {C}, [{B}]"));
+                    self.line(&format!("ldr {E}, [{C}, #8]"));
+                    self.line(&format!("ldr {B}, [{C}, #16]"));
+                    self.label(&scan);
+                    self.line(&format!("cbz {B}, {done}"));
+                    self.line(&format!("ldr w12, [{E}]"));
+                    self.line("cmp w12, w14");
+                    self.line(&format!("b.eq {found}"));
+                    self.line(&format!("add {E}, {E}, #4"));
+                    self.line(&format!("sub {B}, {B}, #1"));
+                    self.line(&format!("b {scan}"));
+                    self.label(&found);
+                    self.line("mov w9, #1");
+                    self.label(&done);
+                    self.store_result(A, result);
+                }
+                Operation::VirtualMethod(_, slot) => {
+                    let fine = self.fresh();
+                    let present = self.fresh();
+                    self.load(arguments[0], B);
+                    self.trap_unless_nonzero(B, TRAP_NULL_REFERENCE);
+                    self.line(&format!("ldr {C}, [{B}]"));
+                    self.line(&format!("ldr {D}, [{C}, #32]"));
+                    self.constant(u64::from(*slot), E);
+                    self.line(&format!("cmp {D}, {E}"));
+                    self.line(&format!("b.hi {fine}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&fine);
+                    self.line(&format!("ldr {C}, [{C}, #24]"));
+                    self.memory(true, "", A, C, 8 * i64::from(*slot), 8);
+                    self.line(&format!("cbnz {A}, {present}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&present);
+                    self.store_result(A, result);
+                }
+                Operation::InterfaceMethod(class, slot) => {
+                    let scan = self.fresh();
+                    let found = self.fresh();
+                    let fine = self.fresh();
+                    let present = self.fresh();
+                    let next = self.fresh();
+                    self.load(arguments[0], B);
+                    self.trap_unless_nonzero(B, TRAP_NULL_REFERENCE);
+                    self.constant(u64::from(class.0), D);
+                    self.line(&format!("ldr {C}, [{B}]"));
+                    self.line(&format!("ldr {E}, [{C}, #40]"));
+                    self.line(&format!("ldr {F}, [{C}, #48]"));
+                    self.label(&scan);
+                    self.line(&format!("cbnz {F}, {found}"));
+                    self.trap(TRAP_MISSING_IMPLEMENTATION);
+                    self.label(&found);
+                    self.line(&format!("ldr x15, [{E}]"));
+                    self.line(&format!("cmp x15, {D}"));
+                    self.line(&format!("b.eq {next}"));
+                    self.line(&format!("add {E}, {E}, #24"));
+                    self.line(&format!("sub {F}, {F}, #1"));
+                    self.line(&format!("b {scan}"));
+                    self.label(&next);
+                    self.line(&format!("ldr x15, [{E}, #16]"));
+                    self.constant(u64::from(*slot), D);
+                    self.line(&format!("cmp x15, {D}"));
+                    self.line(&format!("b.hi {fine}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&fine);
+                    self.line(&format!("ldr {C}, [{E}, #8]"));
+                    self.memory(true, "", A, C, 8 * i64::from(*slot), 8);
+                    self.line(&format!("cbnz {A}, {present}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&present);
+                    self.store_result(A, result);
+                }
+                Operation::SameObject => {
+                    self.load(arguments[0], A);
+                    self.load(arguments[1], B);
+                    self.line(&format!("cmp {A}, {B}"));
+                    self.line("cset w9, eq");
+                    self.store_result(A, result);
+                }
+                Operation::Trap(code) => {
+                    self.constant(TRAP_EXPLICIT as u64, "x0");
+                    self.constant(*code as u64, "x1");
+                    self.line("bl __omni_trap");
+                }
+            }
+            Ok(())
+        }
+
+        fn integer_binary(
+            &mut self,
+            op: BinaryOp,
+            bits: u32,
+            left: Value,
+            right: Value,
+            result: Option<Value>,
+        ) {
+            let wide = bits >= 64;
+            let highest = if wide {
+                i64::MAX
+            } else {
+                (1i64 << (bits.max(1) - 1)) - 1
+            };
+            let lowest = if wide { i64::MIN } else { -highest - 1 };
+            match op {
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    let mnemonic = match op {
+                        BinaryOp::Add => "add",
+                        BinaryOp::Subtract => "sub",
+                        BinaryOp::Multiply => "mul",
+                        BinaryOp::And => "and",
+                        BinaryOp::Or => "orr",
+                        _ => "eor",
+                    };
+                    self.line(&format!("{mnemonic} {A}, {A}, {B}"));
+                    self.mask(A, bits);
+                }
+                BinaryOp::DivideSigned | BinaryOp::RemainderSigned => {
+                    self.load_signed(left, A, bits);
+                    self.load_signed(right, B, bits);
+                    self.trap_unless_nonzero(B, TRAP_DIVISION_BY_ZERO);
+                    if op == BinaryOp::DivideSigned {
+                        self.line(&format!("sdiv {A}, {A}, {B}"));
+                    } else {
+                        self.line(&format!("sdiv {C}, {A}, {B}"));
+                        self.line(&format!("msub {A}, {C}, {B}, {A}"));
+                    }
+                    self.mask(A, bits);
+                }
+                BinaryOp::DivideUnsigned | BinaryOp::RemainderUnsigned => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    self.trap_unless_nonzero(B, TRAP_DIVISION_BY_ZERO);
+                    if op == BinaryOp::DivideUnsigned {
+                        self.line(&format!("udiv {A}, {A}, {B}"));
+                    } else {
+                        self.line(&format!("udiv {C}, {A}, {B}"));
+                        self.line(&format!("msub {A}, {C}, {B}, {A}"));
+                    }
+                }
+                BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRightLogical
+                | BinaryOp::ShiftRightArithmetic => {
+                    if op == BinaryOp::ShiftRightArithmetic {
+                        self.load_signed(left, A, bits);
+                    } else {
+                        self.load(left, A);
+                    }
+                    self.load(right, B);
+                    let amount = bits.max(1) - 1;
+                    if amount == 0 {
+                        self.line(&format!("mov {B}, xzr"));
+                    } else {
+                        self.line(&format!("and {B}, {B}, #{amount}"));
+                    }
+                    let mnemonic = match op {
+                        BinaryOp::ShiftLeft => "lsl",
+                        BinaryOp::ShiftRightLogical => "lsr",
+                        _ => "asr",
+                    };
+                    self.line(&format!("{mnemonic} {A}, {A}, {B}"));
+                    self.mask(A, bits);
+                }
+                BinaryOp::RotateLeft | BinaryOp::RotateRight => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    let left_turn = op == BinaryOp::RotateLeft;
+                    if bits >= 32 {
+                        let (a, b) = if bits == 64 {
+                            (A.to_string(), B.to_string())
+                        } else {
+                            (narrow(A), narrow(B))
+                        };
+                        if left_turn {
+                            self.line(&format!("neg {b}, {b}"));
+                        }
+                        self.line(&format!("ror {a}, {a}, {b}"));
+                    } else if bits >= 8 {
+                        self.line(&format!("and {B}, {B}, #{}", bits - 1));
+                        self.constant(u64::from(bits), D);
+                        self.line(&format!("sub {D}, {D}, {B}"));
+                        let (first, second) = if left_turn {
+                            ("lsl", "lsr")
+                        } else {
+                            ("lsr", "lsl")
+                        };
+                        self.line(&format!("{first} {C}, {A}, {B}"));
+                        self.line(&format!("{second} {A}, {A}, {D}"));
+                        self.line(&format!("orr {A}, {A}, {C}"));
+                        self.mask(A, bits);
+                    }
+                }
+                BinaryOp::MinimumSigned | BinaryOp::MaximumSigned => {
+                    self.load_signed(left, A, bits);
+                    self.load_signed(right, B, bits);
+                    self.line(&format!("cmp {A}, {B}"));
+                    let condition = if op == BinaryOp::MinimumSigned {
+                        "lt"
+                    } else {
+                        "gt"
+                    };
+                    self.line(&format!("csel {A}, {A}, {B}, {condition}"));
+                    self.mask(A, bits);
+                }
+                BinaryOp::MinimumUnsigned | BinaryOp::MaximumUnsigned => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    self.line(&format!("cmp {A}, {B}"));
+                    let condition = if op == BinaryOp::MinimumUnsigned {
+                        "lo"
+                    } else {
+                        "hi"
+                    };
+                    self.line(&format!("csel {A}, {A}, {B}, {condition}"));
+                }
+                BinaryOp::AddSaturatingSigned | BinaryOp::SubtractSaturatingSigned => {
+                    let adding = op == BinaryOp::AddSaturatingSigned;
+                    let mnemonic = if adding { "adds" } else { "subs" };
+                    self.load_signed(left, A, bits);
+                    self.load_signed(right, B, bits);
+                    if wide {
+                        let done = self.fresh();
+                        self.line(&format!("{mnemonic} {A}, {A}, {B}"));
+                        self.line(&format!("b.vc {done}"));
+                        self.constant(i64::MAX as u64, A);
+                        self.line(&format!("cmp {B}, #0"));
+                        self.line(&format!("b.{} {done}", if adding { "pl" } else { "mi" }));
+                        self.constant(i64::MIN as u64, A);
+                        self.label(&done);
+                    } else {
+                        self.line(&format!("{} {A}, {A}, {B}", &mnemonic[..3]));
+                        self.constant(highest as u64, B);
+                        self.line(&format!("cmp {A}, {B}"));
+                        self.line(&format!("csel {A}, {B}, {A}, gt"));
+                        self.constant(lowest as u64, B);
+                        self.line(&format!("cmp {A}, {B}"));
+                        self.line(&format!("csel {A}, {B}, {A}, lt"));
+                        self.mask(A, bits);
+                    }
+                }
+                BinaryOp::AddSaturatingUnsigned => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    if wide {
+                        self.line(&format!("adds {A}, {A}, {B}"));
+                        self.line(&format!("csinv {A}, {A}, xzr, lo"));
+                    } else {
+                        self.line(&format!("add {A}, {A}, {B}"));
+                        self.constant(shared::all_ones(bits), B);
+                        self.line(&format!("cmp {A}, {B}"));
+                        self.line(&format!("csel {A}, {B}, {A}, hi"));
+                    }
+                }
+                BinaryOp::SubtractSaturatingUnsigned => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    self.line(&format!("subs {A}, {A}, {B}"));
+                    self.line(&format!("csel {A}, {A}, xzr, hs"));
+                }
+                BinaryOp::AddOverflowsSigned
+                | BinaryOp::SubtractOverflowsSigned
+                | BinaryOp::MultiplyOverflowsSigned => {
+                    self.load_signed(left, A, bits);
+                    self.load_signed(right, B, bits);
+                    let multiply = op == BinaryOp::MultiplyOverflowsSigned;
+                    if wide && multiply {
+                        self.line(&format!("mul {C}, {A}, {B}"));
+                        self.line(&format!("smulh {D}, {A}, {B}"));
+                        self.line(&format!("cmp {D}, {C}, asr #63"));
+                        self.line("cset w9, ne");
+                    } else if wide {
+                        let mnemonic = if op == BinaryOp::AddOverflowsSigned {
+                            "adds"
+                        } else {
+                            "subs"
+                        };
+                        self.line(&format!("{mnemonic} {A}, {A}, {B}"));
+                        self.line("cset w9, vs");
+                    } else {
+                        let mnemonic = match op {
+                            BinaryOp::AddOverflowsSigned => "add",
+                            BinaryOp::SubtractOverflowsSigned => "sub",
+                            _ => "mul",
+                        };
+                        self.line(&format!("{mnemonic} {A}, {A}, {B}"));
+                        self.line(&format!("mov {C}, {A}"));
+                        self.sign_extend_register(C, bits);
+                        self.line(&format!("cmp {A}, {C}"));
+                        self.line("cset w9, ne");
+                    }
+                }
+                BinaryOp::AddOverflowsUnsigned | BinaryOp::MultiplyOverflowsUnsigned => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    let adding = op == BinaryOp::AddOverflowsUnsigned;
+                    if wide {
+                        if adding {
+                            self.line(&format!("adds {A}, {A}, {B}"));
+                            self.line("cset w9, hs");
+                        } else {
+                            self.line(&format!("umulh {A}, {A}, {B}"));
+                            self.line(&format!("cmp {A}, #0"));
+                            self.line("cset w9, ne");
+                        }
+                    } else {
+                        if adding {
+                            self.line(&format!("add {A}, {A}, {B}"));
+                        } else {
+                            self.line(&format!("mul {A}, {A}, {B}"));
+                        }
+                        self.line(&format!("lsr {A}, {A}, #{bits}"));
+                        self.line(&format!("cmp {A}, #0"));
+                        self.line("cset w9, ne");
+                    }
+                }
+                BinaryOp::SubtractOverflowsUnsigned => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    self.line(&format!("cmp {A}, {B}"));
+                    self.line("cset w9, lo");
+                }
+                BinaryOp::MultiplyHighSigned | BinaryOp::MultiplyHighUnsigned => {
+                    let signed = op == BinaryOp::MultiplyHighSigned;
+                    if signed {
+                        self.load_signed(left, A, bits);
+                        self.load_signed(right, B, bits);
+                    } else {
+                        self.load(left, A);
+                        self.load(right, B);
+                    }
+                    if wide {
+                        let mnemonic = if signed { "smulh" } else { "umulh" };
+                        self.line(&format!("{mnemonic} {A}, {A}, {B}"));
+                    } else {
+                        self.line(&format!("mul {A}, {A}, {B}"));
+                        self.line(&format!(
+                            "{} {A}, {A}, #{bits}",
+                            if signed { "asr" } else { "lsr" }
+                        ));
+                        self.mask(A, bits);
+                    }
+                }
+                _ => {}
+            }
+            self.store_result(A, result);
+        }
+
+        fn integer_unary(&mut self, op: UnaryOp, bits: u32, value: Value, result: Option<Value>) {
+            match op {
+                UnaryOp::Negate => {
+                    self.load(value, A);
+                    self.line(&format!("neg {A}, {A}"));
+                    self.mask(A, bits);
+                }
+                UnaryOp::Not => {
+                    self.load(value, A);
+                    self.line(&format!("mvn {A}, {A}"));
+                    self.mask(A, bits);
+                }
+                UnaryOp::PopulationCount => {
+                    self.load(value, A);
+                    self.line(&format!("fmov d16, {A}"));
+                    self.line("cnt v16.8b, v16.8b");
+                    self.line("addv b16, v16.8b");
+                    self.line("fmov w9, s16");
+                }
+                UnaryOp::LeadingZeros => {
+                    self.load(value, A);
+                    self.line(&format!("clz {A}, {A}"));
+                    if bits < 64 {
+                        self.line(&format!("sub {A}, {A}, #{}", 64 - bits));
+                    }
+                }
+                UnaryOp::TrailingZeros => {
+                    self.load(value, A);
+                    self.line(&format!("rbit {A}, {A}"));
+                    self.line(&format!("clz {A}, {A}"));
+                    if bits < 64 {
+                        self.constant(u64::from(bits), B);
+                        self.line(&format!("cmp {A}, {B}"));
+                        self.line(&format!("csel {A}, {A}, {B}, lo"));
+                    }
+                }
+                UnaryOp::ByteSwap => {
+                    self.load(value, A);
+                    match bits {
+                        16 => self.line("rev16 w9, w9"),
+                        32 => self.line("rev w9, w9"),
+                        64 => self.line("rev x9, x9"),
+                        _ => {}
+                    }
+                }
+                UnaryOp::BitReverse => {
+                    self.load(value, A);
+                    self.line(&format!("rbit {A}, {A}"));
+                    if bits < 64 {
+                        self.line(&format!("lsr {A}, {A}, #{}", 64 - bits));
+                    }
+                }
+                UnaryOp::AbsoluteSigned => {
+                    self.load_signed(value, A, bits);
+                    self.line(&format!("cmp {A}, #0"));
+                    self.line(&format!("cneg {A}, {A}, lt"));
+                    self.mask(A, bits);
+                }
+                _ => self.load(value, A),
+            }
+            self.store_result(A, result);
+        }
+
+        fn float_binary(
+            &mut self,
+            op: BinaryOp,
+            ty: Type,
+            left: Value,
+            right: Value,
+            result: Option<Value>,
+        ) {
+            let Some(result) = result else {
+                return;
+            };
+            let first = float_register(ty, 16);
+            let second = float_register(ty, 17);
+            match op {
+                BinaryOp::FloatAdd
+                | BinaryOp::FloatSubtract
+                | BinaryOp::FloatMultiply
+                | BinaryOp::FloatDivide => {
+                    self.load_float(left, ty, 16);
+                    self.load_float(right, ty, 17);
+                    let mnemonic = match op {
+                        BinaryOp::FloatAdd => "fadd",
+                        BinaryOp::FloatSubtract => "fsub",
+                        BinaryOp::FloatMultiply => "fmul",
+                        _ => "fdiv",
+                    };
+                    self.line(&format!("{mnemonic} {first}, {first}, {second}"));
+                    self.canonical_nan(16, ty);
+                    self.store_float(16, result, ty);
+                }
+                BinaryOp::FloatRemainder => self.float_remainder(ty, left, right, result),
+                BinaryOp::FloatMinimum
+                | BinaryOp::FloatMaximum
+                | BinaryOp::FloatMinimumNumber
+                | BinaryOp::FloatMaximumNumber => {
+                    let lower = matches!(op, BinaryOp::FloatMinimum | BinaryOp::FloatMinimumNumber);
+                    let number = matches!(
+                        op,
+                        BinaryOp::FloatMinimumNumber | BinaryOp::FloatMaximumNumber
+                    );
+                    let mnemonic = if lower { "fmin" } else { "fmax" };
+                    self.load_float(left, ty, 16);
+                    self.load_float(right, ty, 17);
+                    if number {
+                        let take_right = self.fresh();
+                        let done = self.fresh();
+                        self.line(&format!("fcmp {first}, {first}"));
+                        self.line(&format!("b.vs {take_right}"));
+                        self.line(&format!("fcmp {second}, {second}"));
+                        self.line(&format!("b.vs {done}"));
+                        self.line(&format!("{mnemonic} {first}, {first}, {second}"));
+                        self.line(&format!("b {done}"));
+                        self.label(&take_right);
+                        self.line(&format!("fmov {first}, {second}"));
+                        self.label(&done);
+                    } else {
+                        self.line(&format!("{mnemonic} {first}, {first}, {second}"));
+                    }
+                    self.canonical_nan(16, ty);
+                    self.store_float(16, result, ty);
+                }
+                BinaryOp::CopySign => {
+                    self.load(left, A);
+                    self.load(right, B);
+                    if shared::single(ty) {
+                        self.line("and w9, w9, #0x7fffffff");
+                        self.line("and w10, w10, #0x80000000");
+                        self.line("orr w9, w9, w10");
+                    } else {
+                        self.line("and x9, x9, #0x7fffffffffffffff");
+                        self.line("and x10, x10, #0x8000000000000000");
+                        self.line("orr x9, x9, x10");
+                    }
+                    self.store(A, result);
+                }
+                _ => {}
+            }
+        }
+
+        fn float_remainder(&mut self, ty: Type, left: Value, right: Value, result: Value) {
+            let nan = self.fresh();
+            let keep = self.fresh();
+            let fin = self.fresh();
+            let grow = self.fresh();
+            let shrink = self.fresh();
+            let skip = self.fresh();
+            self.load_float(left, ty, 16);
+            self.load_float(right, ty, 17);
+            if shared::single(ty) {
+                self.line("fcvt d16, s16");
+                self.line("fcvt d17, s17");
+            }
+            self.line("fabs d18, d16");
+            self.line("fabs d19, d17");
+            self.line("fcmp d18, d18");
+            self.line(&format!("b.vs {nan}"));
+            self.line("fcmp d19, d19");
+            self.line(&format!("b.vs {nan}"));
+            self.line("fcmp d19, #0.0");
+            self.line(&format!("b.eq {nan}"));
+            self.line("movz x16, #0x7ff0, lsl #48");
+            self.line("fmov d20, x16");
+            self.line("fcmp d18, d20");
+            self.line(&format!("b.eq {nan}"));
+            self.line("fcmp d18, d19");
+            self.line(&format!("b.lo {keep}"));
+            self.line("fmov d21, d19");
+            self.label(&grow);
+            self.line("fadd d22, d21, d21");
+            self.line("fcmp d22, d18");
+            self.line(&format!("b.hi {shrink}"));
+            self.line("fmov d21, d22");
+            self.line(&format!("b {grow}"));
+            self.label(&shrink);
+            self.line("fcmp d18, d21");
+            self.line(&format!("b.lo {skip}"));
+            self.line("fsub d18, d18, d21");
+            self.label(&skip);
+            self.line("fcmp d21, d19");
+            self.line(&format!("b.eq {fin}"));
+            self.line("fmov d22, #0.5");
+            self.line("fmul d21, d21, d22");
+            self.line(&format!("b {shrink}"));
+            self.label(&fin);
+            self.line("fmov x9, d18");
+            self.line("fmov x10, d16");
+            self.line("and x10, x10, #0x8000000000000000");
+            self.line("orr x9, x9, x10");
+            self.line("fmov d16, x9");
+            self.line(&format!("b {keep}"));
+            self.label(&nan);
+            self.nan_into(Type::F64, 16);
+            self.label(&keep);
+            if shared::single(ty) {
+                self.line("fcvt s16, d16");
+            }
+            self.store_float(16, result, ty);
+        }
+
+        fn float_unary(&mut self, op: UnaryOp, ty: Type, value: Value, result: Option<Value>) {
+            let Some(result) = result else {
+                return;
+            };
+            let register = float_register(ty, 16);
+            match op {
+                UnaryOp::FloatNegate | UnaryOp::FloatAbsolute => {
+                    self.load(value, A);
+                    let negate = op == UnaryOp::FloatNegate;
+                    let line = match (shared::single(ty), negate) {
+                        (true, true) => "eor w9, w9, #0x80000000",
+                        (true, false) => "and w9, w9, #0x7fffffff",
+                        (false, true) => "eor x9, x9, #0x8000000000000000",
+                        (false, false) => "and x9, x9, #0x7fffffffffffffff",
+                    };
+                    self.line(line);
+                    self.store(A, result);
+                }
+                UnaryOp::SquareRoot
+                | UnaryOp::Floor
+                | UnaryOp::Ceiling
+                | UnaryOp::TruncateFloat
+                | UnaryOp::RoundNearestEven => {
+                    let mnemonic = match op {
+                        UnaryOp::SquareRoot => "fsqrt",
+                        UnaryOp::Floor => "frintm",
+                        UnaryOp::Ceiling => "frintp",
+                        UnaryOp::TruncateFloat => "frintz",
+                        _ => "frintn",
+                    };
+                    self.load_float(value, ty, 16);
+                    self.line(&format!("{mnemonic} {register}, {register}"));
+                    self.canonical_nan(16, ty);
+                    self.store_float(16, result, ty);
+                }
+                _ => {
+                    self.load(value, A);
+                    self.store(A, result);
+                }
+            }
+        }
+
+        fn float_compare(
+            &mut self,
+            comparison: FloatComparison,
+            ty: Type,
+            arguments: &[Value],
+            result: Option<Value>,
+        ) {
+            self.load_float(arguments[0], ty, 16);
+            self.load_float(arguments[1], ty, 17);
+            let first = float_register(ty, 16);
+            let second = float_register(ty, 17);
+            self.line(&format!("fcmp {first}, {second}"));
+            let pair = |this: &mut Self, one: &str, two: &str| {
+                this.line(&format!("cset w9, {one}"));
+                this.line(&format!("cset w10, {two}"));
+                this.line("orr w9, w9, w10");
+            };
+            match comparison {
+                FloatComparison::OrderedNotEqual => pair(self, "mi", "gt"),
+                FloatComparison::UnorderedEqual => pair(self, "eq", "vs"),
+                other => {
+                    let condition = match other {
+                        FloatComparison::OrderedEqual => "eq",
+                        FloatComparison::UnorderedNotEqual => "ne",
+                        FloatComparison::OrderedLess => "mi",
+                        FloatComparison::OrderedLessEqual => "ls",
+                        FloatComparison::OrderedGreater => "gt",
+                        FloatComparison::OrderedGreaterEqual => "ge",
+                        FloatComparison::Ordered => "vc",
+                        FloatComparison::Unordered => "vs",
+                        FloatComparison::UnorderedLess => "lt",
+                        FloatComparison::UnorderedLessEqual => "le",
+                        FloatComparison::UnorderedGreater => "hi",
+                        _ => "pl",
+                    };
+                    self.line(&format!("cset w9, {condition}"));
+                }
+            }
+            self.store_result(A, result);
+        }
+
+        fn convert(
+            &mut self,
+            conversion: Conversion,
+            value: Value,
+            from: Type,
+            to: Type,
+            result: Option<Value>,
+        ) {
+            let Some(result) = result else {
+                return;
+            };
+            let from_bits = shared::type_bits(from);
+            let to_bits = shared::type_bits(to);
+            match conversion {
+                Conversion::ZeroExtend | Conversion::IntegerToPointer => {
+                    self.load(value, A);
+                    self.store(A, result);
+                }
+                Conversion::SignExtend => {
+                    self.load_signed(value, A, from_bits);
+                    self.mask(A, to_bits);
+                    self.store(A, result);
+                }
+                Conversion::Truncate | Conversion::PointerToInteger => {
+                    self.load(value, A);
+                    self.mask(A, to_bits);
+                    self.store(A, result);
+                }
+                Conversion::Bitcast => {
+                    let size = self.layout.size_of(from).min(self.layout.size_of(to));
+                    self.load(value, A);
+                    self.mask(
+                        A,
+                        match size {
+                            1 => 8,
+                            2 => 16,
+                            4 => 32,
+                            _ => 64,
+                        },
+                    );
+                    self.store(A, result);
+                }
+                Conversion::FloatExtend | Conversion::FloatTruncate => {
+                    if from == to {
+                        self.load(value, A);
+                        self.store(A, result);
+                        return;
+                    }
+                    self.load_float(value, from, 16);
+                    let source = float_register(from, 16);
+                    let target = float_register(to, 16);
+                    self.line(&format!("fcvt {target}, {source}"));
+                    self.canonical_nan(16, to);
+                    self.store_float(16, result, to);
+                }
+                Conversion::SignedToFloat | Conversion::UnsignedToFloat => {
+                    let signed = conversion == Conversion::SignedToFloat;
+                    if signed {
+                        self.load_signed(value, A, from_bits);
+                    } else {
+                        self.load(value, A);
+                    }
+                    let target = float_register(to, 16);
+                    let mnemonic = if signed { "scvtf" } else { "ucvtf" };
+                    self.line(&format!("{mnemonic} {target}, {A}"));
+                    self.store_float(16, result, to);
+                }
+                Conversion::FloatToSigned
+                | Conversion::FloatToUnsigned
+                | Conversion::FloatToSignedSaturating
+                | Conversion::FloatToUnsignedSaturating => {
+                    let signed = matches!(
+                        conversion,
+                        Conversion::FloatToSigned | Conversion::FloatToSignedSaturating
+                    );
+                    let saturating = matches!(
+                        conversion,
+                        Conversion::FloatToSignedSaturating | Conversion::FloatToUnsignedSaturating
+                    );
+                    let bits = to_bits;
+                    let mnemonic = if signed { "fcvtzs" } else { "fcvtzu" };
+                    self.load_float(value, from, 16);
+                    if shared::single(from) {
+                        self.line("fcvt d16, s16");
+                    }
+                    if saturating {
+                        self.line(&format!("{mnemonic} {A}, d16"));
+                        if bits < 64 {
+                            if signed {
+                                self.constant(shared::all_ones(bits - 1), B);
+                                self.line(&format!("cmp {A}, {B}"));
+                                self.line(&format!("csel {A}, {B}, {A}, gt"));
+                                self.constant((-(1i64 << (bits - 1))) as u64, B);
+                                self.line(&format!("cmp {A}, {B}"));
+                                self.line(&format!("csel {A}, {B}, {A}, lt"));
+                            } else {
+                                self.constant(shared::all_ones(bits), B);
+                                self.line(&format!("cmp {A}, {B}"));
+                                self.line(&format!("csel {A}, {B}, {A}, hi"));
+                            }
+                        }
+                        self.mask(A, bits);
+                    } else {
+                        let (lowest, limit) = if signed {
+                            (-(2f64.powi(bits as i32 - 1)), 2f64.powi(bits as i32 - 1))
+                        } else {
+                            (0.0, 2f64.powi(bits as i32))
+                        };
+                        let bad = self.fresh();
+                        let done = self.fresh();
+                        self.line("fcmp d16, d16");
+                        self.line(&format!("b.vs {bad}"));
+                        self.line("frintz d17, d16");
+                        self.constant(lowest.to_bits(), "x16");
+                        self.line("fmov d18, x16");
+                        self.line("fcmp d17, d18");
+                        self.line(&format!("b.mi {bad}"));
+                        self.constant(limit.to_bits(), "x16");
+                        self.line("fmov d18, x16");
+                        self.line("fcmp d17, d18");
+                        self.line(&format!("b.ge {bad}"));
+                        self.line(&format!("{mnemonic} {A}, d17"));
+                        self.mask(A, bits);
+                        self.line(&format!("b {done}"));
+                        self.label(&bad);
+                        self.trap(TRAP_CONVERSION_RANGE);
+                        self.label(&done);
+                    }
+                    self.store(A, result);
+                }
+            }
+        }
+    }
+
+    pub fn emit_assembly(module: &Module) -> Result<String, Diagnostic> {
+        let mut emitter = Arm {
+            base: Emitter {
+                module,
+                layout: module.layout.data(),
+                out: String::new(),
+                labels: 0,
+                fields: BTreeMap::new(),
+            },
+        };
+        emitter.emit_module()?;
+        Ok(emitter.base.out)
+    }
+
+    pub fn start_assembly(entry: &str) -> String {
+        format!(
+            "\t.text\n\t.globl _start\n\t.type _start, @function\n_start:\n\tmov x29, xzr\n\tmov x30, xzr\n\tmov x9, sp\n\tand x9, x9, #0xfffffffffffffff0\n\tmov sp, x9\n\tbl {entry}\n\tadrp x16, __omni_pending\n\tldr x16, [x16, :lo12:__omni_pending]\n\tcbz x16, .Lstart_exit\n\tbl __omni_uncaught\n.Lstart_exit:\n\tmov x8, #94\n\tsvc #0\n\tbrk #0\n"
+        )
+    }
+
+    pub fn assemble(text: &str) -> Result<Vec<u8>, Diagnostic> {
+        shared::assemble_for(TRIPLE, text)
+    }
+
+    pub fn runtime_text() -> String {
+        let mut text = shared::RUNTIME.to_string();
+        for (from, to) in [(231, 94), (228, 113), (9, 222), (1, 64)] {
+            let old = format!("%number: i64 = const {from}\n");
+            let new = format!("%number: i64 = const {to}\n");
+            text = text.replace(&old, &new);
+        }
+        text
+    }
+
+    pub fn runtime_module() -> Result<Module, Diagnostic> {
+        Module::from_text(&runtime_text())
+    }
+
+    pub fn build_executable(module: &Module, entry: &str) -> Result<Vec<u8>, Diagnostic> {
+        let provided = shared::runtime_names();
+        let defined: BTreeSet<&str> = module
+            .functions
+            .iter()
+            .filter(|function| !function.is_declaration())
+            .map(|function| function.name.as_str())
+            .collect();
+        let mut stubs = String::new();
+        for (index, function) in module.functions.iter().enumerate() {
+            if function.is_declaration()
+                && !provided.contains(&function.name)
+                && !defined.contains(function.name.as_str())
+            {
+                let symbol = shared::function_symbol(module, FunctionId(index as u32));
+                stubs.push_str(&format!(
+                    "\t.text\n\t.globl {symbol}\n{symbol}:\n\tadrp x0, .Lmissing{index}\n\tadd x0, x0, :lo12:.Lmissing{index}\n\tmov x1, #{}\n\tbl __omni_missing\n\t.section .rodata\n.Lmissing{index}:\n",
+                    function.name.len()
+                ));
+                for chunk in function.name.as_bytes().chunks(16) {
+                    let listed: Vec<String> = chunk.iter().map(|byte| byte.to_string()).collect();
+                    stubs.push_str(&format!("\t.byte {}\n", listed.join(", ")));
+                }
+            }
+        }
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
+        shared::link_program(user, support, start)
+    }
+}

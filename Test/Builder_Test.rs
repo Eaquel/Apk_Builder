@@ -72523,9 +72523,47 @@ mod native_x86_64 {
         Some((status.and_then(|status| status.code()), said, complained))
     }
 
+    fn arm_program_decodes(module: &Module, entry: &str, name: &str) {
+        let program = crate::compilers::x86_64::armv8::native::build_executable(module, entry)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        assert_eq!(&program[..4], b"\x7fELF");
+        assert_eq!(
+            &program[18..20],
+            &183u16.to_le_bytes(),
+            "an AArch64 program"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "apk_builder_arm_{name}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, &program).expect("the program is written");
+        let listing = std::process::Command::new("llvm-objdump-18")
+            .arg("-d")
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(listing) = listing else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            listing.status.success(),
+            "the host disassembler reads the program"
+        );
+        assert!(
+            !text.contains("<unknown>") && !text.contains(".inst"),
+            "the host disassembler decodes every instruction: {}",
+            text.lines()
+                .find(|line| line.contains("<unknown>") || line.contains(".inst"))
+                .unwrap_or("")
+        );
+    }
+
     fn agree(text: &str, entry: &str, name: &str) {
         let module = Module::from_text(text).expect("the program reads");
         module.verify().expect("the program keeps every rule");
+        arm_program_decodes(&module, entry, name);
         let expected = interpreted(&module, entry);
         let program = codegen::build_executable(&module, entry)
             .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));

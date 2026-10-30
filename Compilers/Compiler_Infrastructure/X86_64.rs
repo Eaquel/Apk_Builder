@@ -30709,9 +30709,9 @@ pub mod codegen {
     pub const ARRAY_LENGTH_OFFSET: u32 = 16;
     pub const ARRAY_HEADER: u32 = 24;
 
-    const INTRINSIC_SYSCALL: &str = "omni.machine.syscall";
-    const INTRINSIC_ADDRESS: &str = "omni.machine.address";
-    const INTRINSIC_REFERENCE: &str = "omni.machine.reference";
+    pub(super) const INTRINSIC_SYSCALL: &str = "omni.machine.syscall";
+    pub(super) const INTRINSIC_ADDRESS: &str = "omni.machine.address";
+    pub(super) const INTRINSIC_REFERENCE: &str = "omni.machine.reference";
 
     pub fn unsupported(feature: &str) -> Diagnostic {
         fail(
@@ -30721,7 +30721,7 @@ pub mod codegen {
         .with_context(format!("Feature: {feature}"))
     }
 
-    fn assembly_failed(text: &str) -> Diagnostic {
+    pub(super) fn assembly_failed(text: &str) -> Diagnostic {
         fail(
             "EI501",
             "The generated machine code could not be assembled.",
@@ -30729,7 +30729,7 @@ pub mod codegen {
         .with_context(format!("Cause: {text}"))
     }
 
-    fn link_failed(text: &str) -> Diagnostic {
+    pub(super) fn link_failed(text: &str) -> Diagnostic {
         fail("EI502", "The generated program could not be linked.")
             .with_context(format!("Cause: {text}"))
     }
@@ -30759,7 +30759,7 @@ pub mod codegen {
         }
     }
 
-    fn global_symbol(module: &Module, index: usize) -> String {
+    pub(super) fn global_symbol(module: &Module, index: usize) -> String {
         let global = &module.globals[index];
         if global.linkage != Linkage::Internal && plain_name(&global.name) {
             global.name.clone()
@@ -30775,15 +30775,15 @@ pub mod codegen {
         }
     }
 
-    fn type_bits(ty: Type) -> u32 {
+    pub(super) fn type_bits(ty: Type) -> u32 {
         ty.element().bits()
     }
 
-    fn is_float(ty: Type) -> bool {
+    pub(super) fn is_float(ty: Type) -> bool {
         ty.is_scalar_float()
     }
 
-    fn single(ty: Type) -> bool {
+    pub(super) fn single(ty: Type) -> bool {
         ty == Type::F32
     }
 
@@ -30828,7 +30828,7 @@ pub mod codegen {
         }
     }
 
-    fn all_ones(bits: u32) -> u64 {
+    pub(super) fn all_ones(bits: u32) -> u64 {
         if bits >= 64 {
             u64::MAX
         } else {
@@ -30930,7 +30930,7 @@ pub mod codegen {
         (offsets, offset.div_ceil(8) * 8)
     }
 
-    fn check_supported(module: &Module) -> Result<(), Diagnostic> {
+    pub(super) fn check_supported(module: &Module) -> Result<(), Diagnostic> {
         for global in &module.globals {
             if global.thread_local {
                 return Err(unsupported("thread-local globals"));
@@ -30965,12 +30965,12 @@ pub mod codegen {
         Ok(())
     }
 
-    struct Emitter<'m> {
-        module: &'m Module,
-        layout: DataLayout,
-        out: String,
-        labels: usize,
-        fields: BTreeMap<u32, (Vec<u32>, u32)>,
+    pub(super) struct Emitter<'m> {
+        pub(super) module: &'m Module,
+        pub(super) layout: DataLayout,
+        pub(super) out: String,
+        pub(super) labels: usize,
+        pub(super) fields: BTreeMap<u32, (Vec<u32>, u32)>,
     }
 
     struct Frame {
@@ -30979,18 +30979,18 @@ pub mod codegen {
     }
 
     impl<'m> Emitter<'m> {
-        fn line(&mut self, text: &str) {
+        pub(super) fn line(&mut self, text: &str) {
             self.out.push('\t');
             self.out.push_str(text);
             self.out.push('\n');
         }
 
-        fn label(&mut self, name: &str) {
+        pub(super) fn label(&mut self, name: &str) {
             self.out.push_str(name);
             self.out.push_str(":\n");
         }
 
-        fn fresh(&mut self) -> String {
+        pub(super) fn fresh(&mut self) -> String {
             self.labels += 1;
             format!(".LT{}", self.labels)
         }
@@ -31148,7 +31148,7 @@ pub mod codegen {
             }
         }
 
-        fn field_layout(&mut self, class: ClassId) -> (Vec<u32>, u32) {
+        pub(super) fn field_layout(&mut self, class: ClassId) -> (Vec<u32>, u32) {
             if let Some(found) = self.fields.get(&class.0) {
                 return found.clone();
             }
@@ -31175,7 +31175,7 @@ pub mod codegen {
             Ok(())
         }
 
-        fn emit_globals(&mut self) {
+        pub(super) fn emit_globals(&mut self) {
             for index in 0..self.module.globals.len() {
                 let global = &self.module.globals[index];
                 if global.linkage == Linkage::Import {
@@ -31240,14 +31240,14 @@ pub mod codegen {
             }
         }
 
-        fn emit_bytes(&mut self, bytes: &[u8]) {
+        pub(super) fn emit_bytes(&mut self, bytes: &[u8]) {
             for chunk in bytes.chunks(16) {
                 let listed: Vec<String> = chunk.iter().map(|byte| byte.to_string()).collect();
                 self.line(&format!(".byte {}", listed.join(", ")));
             }
         }
 
-        fn emit_strings(&mut self) {
+        pub(super) fn emit_strings(&mut self) {
             if self.module.strings.is_empty() {
                 return;
             }
@@ -31264,7 +31264,7 @@ pub mod codegen {
             }
         }
 
-        fn emit_classes(&mut self) {
+        pub(super) fn emit_classes(&mut self) {
             if self.module.classes.is_empty() {
                 return;
             }
@@ -31319,7 +31319,7 @@ pub mod codegen {
             }
         }
 
-        fn block_label(function: FunctionId, block: usize) -> String {
+        pub(super) fn block_label(function: FunctionId, block: usize) -> String {
             format!(".LF{}B{block}", function.0)
         }
 
@@ -32802,7 +32802,11 @@ pub mod codegen {
     }
 
     pub fn assemble(text: &str) -> Result<Vec<u8>, Diagnostic> {
-        let mut options = AssemblerOptions::new("x86_64-unknown-linux-gnu");
+        assemble_for("x86_64-unknown-linux-gnu", text)
+    }
+
+    pub(super) fn assemble_for(triple: &str, text: &str) -> Result<Vec<u8>, Diagnostic> {
+        let mut options = AssemblerOptions::new(triple);
         options.output = OutputKind::Object;
         let result = assemble_source(&options, text.as_bytes(), None)?;
         if let Some(message) = result
@@ -32875,6 +32879,14 @@ pub mod codegen {
         let user = assemble(&emit_assembly(module)?)?;
         let support = assemble(&emit_assembly(&runtime)?)?;
         let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
+        link_program(user, support, start)
+    }
+
+    pub(super) fn link_program(
+        user: Vec<u8>,
+        support: Vec<u8>,
+        start: Vec<u8>,
+    ) -> Result<Vec<u8>, Diagnostic> {
         let objects = [
             ("program.o", user),
             ("runtime.o", support),
