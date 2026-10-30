@@ -307,6 +307,7 @@ pub struct OperandGroup {
     pub count: usize,
     pub output: bool,
     pub tied_to: Option<usize>,
+    pub sub_names: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -1001,8 +1002,17 @@ impl Target {
         let mut definitions = 0;
         for (field, output) in [("OutOperandList", true), ("InOperandList", false)] {
             for (argument, name) in dag_arguments(record.field(field)) {
-                let TableValue::Record(operand) = argument else {
-                    continue;
+                let mut sub_names = Vec::new();
+                let operand = match &argument {
+                    TableValue::Record(operand) => operand.clone(),
+                    TableValue::Dag { arguments, .. } if self.isa == Isa::Armv8 => {
+                        sub_names = arguments
+                            .iter()
+                            .map(|(_, label)| label.clone().unwrap_or_default())
+                            .collect();
+                        dag_operator(&argument)
+                    }
+                    _ => continue,
                 };
                 if operand == "variable_ops" {
                     continue;
@@ -1033,6 +1043,7 @@ impl Target {
                     count,
                     output,
                     tied_to: None,
+                    sub_names,
                 });
             }
         }
@@ -1541,6 +1552,7 @@ pub enum FixupKind {
     GlobalOffsetTable,
     Branch4PcRelative,
     Literal(u32),
+    Arm(armv8::ArmFixup),
 }
 
 impl FixupKind {
@@ -1575,6 +1587,7 @@ impl FixupKind {
             FixupKind::GlobalOffsetTable => "reloc_global_offset_table".to_string(),
             FixupKind::Branch4PcRelative => "reloc_branch_4byte_pcrel".to_string(),
             FixupKind::Literal(number) => format!("fixup_{number}"),
+            FixupKind::Arm(kind) => kind.name().to_string(),
         }
     }
 }

@@ -73094,6 +73094,118 @@ mod armv8_assembly {
         }
     }
 
+    fn encode_word(record: &str, operands: &[&str]) -> u32 {
+        use crate::compilers::x86_64::MachineOperand;
+        let target = armv8::target().expect("the target loads");
+        let built: Vec<MachineOperand> = operands
+            .iter()
+            .map(|text| match text.parse::<i64>() {
+                Ok(value) => MachineOperand::Immediate(value),
+                Err(_) => armv8::register(target, text).expect("the register exists"),
+            })
+            .collect();
+        let instruction = armv8::instruction(target, record, built).expect("the record exists");
+        let encoded = armv8::encode(target, &instruction).expect("the instruction encodes");
+        assert!(encoded.fixups.is_empty());
+        u32::from_le_bytes(encoded.bytes.try_into().expect("four bytes"))
+    }
+
+    #[test]
+    fn the_armv8_encoder_writes_the_words_llvm_writes() {
+        assert_eq!(encode_word("ADDXri", &["x0", "x1", "1", "0"]), 0x9100_0420);
+        assert_eq!(encode_word("ADDXri", &["x0", "x1", "1", "12"]), 0x9140_0420);
+        assert_eq!(encode_word("ADDWrs", &["w0", "w1", "w2", "3"]), 0x0b02_0c20);
+        assert_eq!(
+            encode_word("ADDXrx", &["x0", "sp", "w1", "18"]),
+            0x8b21_4be0
+        );
+        assert_eq!(encode_word("RET", &["x30"]), 0xd65f_03c0);
+        assert_eq!(encode_word("MOVZXi", &["x0", "1", "0"]), 0xd280_0020);
+        assert_eq!(encode_word("MOVZXi", &["x0", "1", "16"]), 0xd2a0_0020);
+        assert_eq!(encode_word("LDRXui", &["x0", "x1", "1"]), 0xf940_0420);
+        assert_eq!(encode_word("B", &["2"]), 0x1400_0002);
+        assert_eq!(encode_word("FADDDrr", &["d0", "d1", "d2"]), 0x1e62_2820);
+        assert_eq!(
+            encode_word("SUBSXri", &["xzr", "x0", "0", "0"]),
+            0xf100_001f
+        );
+        assert_eq!(
+            encode_word("LDPXpost", &["sp", "x29", "x30", "sp", "2"]),
+            0xa8c1_7bfd
+        );
+        assert_eq!(
+            encode_word("STRXpre", &["sp", "x30", "sp", "-16"]),
+            0xf81f_0ffe
+        );
+    }
+
+    #[test]
+    fn every_armv8_instruction_has_an_encoding_plan() {
+        let target = armv8::target().expect("the target loads");
+        let missing = armv8::coverage(target);
+        for (record, cause) in missing.iter().take(40) {
+            eprintln!("{record}: {cause}");
+        }
+        assert!(
+            missing.is_empty(),
+            "{} instructions lack a plan",
+            missing.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_instruction_groups() {
+        let target = armv8::target().expect("the target loads");
+        let names = std::env::var("APK_BUILDER_RECORDS").unwrap_or_default();
+        for name in names.split(',').filter(|name| !name.is_empty()) {
+            let Some(index) = target.instruction_by_record.get(name) else {
+                eprintln!("{name}: no such instruction");
+                continue;
+            };
+            let instruction = &target.instructions[*index];
+            eprintln!(
+                "{name}: operands {:?} groups {:?}",
+                instruction.operand_records, instruction.groups
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_operand_methods() {
+        let table = armv8::table().expect("the table reads");
+        let mut seen = std::collections::BTreeMap::new();
+        for record in &table.records {
+            if !(record.is_a("Operand")
+                || record.is_a("RegisterOperand")
+                || record.is_a("RegisterClass"))
+            {
+                continue;
+            }
+            let text = |name: &str| match record.field(name) {
+                Some(TableValue::String(text)) => text.clone(),
+                _ => String::new(),
+            };
+            let key = format!(
+                "enc={} | dec={} | print={}",
+                text("EncoderMethod"),
+                text("DecoderMethod"),
+                text("PrintMethod")
+            );
+            seen.entry(key)
+                .or_insert_with(Vec::new)
+                .push(record.name.clone());
+        }
+        for (key, names) in seen {
+            eprintln!(
+                "{key} | {} | {}",
+                names.len(),
+                names.iter().take(3).cloned().collect::<Vec<_>>().join(",")
+            );
+        }
+    }
+
     #[test]
     #[ignore]
     fn armv8_records_from_environment() {
