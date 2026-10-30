@@ -36,6 +36,12 @@
       "passed": 1375,
       "total": 2056
     },
+    "mc-aarch64": {
+      "failed": 0,
+      "out_of_scope": 2063,
+      "passed": 295,
+      "total": 2358
+    },
     "mc-x86": {
       "failed": 0,
       "out_of_scope": 44,

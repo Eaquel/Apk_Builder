@@ -44,7 +44,7 @@ ORACLE_SUITES = ["regex-oracle", "tablegen-oracle"]
 SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
 KOTLIN_SUITES = ["kotlin-omni", "kotlin-omni-native"]
 LINKER_SUITES = ["lld-elf", "lld-coff"]
-ASSEMBLER_SUITES = ["mc-x86", "mc-x86-disassembler"]
+ASSEMBLER_SUITES = ["mc-x86", "mc-x86-disassembler", "mc-aarch64"]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -990,7 +990,7 @@ def check_linker() -> str:
     return hold_ground(run_suites(LINKER_SUITES, module="linker_lit"))
 
 def check_assembler() -> str:
-    """Our x86 assembler keeps every LLVM MC test it has ever passed."""
+    """Our x86 and AArch64 assemblers keep every LLVM MC test they have ever passed."""
     if shutil.which("cargo") is None:
         raise Skip("cargo is not on this machine")
     if not bundles_present():
@@ -1052,7 +1052,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "determinism": ("the same verdicts on one worker and many", check_determinism),
     "kotlin-omni": ("Kotlin answers the same on Omni IR as on the JVM", check_kotlin_omni),
     "linker": ("our linkers hold their ground on the LLD tests", check_linker),
-    "assembler": ("our x86 assembler holds its ground on the LLVM MC tests", check_assembler),
+    "assembler": ("our x86 and AArch64 assemblers hold their ground on the LLVM MC tests", check_assembler),
 }
 
 DEFAULT = [

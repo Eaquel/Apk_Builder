@@ -1383,6 +1383,9 @@ impl Target {
     }
 
     fn arm_x_from_w(&self, register: RegisterId) -> RegisterId {
+        if self.in_register_class("GPR64all", register) {
+            return register;
+        }
         let record = self.registers[register as usize].record.as_str();
         match record {
             "WZR" => return self.named_register("XZR"),
@@ -1396,6 +1399,9 @@ impl Target {
     }
 
     fn arm_w_from_x(&self, register: RegisterId) -> RegisterId {
+        if self.in_register_class("GPR32all", register) {
+            return register;
+        }
         let record = self.registers[register as usize].record.as_str();
         match record {
             "XZR" => return self.named_register("WZR"),
@@ -1933,7 +1939,23 @@ fn shifter(operand: &ArmOperand) -> Option<ShiftExtendOperand> {
 
 fn extend(operand: &ArmOperand) -> Option<ShiftExtendOperand> {
     match operand {
-        ArmOperand::ShiftExtend(shift) if shift.amount <= 4 => Some(*shift),
+        ArmOperand::ShiftExtend(shift)
+            if shift.amount <= 4
+                && matches!(
+                    shift.kind,
+                    ShiftExtendKind::Uxtb
+                        | ShiftExtendKind::Sxtb
+                        | ShiftExtendKind::Uxth
+                        | ShiftExtendKind::Sxth
+                        | ShiftExtendKind::Uxtw
+                        | ShiftExtendKind::Sxtw
+                        | ShiftExtendKind::Uxtx
+                        | ShiftExtendKind::Sxtx
+                        | ShiftExtendKind::Lsl
+                ) =>
+        {
+            Some(*shift)
+        }
         _ => None,
     }
 }
@@ -2346,6 +2368,7 @@ impl<'s> Assembler<'s> {
 
     fn arm_parse_symbolic_immediate(&mut self) -> Result<Expression, ()> {
         let mut specifier: Option<String> = None;
+        let specifier_location = self.location();
         if self.parse_optional_token(TokenKind::Colon) {
             if !self.is(TokenKind::Identifier) {
                 self.token_error("expect relocation specifier in operand after ':'");
@@ -2369,7 +2392,11 @@ impl<'s> Assembler<'s> {
         match specifier {
             None => Ok(expression),
             Some(specifier) => match self.apply_specifier(&expression, &specifier) {
-                Some(applied) => Ok(applied),
+                Some(applied) => {
+                    self.expression_locations
+                        .push((applied.clone(), Some(specifier_location)));
+                    Ok(applied)
+                }
                 None => {
                     self.token_error("expected relocatable expression");
                     Err(())
@@ -4222,10 +4249,13 @@ impl<'s> Assembler<'s> {
                 _ => diagnostic(held),
             },
             ClassKind::User => {
-                let Some(arm) = arm_of(operand) else {
-                    return ArmStatus::InvalidOperand;
+                let token = ArmOperand::ImmediateRange(u32::MAX, u32::MAX);
+                let (arm, is_token) = match arm_of(operand) {
+                    Some(arm) => (arm, false),
+                    None => (&token, true),
                 };
                 match arm_predicate(self.target, &self.arm_class_predicate(class), arm) {
+                    Diag::Match if is_token => ArmStatus::InvalidOperand,
                     Diag::Match => ArmStatus::Success,
                     Diag::Near => diagnostic(held),
                     Diag::No => ArmStatus::InvalidOperand,
@@ -4298,6 +4328,44 @@ impl<'s> Assembler<'s> {
             return short;
         }
         long
+    }
+
+    fn arm_mnemonic_suggestion(&self, base: &str) -> String {
+        const MAXIMUM_DISTANCE: usize = 2;
+        let matcher = self.matcher;
+        let target = self.target;
+        let mut candidates: Vec<&str> = Vec::new();
+        let mut previous = "";
+        for entry in matcher.matchables.iter().filter(|entry| entry.variant == 0) {
+            let mut predicates = target.instructions[entry.result].predicates.clone();
+            if let Some(alias) = entry.alias {
+                predicates.extend(target.aliases[alias].predicates.clone());
+            }
+            if !predicates_hold(target, &predicates, &self.arm_features) {
+                continue;
+            }
+            let text = entry.mnemonic.as_str();
+            if text == previous {
+                continue;
+            }
+            previous = text;
+            if edit_distance_without_replacements(base, text) <= MAXIMUM_DISTANCE {
+                candidates.push(text);
+            }
+        }
+        match candidates.split_last() {
+            None => String::new(),
+            Some((last, rest)) => {
+                let mut text = ", did you mean: ".to_string();
+                for candidate in rest {
+                    text.push_str(candidate);
+                    text.push_str(", ");
+                }
+                text.push_str(last);
+                text.push('?');
+                text
+            }
+        }
     }
 
     fn arm_match_variant(&self, operands: &[ParsedOperand], variant: usize) -> ArmOutcome {
@@ -4690,6 +4758,43 @@ impl<'s> Assembler<'s> {
         ];
         let location_zero = place(self, 0);
         let location_one = place(self, 1);
+        if matches!(
+            name.as_str(),
+            "ADDSWri"
+                | "ADDSXri"
+                | "ADDWri"
+                | "ADDXri"
+                | "SUBSWri"
+                | "SUBSXri"
+                | "SUBWri"
+                | "SUBXri"
+        ) {
+            if let Some(MachineOperand::Expression(expression)) = instruction.operands.get(2) {
+                if let Some((specifier, _)) = classify_symbol(expression) {
+                    let allowed = specifier.as_deref().is_some_and(|held| {
+                        matches!(
+                            held,
+                            "lo12"
+                                | "got_auth_lo12"
+                                | "dtprel_hi12"
+                                | "dtprel_lo12"
+                                | "dtprel_lo12_nc"
+                                | "tprel_hi12"
+                                | "tprel_lo12"
+                                | "tprel_lo12_nc"
+                                | "tlsdesc_lo12"
+                                | "tlsdesc_auth_lo12"
+                                | "secrel_lo12"
+                                | "secrel_hi12"
+                        )
+                    }) && matches!(name.as_str(), "ADDXri" | "ADDWri");
+                    if !allowed {
+                        let last = place(self, operands.len().saturating_sub(2));
+                        return self.error(last, "invalid immediate expression");
+                    }
+                }
+            }
+        }
         if writeback(&name, &["LDPSW", "LDPW", "LDPX"]) {
             let base = key(self, 3);
             if base == key(self, 1) {
@@ -4897,7 +5002,17 @@ impl<'s> Assembler<'s> {
                 }
                 self.error(location, &text)
             }
-            ArmStatus::MnemonicFail => self.error(location, "unrecognized instruction mnemonic"),
+            ArmStatus::MnemonicFail => {
+                let base = operands
+                    .first()
+                    .map(|operand| operand.token_text().to_string())
+                    .unwrap_or_default();
+                let suggestion = self.arm_mnemonic_suggestion(&base);
+                self.error(
+                    location,
+                    &format!("unrecognized instruction mnemonic{suggestion}"),
+                )
+            }
             ArmStatus::InvalidTied => {
                 let index = outcome.error_index.unwrap_or(0);
                 let at = operands
@@ -4923,7 +5038,12 @@ impl<'s> Assembler<'s> {
             ArmStatus::InvalidOperand | ArmStatus::Diagnostic(_) => {
                 let index = outcome.error_index.unwrap_or(0);
                 if index >= operands.len() {
-                    return self.error(location, "too few operands for instruction");
+                    let end = self.lexer.token.location();
+                    return self.error_range(
+                        location,
+                        "too few operands for instruction",
+                        (location, end),
+                    );
                 }
                 let at = self.statement_location(operands[index].start);
                 let suffix = matches!(&operands[index].kind, ParsedKind::Token(_))
@@ -4997,7 +5117,7 @@ pub fn elf_relocation(
         FixupKind::Data8 => Ok(if pc_relative {
             260
         } else if spec == "dtprel" {
-            1030
+            1029
         } else {
             257
         }),
@@ -5062,6 +5182,15 @@ pub fn elf_relocation(
                 ],
                 "invalid fixup for 16-bit load/store instruction",
             ),
+            ArmFixup::LdStImm12Scale4 if spec == "got_lo12" => {
+                Err("4 byte unchecked GOT load/store relocation is not supported in LP64")
+            }
+            ArmFixup::LdStImm12Scale4 if spec == "gottprel_lo12" => {
+                Err("32-bit load/store relocation is not supported in LP64")
+            }
+            ArmFixup::LdStImm12Scale4 if spec == "tlsdesc_lo12" => {
+                Err("4 byte TLSDESC load/store relocation is not supported in LP64")
+            }
             ArmFixup::LdStImm12Scale4 => by_specifier(
                 &[
                     ("lo12", 285),
@@ -5133,6 +5262,175 @@ pub fn elf_relocation(
         },
         _ => Err("Unsupported fixup kind"),
     }
+}
+
+fn edit_distance_without_replacements(from: &str, to: &str) -> usize {
+    let from: Vec<char> = from.chars().collect();
+    let to: Vec<char> = to.chars().collect();
+    let mut row: Vec<usize> = (0..=to.len()).collect();
+    for (y, left) in from.iter().enumerate() {
+        let mut previous = row[0];
+        row[0] = y + 1;
+        for x in 1..=to.len() {
+            let old = row[x];
+            row[x] = if *left == to[x - 1] {
+                previous
+            } else {
+                row[x - 1].min(row[x]) + 1
+            };
+            previous = old;
+        }
+    }
+    row[to.len()]
+}
+
+pub const RELOCATION_NAMES: &[(&str, u32)] = &[
+    ("R_AARCH64_NONE", 0),
+    ("R_AARCH64_P32_ABS32", 1),
+    ("R_AARCH64_P32_COPY", 180),
+    ("R_AARCH64_P32_GLOB_DAT", 181),
+    ("R_AARCH64_P32_JUMP_SLOT", 182),
+    ("R_AARCH64_P32_RELATIVE", 183),
+    ("R_AARCH64_P32_TLS_DTPMOD", 184),
+    ("R_AARCH64_P32_TLS_DTPREL", 185),
+    ("R_AARCH64_P32_TLS_TPREL", 186),
+    ("R_AARCH64_P32_TLSDESC", 187),
+    ("R_AARCH64_P32_IRELATIVE", 188),
+    ("R_AARCH64_ABS64", 257),
+    ("R_AARCH64_ABS32", 258),
+    ("R_AARCH64_ABS16", 259),
+    ("R_AARCH64_PREL64", 260),
+    ("R_AARCH64_PREL32", 261),
+    ("R_AARCH64_PREL16", 262),
+    ("R_AARCH64_MOVW_UABS_G0", 263),
+    ("R_AARCH64_MOVW_UABS_G0_NC", 264),
+    ("R_AARCH64_MOVW_UABS_G1", 265),
+    ("R_AARCH64_MOVW_UABS_G1_NC", 266),
+    ("R_AARCH64_MOVW_UABS_G2", 267),
+    ("R_AARCH64_MOVW_UABS_G2_NC", 268),
+    ("R_AARCH64_MOVW_UABS_G3", 269),
+    ("R_AARCH64_MOVW_SABS_G0", 270),
+    ("R_AARCH64_MOVW_SABS_G1", 271),
+    ("R_AARCH64_MOVW_SABS_G2", 272),
+    ("R_AARCH64_LD_PREL_LO19", 273),
+    ("R_AARCH64_ADR_PREL_LO21", 274),
+    ("R_AARCH64_ADR_PREL_PG_HI21", 275),
+    ("R_AARCH64_ADR_PREL_PG_HI21_NC", 276),
+    ("R_AARCH64_ADD_ABS_LO12_NC", 277),
+    ("R_AARCH64_LDST8_ABS_LO12_NC", 278),
+    ("R_AARCH64_TSTBR14", 279),
+    ("R_AARCH64_CONDBR19", 280),
+    ("R_AARCH64_JUMP26", 282),
+    ("R_AARCH64_CALL26", 283),
+    ("R_AARCH64_LDST16_ABS_LO12_NC", 284),
+    ("R_AARCH64_LDST32_ABS_LO12_NC", 285),
+    ("R_AARCH64_LDST64_ABS_LO12_NC", 286),
+    ("R_AARCH64_MOVW_PREL_G0", 287),
+    ("R_AARCH64_MOVW_PREL_G0_NC", 288),
+    ("R_AARCH64_MOVW_PREL_G1", 289),
+    ("R_AARCH64_MOVW_PREL_G1_NC", 290),
+    ("R_AARCH64_MOVW_PREL_G2", 291),
+    ("R_AARCH64_MOVW_PREL_G2_NC", 292),
+    ("R_AARCH64_MOVW_PREL_G3", 293),
+    ("R_AARCH64_LDST128_ABS_LO12_NC", 299),
+    ("R_AARCH64_MOVW_GOTOFF_G0", 300),
+    ("R_AARCH64_MOVW_GOTOFF_G0_NC", 301),
+    ("R_AARCH64_MOVW_GOTOFF_G1", 302),
+    ("R_AARCH64_MOVW_GOTOFF_G1_NC", 303),
+    ("R_AARCH64_MOVW_GOTOFF_G2", 304),
+    ("R_AARCH64_MOVW_GOTOFF_G2_NC", 305),
+    ("R_AARCH64_MOVW_GOTOFF_G3", 306),
+    ("R_AARCH64_GOTREL64", 307),
+    ("R_AARCH64_GOTREL32", 308),
+    ("R_AARCH64_GOT_LD_PREL19", 309),
+    ("R_AARCH64_LD64_GOTOFF_LO15", 310),
+    ("R_AARCH64_ADR_GOT_PAGE", 311),
+    ("R_AARCH64_LD64_GOT_LO12_NC", 312),
+    ("R_AARCH64_LD64_GOTPAGE_LO15", 313),
+    ("R_AARCH64_TLSGD_ADR_PREL21", 512),
+    ("R_AARCH64_TLSGD_ADR_PAGE21", 513),
+    ("R_AARCH64_TLSGD_ADD_LO12_NC", 514),
+    ("R_AARCH64_TLSGD_MOVW_G1", 515),
+    ("R_AARCH64_TLSGD_MOVW_G0_NC", 516),
+    ("R_AARCH64_TLSLD_ADR_PREL21", 517),
+    ("R_AARCH64_TLSLD_ADR_PAGE21", 518),
+    ("R_AARCH64_TLSLD_ADD_LO12_NC", 519),
+    ("R_AARCH64_TLSLD_MOVW_G1", 520),
+    ("R_AARCH64_TLSLD_MOVW_G0_NC", 521),
+    ("R_AARCH64_TLSLD_LD_PREL19", 522),
+    ("R_AARCH64_TLSLD_MOVW_DTPREL_G2", 523),
+    ("R_AARCH64_TLSLD_MOVW_DTPREL_G1", 524),
+    ("R_AARCH64_TLSLD_MOVW_DTPREL_G1_NC", 525),
+    ("R_AARCH64_TLSLD_MOVW_DTPREL_G0", 526),
+    ("R_AARCH64_TLSLD_MOVW_DTPREL_G0_NC", 527),
+    ("R_AARCH64_TLSLD_ADD_DTPREL_HI12", 528),
+    ("R_AARCH64_TLSLD_ADD_DTPREL_LO12", 529),
+    ("R_AARCH64_TLSLD_ADD_DTPREL_LO12_NC", 530),
+    ("R_AARCH64_TLSLD_LDST8_DTPREL_LO12", 531),
+    ("R_AARCH64_TLSLD_LDST8_DTPREL_LO12_NC", 532),
+    ("R_AARCH64_TLSLD_LDST16_DTPREL_LO12", 533),
+    ("R_AARCH64_TLSLD_LDST16_DTPREL_LO12_NC", 534),
+    ("R_AARCH64_TLSLD_LDST32_DTPREL_LO12", 535),
+    ("R_AARCH64_TLSLD_LDST32_DTPREL_LO12_NC", 536),
+    ("R_AARCH64_TLSLD_LDST64_DTPREL_LO12", 537),
+    ("R_AARCH64_TLSLD_LDST64_DTPREL_LO12_NC", 538),
+    ("R_AARCH64_TLSIE_MOVW_GOTTPREL_G1", 539),
+    ("R_AARCH64_TLSIE_MOVW_GOTTPREL_G0_NC", 540),
+    ("R_AARCH64_TLSIE_ADR_GOTTPREL_PAGE21", 541),
+    ("R_AARCH64_TLSIE_LD64_GOTTPREL_LO12_NC", 542),
+    ("R_AARCH64_TLSIE_LD_GOTTPREL_PREL19", 543),
+    ("R_AARCH64_TLSLE_MOVW_TPREL_G2", 544),
+    ("R_AARCH64_TLSLE_MOVW_TPREL_G1", 545),
+    ("R_AARCH64_TLSLE_MOVW_TPREL_G1_NC", 546),
+    ("R_AARCH64_TLSLE_MOVW_TPREL_G0", 547),
+    ("R_AARCH64_TLSLE_MOVW_TPREL_G0_NC", 548),
+    ("R_AARCH64_TLSLE_ADD_TPREL_HI12", 549),
+    ("R_AARCH64_TLSLE_ADD_TPREL_LO12", 550),
+    ("R_AARCH64_TLSLE_ADD_TPREL_LO12_NC", 551),
+    ("R_AARCH64_TLSLE_LDST8_TPREL_LO12", 552),
+    ("R_AARCH64_TLSLE_LDST8_TPREL_LO12_NC", 553),
+    ("R_AARCH64_TLSLE_LDST16_TPREL_LO12", 554),
+    ("R_AARCH64_TLSLE_LDST16_TPREL_LO12_NC", 555),
+    ("R_AARCH64_TLSLE_LDST32_TPREL_LO12", 556),
+    ("R_AARCH64_TLSLE_LDST32_TPREL_LO12_NC", 557),
+    ("R_AARCH64_TLSLE_LDST64_TPREL_LO12", 558),
+    ("R_AARCH64_TLSLE_LDST64_TPREL_LO12_NC", 559),
+    ("R_AARCH64_TLSDESC_LD_PREL19", 560),
+    ("R_AARCH64_TLSDESC_ADR_PREL21", 561),
+    ("R_AARCH64_TLSDESC_ADR_PAGE21", 562),
+    ("R_AARCH64_TLSDESC_LD64_LO12", 563),
+    ("R_AARCH64_TLSDESC_ADD_LO12", 564),
+    ("R_AARCH64_TLSDESC_OFF_G1", 565),
+    ("R_AARCH64_TLSDESC_OFF_G0_NC", 566),
+    ("R_AARCH64_TLSDESC_LDR", 567),
+    ("R_AARCH64_TLSDESC_ADD", 568),
+    ("R_AARCH64_TLSDESC_CALL", 569),
+    ("R_AARCH64_TLSLE_LDST128_TPREL_LO12", 570),
+    ("R_AARCH64_TLSLE_LDST128_TPREL_LO12_NC", 571),
+    ("R_AARCH64_TLSLD_LDST128_DTPREL_LO12", 572),
+    ("R_AARCH64_TLSLD_LDST128_DTPREL_LO12_NC", 573),
+    ("R_AARCH64_COPY", 1024),
+    ("R_AARCH64_GLOB_DAT", 1025),
+    ("R_AARCH64_JUMP_SLOT", 1026),
+    ("R_AARCH64_RELATIVE", 1027),
+    ("R_AARCH64_TLS_DTPMOD64", 1028),
+    ("R_AARCH64_TLS_DTPREL64", 1029),
+    ("R_AARCH64_TLS_TPREL64", 1030),
+    ("R_AARCH64_TLSDESC", 1031),
+    ("R_AARCH64_IRELATIVE", 1032),
+    ("R_AARCH64_PLT32", 314),
+    ("R_AARCH64_GOTPCREL32", 315),
+    ("BFD_RELOC_NONE", 0),
+    ("BFD_RELOC_16", 259),
+    ("BFD_RELOC_32", 258),
+    ("BFD_RELOC_64", 257),
+];
+
+pub fn relocation_number(name: &str) -> Option<u32> {
+    RELOCATION_NAMES
+        .iter()
+        .find(|(key, _)| *key == name)
+        .map(|(_, value)| *value)
 }
 
 pub fn fixup_bits(kind: FixupKind) -> (usize, usize) {
@@ -6240,9 +6538,8 @@ fn architecture_feature(target: &Target, name: &str) -> Option<String> {
         if body.contains('-')
             || digits.is_empty()
             || !(tail.is_empty() || tail == "a" || tail == "r")
+            || (tail.is_empty() && digits.contains('.'))
         {
-            lower.clone()
-        } else if tail.is_empty() && digits.contains('.') {
             lower.clone()
         } else {
             format!("armv{digits}-{}", if tail.is_empty() { "a" } else { tail })
@@ -6477,7 +6774,16 @@ impl<'s> Assembler<'s> {
             } else if let Some(register) = self.arm_register_by_name(&text, RegKind::NeonVector) {
                 (RegKind::NeonVector, register)
             } else {
-                return self.token_error("vector register without type specifier expected");
+                let base = text.split('.').next().unwrap_or("");
+                let typed = text.contains('.')
+                    && self
+                        .arm_register_by_name(base, RegKind::NeonVector)
+                        .is_some();
+                return self.token_error(if typed {
+                    "vector register without type specifier expected"
+                } else {
+                    "register name or alias expected"
+                });
             };
         self.lex();
         if self.parse_end_of_line() {

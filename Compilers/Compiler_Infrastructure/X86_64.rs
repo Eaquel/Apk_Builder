@@ -4243,6 +4243,41 @@ fn binary_text(operator: BinaryOperator) -> &'static str {
     }
 }
 
+fn strip_percent_specifier(expression: &Expression, name: &str) -> Option<Expression> {
+    match expression {
+        Expression::Symbol {
+            name: symbol,
+            specifier: Some(held),
+        } if held == name => Some(Expression::Symbol {
+            name: symbol.clone(),
+            specifier: None,
+        }),
+        Expression::Unary { operator, operand } => {
+            strip_percent_specifier(operand, name).map(|operand| Expression::Unary {
+                operator: *operator,
+                operand: Box::new(operand),
+            })
+        }
+        Expression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let new_left = strip_percent_specifier(left, name);
+            let new_right = strip_percent_specifier(right, name);
+            if new_left.is_none() && new_right.is_none() {
+                return None;
+            }
+            Some(Expression::Binary {
+                operator: *operator,
+                left: Box::new(new_left.unwrap_or_else(|| left.as_ref().clone())),
+                right: Box::new(new_right.unwrap_or_else(|| right.as_ref().clone())),
+            })
+        }
+        _ => None,
+    }
+}
+
 pub fn expression_text(
     target: &Target,
     expression: &Expression,
@@ -4250,6 +4285,11 @@ pub fn expression_text(
     syntax: Syntax,
 ) -> String {
     const MAXIMUM_PRECEDENCE: i32 = 9;
+    if target.isa == Isa::Armv8 {
+        if let Some(inner) = strip_percent_specifier(expression, "dtprel") {
+            return format!("%dtprel({})", expression_text(target, &inner, 0, syntax));
+        }
+    }
     match expression {
         Expression::Constant(value) => value.to_string(),
         Expression::Symbol { name, specifier } => {
@@ -9604,6 +9644,7 @@ pub struct Symbol {
     pub weak_reference: bool,
     pub other: u8,
     pub definition: Option<SourceLocation>,
+    pub value_location: Option<SourceLocation>,
     pub version_name: Option<String>,
     pub coff_storage_class: Option<i64>,
     pub coff_type: Option<i64>,
@@ -9632,6 +9673,7 @@ impl Symbol {
             weak_reference: false,
             other: 0,
             definition: None,
+            value_location: None,
             version_name: None,
             coff_storage_class: None,
             coff_type: None,
@@ -10442,6 +10484,7 @@ pub struct AssemblerOptions {
     pub include_directories: Vec<String>,
     pub masm_integers: bool,
     pub markup: bool,
+    pub implicit_mapping_symbols: bool,
 }
 
 impl AssemblerOptions {
@@ -10471,6 +10514,7 @@ impl AssemblerOptions {
             include_directories: Vec::new(),
             masm_integers: false,
             markup: false,
+            implicit_mapping_symbols: false,
         }
     }
 }
@@ -11211,10 +11255,12 @@ impl<'s> Assembler<'s> {
             self.lex();
         }
         if !matches!(expression, Expression::Constant(_)) && !self.arm_keep_symbols {
-            if let Some(value) = self
-                .context
-                .evaluate_absolute(&expression, self.streamer.symbol_layout())
-            {
+            let layout = if self.context.triple.isa == Isa::Armv8 {
+                None
+            } else {
+                self.streamer.symbol_layout()
+            };
+            if let Some(value) = self.context.evaluate_absolute(&expression, layout) {
                 expression = Expression::Constant(value);
             }
         }
@@ -11312,7 +11358,44 @@ impl<'s> Assembler<'s> {
         }
     }
 
+    fn parse_percent_specifier(&mut self) -> Result<(Expression, SourceLocation), ()> {
+        self.lex();
+        if self.check(
+            !self.is(TokenKind::Identifier),
+            "expected '%' relocation specifier",
+        ) {
+            return Err(());
+        }
+        let name = self.lexer.token.text.clone();
+        if name != "dtprel" {
+            self.token_error("invalid relocation specifier");
+            return Err(());
+        }
+        self.lex();
+        if self.parse_token(TokenKind::LeftParenthesis, "expected '('") {
+            return Err(());
+        }
+        let (inner, _) = self.parse_expression()?;
+        let end = self.lexer.token.end_location();
+        if self.parse_token(
+            TokenKind::RightParenthesis,
+            "expected ')' in parentheses expression",
+        ) {
+            return Err(());
+        }
+        match self.apply_specifier(&inner, &name) {
+            Some(applied) => Ok((applied, end)),
+            None => {
+                self.token_error("expected relocatable expression");
+                Err(())
+            }
+        }
+    }
+
     fn parse_primary(&mut self) -> Result<(Expression, SourceLocation), ()> {
+        if self.context.triple.isa == Isa::Armv8 && self.is(TokenKind::Percent) {
+            return self.parse_percent_specifier();
+        }
         if self.is(TokenKind::Percent)
             || (self.dialect == Syntax::Intel
                 && self.is(TokenKind::Identifier)
@@ -11355,6 +11438,10 @@ impl<'s> Assembler<'s> {
                 let Some(identifier) = self.parse_identifier() else {
                     if self.is(TokenKind::Dollar) || self.is(TokenKind::Star) {
                         self.error(first_location, "invalid token in expression");
+                        return Err(());
+                    }
+                    if first_kind == TokenKind::At {
+                        self.token_error("expected a symbol reference");
                         return Err(());
                     }
                     self.token_error("unknown token in expression");
@@ -11783,6 +11870,11 @@ impl<'s> Assembler<'s> {
         let Ok((value, _)) = self.parse_expression() else {
             return self.token_error("missing expression");
         };
+        let value_location = self
+            .expression_locations
+            .last()
+            .filter(|(held, _)| *held == value)
+            .and_then(|(_, at)| *at);
         if self.parse_end_of_line() {
             return true;
         }
@@ -11819,6 +11911,7 @@ impl<'s> Assembler<'s> {
             }
         };
         self.context.symbols[symbol].redefinable = allow_redefinition;
+        self.context.symbols[symbol].value_location = value_location;
         match kind {
             AssignmentKind::Equal | AssignmentKind::Set | AssignmentKind::Equiv => {
                 self.streamer
@@ -13665,10 +13758,17 @@ impl<'s> Assembler<'s> {
         if self.context.section_stack.len() <= 1 {
             return false;
         }
-        self.context.section_stack.pop();
+        let old = self.context.section_stack.pop();
         if let Some((section, subsection)) = self.context.current_section() {
-            self.streamer
-                .switch_section(&mut self.context, section, subsection);
+            let changed = old.and_then(|entry| entry.0) != Some((section, subsection));
+            if changed {
+                self.context
+                    .section_stack
+                    .push((old.and_then(|entry| entry.0), None));
+                self.streamer
+                    .switch_section(&mut self.context, section, subsection);
+                self.context.section_stack.pop();
+            }
         }
         true
     }
@@ -25485,6 +25585,7 @@ pub mod object {
         section_order: Vec<usize>,
         current: Option<(usize, usize)>,
         arm_mapping_state: BTreeMap<usize, bool>,
+        implicit_mapping_symbols: bool,
         arm_attributes: armv8::AttributeSet,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
@@ -25504,6 +25605,7 @@ pub mod object {
         symbol_versions: Vec<SymbolVersion>,
         file_names: Vec<(String, usize)>,
         address_significance: Option<Vec<usize>>,
+        base_symbols: BTreeMap<usize, Option<usize>>,
         seen_gnu_abi: bool,
         seen_identifier: bool,
         unique_bindings: BTreeSet<usize>,
@@ -25671,6 +25773,7 @@ pub mod object {
                 section_order: Vec::new(),
                 current: None,
                 arm_mapping_state: BTreeMap::new(),
+                implicit_mapping_symbols: options.implicit_mapping_symbols,
                 arm_attributes: armv8::AttributeSet::default(),
                 current_fragment: None,
                 symbols_in_order: Vec::new(),
@@ -25690,6 +25793,7 @@ pub mod object {
                 symbol_versions: Vec::new(),
                 file_names: Vec::new(),
                 address_significance: None,
+                base_symbols: BTreeMap::new(),
                 seen_gnu_abi: false,
                 seen_identifier: false,
                 unique_bindings: BTreeSet::new(),
@@ -26132,14 +26236,69 @@ pub mod object {
             let Some(section) = self.current_section() else {
                 return;
             };
-            if self.arm_mapping_state.get(&section) == Some(&instruction) {
+            let last = self
+                .arm_mapping_state
+                .get(&section)
+                .copied()
+                .or_else(|| self.arm_initial_mapping(context, section));
+            if last == Some(instruction) {
                 return;
             }
             self.arm_mapping_state.insert(section, instruction);
+            self.arm_mapping_symbol(context, instruction);
+        }
+
+        fn arm_initial_mapping(&self, context: &AssemblyContext, section: usize) -> Option<bool> {
+            self.implicit_mapping_symbols
+                .then(|| context.sections[section].flags & ELF_FLAG_EXECUTE != 0)
+        }
+
+        fn arm_mapping_symbol(&mut self, context: &mut AssemblyContext, instruction: bool) {
             let name = if instruction { "$x" } else { "$d" };
             let symbol = context.symbols.len();
             context.symbols.push(Symbol::new(name, false));
             self.emit_label(context, symbol, None);
+        }
+
+        fn arm_finish_implicit_mapping(&mut self, context: &mut AssemblyContext) {
+            if !self.implicit_mapping_symbols || self.target.isa != Isa::Armv8 {
+                return;
+            }
+            let existing = self.symbols_in_order.len();
+            let mut insertions: Vec<(usize, usize)> = Vec::new();
+            for section in self.section_order.clone() {
+                let Some(initial) = self.arm_initial_mapping(context, section) else {
+                    continue;
+                };
+                let last = self
+                    .arm_mapping_state
+                    .get(&section)
+                    .copied()
+                    .unwrap_or(initial);
+                if last == initial {
+                    continue;
+                }
+                let after = self.symbols_in_order[..existing]
+                    .iter()
+                    .rposition(|symbol| context.symbols[*symbol].section == Some(section));
+                self.switch_section(context, section, 0);
+                self.arm_mapping_symbol(context, initial);
+                match (after, self.symbols_in_order.pop()) {
+                    (Some(after), Some(created)) => insertions.push((after, created)),
+                    (None, Some(created)) => self.symbols_in_order.push(created),
+                    _ => {}
+                }
+            }
+            insertions.sort_by_key(|right| std::cmp::Reverse(right.0));
+            for (after, created) in &insertions {
+                self.symbols_in_order.insert(after + 1, *created);
+            }
+            for file in &mut self.file_names {
+                file.1 += insertions
+                    .iter()
+                    .filter(|(after, _)| *after < file.1)
+                    .count();
+            }
         }
 
         fn current_section(&self) -> Option<usize> {
@@ -26997,6 +27156,13 @@ pub mod object {
             }
             self.report_pending(context);
             self.post_layout_binding(context);
+            for symbol in 0..context.symbols.len() {
+                let held = &context.symbols[symbol];
+                if held.registered && held.is_variable() && !held.temporary {
+                    let base = self.base_symbol(context, symbol);
+                    self.base_symbols.insert(symbol, base);
+                }
+            }
             self.has_final_layout = true;
             self.apply_relocation_directives(context);
             for section in &order {
@@ -27465,7 +27631,8 @@ pub mod object {
                 resolved = false;
             }
             if target.specifier.is_some()
-                && !(context.triple.isa == Isa::Armv8 && target.is_absolute())
+                && !(context.triple.isa == Isa::Armv8
+                    && (target.is_absolute() || target.specifier.as_deref() == Some("abs")))
             {
                 resolved = false;
             }
@@ -27857,6 +28024,16 @@ pub mod object {
             let _ = value;
             let section = self.fragments[fragment].section;
             let mut add = target.add;
+            if context.triple.isa == Isa::Armv8 {
+                if let (Some(symbol), Some(specifier)) = (add, target.specifier.as_deref()) {
+                    if ["dtprel", "gottprel", "tprel", "tlsdesc"]
+                        .iter()
+                        .any(|prefix| specifier.starts_with(prefix))
+                    {
+                        context.symbols[symbol].symbol_type = Some(SymbolType::ThreadLocal);
+                    }
+                }
+            }
             let mut pc_relative = fixup.fixup.pc_relative;
             let fixup_offset = self.fragments[fragment].offset + fixup.fixup.offset as u64;
             let mut addend = target.constant;
@@ -28302,12 +28479,16 @@ pub mod object {
             let Some(value) = held.value.clone() else {
                 return Some(symbol);
             };
-            let evaluated = context.evaluate_relocatable(&value, Some(self), true)?;
+            let at = held.value_location;
+            let Some(evaluated) = context.evaluate_relocatable(&value, Some(self), true) else {
+                context.report(MessageKind::Error, at, "expression could not be evaluated");
+                return None;
+            };
             if let Some(subtract) = evaluated.subtract {
                 let name = context.symbols[subtract].name.clone();
                 context.report(
                     MessageKind::Error,
-                    None,
+                    at,
                     &format!("symbol '{name}' could not be evaluated in a subtraction expression"),
                 );
                 return None;
@@ -28317,7 +28498,7 @@ pub mod object {
                 let name = context.symbols[add].name.clone();
                 context.report(
                     MessageKind::Error,
-                    None,
+                    at,
                     &format!("Common symbol '{name}' cannot be used in assignment expr"),
                 );
                 return None;
@@ -29120,7 +29301,10 @@ pub mod object {
             section_index: u32,
         ) -> (u32, u8, u8, u64, u64, u32, bool) {
             let held = context.symbols[symbol].clone();
-            let base = self.base_symbol(context, symbol);
+            let base = match self.base_symbols.get(&symbol) {
+                Some(cached) => *cached,
+                None => self.base_symbol(context, symbol),
+            };
             let reserved = base.is_none() || held.common.is_some();
             let binding = self.binding_of(context, symbol);
             let mut kind = self.type_of(context, symbol);
@@ -29749,6 +29933,7 @@ pub mod object {
                 self.switch_section(context, section, 0);
                 self.emit_bytes(context, &attributes);
             }
+            self.arm_finish_implicit_mapping(context);
             self.layout(context);
             if context.had_error {
                 return;
@@ -29911,6 +30096,11 @@ pub mod object {
             context.symbols[alias].value = Some(Expression::symbol(&name));
             context.symbols[alias].weak_reference = true;
             self.weak_references.push(alias);
+        }
+
+        fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
+            self.register_symbol(context, symbol);
+            context.symbols[symbol].other |= 0x80;
         }
 
         fn emit_symbol_attribute(
@@ -30639,7 +30829,11 @@ pub mod object {
             value: Option<&Expression>,
             location: SourceLocation,
         ) {
-            let relocation_type = relocation_number(name, context.triple.is_64_bit());
+            let relocation_type = if context.triple.isa == Isa::Armv8 {
+                armv8::relocation_number(name)
+            } else {
+                relocation_number(name, context.triple.is_64_bit())
+            };
             let Some(relocation_type) = relocation_type else {
                 context.report(
                     MessageKind::Error,
@@ -30696,6 +30890,7 @@ pub mod object {
             );
             let previous = context.current_section();
             self.switch_section(context, comment, 0);
+            self.arm_mapping(context, false);
             if !self.seen_identifier {
                 self.append(&[0]);
                 self.seen_identifier = true;

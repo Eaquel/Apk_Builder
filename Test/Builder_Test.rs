@@ -71722,6 +71722,7 @@ mod x86_assembly {
                     });
                 }
                 "show-encoding" => options.show_encoding = true,
+                "implicit-mapsyms" => options.implicit_mapping_symbols = true,
                 "show-inst-operands" => options.show_instruction_operands = true,
                 "print-imm-hex" => {
                     options.hexadecimal_immediates = value != "false" && value != "0"
@@ -71984,6 +71985,10 @@ mod x86_assembly {
             "llvm-readobj 18 does not name R_AARCH64_FUNCINIT64, whose number is not in the available sources",
         ),
         (
+            "MC/AArch64/arm64-elf-relocs.s",
+            "llvm-objdump 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
             "MC/AArch64/adrp-auth-relocation.s",
             "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
         ),
@@ -72042,6 +72047,22 @@ mod x86_assembly {
         (
             "MC/AArch64/armv9.7-scr2.s",
             "llvm-objdump 18 prints SCR2_EL3 by its encoding",
+        ),
+        (
+            "MC/AArch64/armv8.3a-signed-pointer.s",
+            "llvm-mc 18 prints the blank source lines after the initial .text that the expected output omits",
+        ),
+        (
+            "MC/AArch64/cfi_val_offset.s",
+            "llvm-dwarfdump 18 prints DW_CFA_advance_loc without the target address",
+        ),
+        (
+            "MC/AArch64/cfi_set_ra_state.s",
+            "llvm-dwarfdump 18 does not know DW_CFA_AARCH64_set_ra_state",
+        ),
+        (
+            "MC/AArch64/patchinst.s",
+            "llvm-objdump 18 does not know R_AARCH64_PATCHINST",
         ),
         (
             "MC/AArch64/armv9.7a-mpamv2.s",
