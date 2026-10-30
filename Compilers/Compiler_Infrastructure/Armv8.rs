@@ -1426,11 +1426,11 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
             let (expression, shift) = match operand {
                 ArmOperand::ShiftedImmediate(expression, shift) => (expression, Some(*shift)),
                 ArmOperand::Immediate(expression) => (expression, None),
-                _ => return Diag::No,
+                _ => return Diag::Near,
             };
             if let Some(shift) = shift {
                 if shift != 0 && shift != 12 {
-                    return Diag::No;
+                    return Diag::Near;
                 }
             }
             if let Some((specifier, _)) = classify_symbol(expression) {
@@ -1450,11 +1450,11 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
                 operand,
                 ArmOperand::Immediate(_) | ArmOperand::ShiftedImmediate(..)
             ) {
-                return Diag::No;
+                return Diag::Near;
             }
             match shifted_value(operand, 12) {
                 Some((value, _)) => Diag::of(value < 0 && -value <= 0xfff),
-                None => Diag::No,
+                None => Diag::Near,
             }
         }
         "isUImm6" => Diag::of(
@@ -1510,13 +1510,13 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
         "isLogicalImm" => {
             let bytes = argument_type_bytes(&arguments);
             let Some(value) = operand.constant() else {
-                return Diag::No;
+                return Diag::Near;
             };
             let bits = bytes * 8;
             let upper: u64 = if bits >= 64 { 0 } else { u64::MAX << bits };
             let value = value as u64;
             if value & upper != 0 && value & upper != upper {
-                return Diag::No;
+                return Diag::Near;
             }
             Diag::of(is_logical_immediate(value & !upper, bits as u32))
         }
@@ -1524,13 +1524,13 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
         "isBranchTarget" => {
             let bits = argument_number(&arguments, 0);
             let Some(expression) = operand.immediate() else {
-                return Diag::No;
+                return Diag::Near;
             };
             match expression.constant_value() {
                 None => Diag::Match,
                 Some(value) => {
                     if value & 3 != 0 {
-                        return Diag::No;
+                        return Diag::Near;
                     }
                     Diag::of(
                         value >= -((1i64 << (bits - 1)) << 2)
@@ -1541,7 +1541,7 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
         }
         "isPAuthPCRelLabel16Operand" => {
             let Some(expression) = operand.immediate() else {
-                return Diag::No;
+                return Diag::Near;
             };
             match expression.constant_value() {
                 None => Diag::Match,
@@ -1595,7 +1595,7 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
             let width = argument_number(&arguments, 0) as u32;
             let shift = argument_number(&arguments, 1) as u32;
             let Some(expression) = operand.immediate() else {
-                return Diag::No;
+                return Diag::Near;
             };
             match expression.constant_value() {
                 Some(value) => Diag::of(is_movz_alias(value as u64, shift, width)),
@@ -1819,7 +1819,7 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
         }
         "isAdrpLabel" => {
             let Some(expression) = operand.immediate() else {
-                return Diag::No;
+                return Diag::Near;
             };
             match expression.constant_value() {
                 Some(value) => {
@@ -1832,7 +1832,7 @@ pub fn arm_predicate(target: &Target, name: &str, operand: &ArmOperand) -> Diag 
         }
         "isAdrLabel" => {
             let Some(expression) = operand.immediate() else {
-                return Diag::No;
+                return Diag::Near;
             };
             match expression.constant_value() {
                 Some(value) => Diag::of((-(1 << 20)..(1 << 20)).contains(&value)),
@@ -3662,10 +3662,10 @@ fn generic_system_register(name: &str) -> Option<u32> {
     let crn = number(pieces[2], Some('c'))?;
     let crm = number(pieces[3], Some('c'))?;
     let op2 = number(pieces[4], None)?;
-    if !(2..=3).contains(&op0) || op1 > 7 || crn > 15 || crm > 15 || op2 > 7 {
+    if op0 > 3 || op1 > 7 || crn > 15 || crm > 15 || op2 > 7 {
         return None;
     }
-    Some(((op0 & 1) << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2)
+    Some((op0 << 14) | (op1 << 11) | (crn << 7) | (crm << 3) | op2)
 }
 pub const ARM_DIAGNOSTICS: &[(&str, &str)] = &[
     ("MissingFeature", "instruction requires a CPU feature not currently enabled"),
@@ -4178,7 +4178,8 @@ impl<'s> Assembler<'s> {
             ClassKind::Token => {
                 if let ParsedKind::Token(text) = &operand.kind {
                     if let Some(found) = matcher.classes.iter().position(|candidate| {
-                        candidate.kind == ClassKind::Token && candidate.value_name == *text
+                        candidate.kind == ClassKind::Token
+                            && candidate.value_name.eq_ignore_ascii_case(text)
                     }) {
                         if matcher.is_subclass(found, class) {
                             return ArmStatus::Success;
@@ -6153,7 +6154,7 @@ impl<'t> ArmPrinter<'t> {
 }
 
 fn generic_register_string(value: u32) -> String {
-    let op0 = 2 | ((value >> 14) & 1);
+    let op0 = (value >> 14) & 3;
     let op1 = (value >> 11) & 7;
     let crn = (value >> 7) & 15;
     let crm = (value >> 3) & 15;

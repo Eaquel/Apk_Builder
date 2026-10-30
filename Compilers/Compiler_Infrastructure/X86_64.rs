@@ -4256,7 +4256,9 @@ pub fn expression_text(
             let mut out = symbol_text_with(target, name, syntax);
             if let Some(specifier) = specifier {
                 if target.isa == Isa::Armv8 {
-                    out = format!(":{specifier}:{out}");
+                    if !matches!(specifier.as_str(), "abs" | "pg_hi21") {
+                        out = format!(":{specifier}:{out}");
+                    }
                 } else {
                     out.push('@');
                     out.push_str(specifier);
