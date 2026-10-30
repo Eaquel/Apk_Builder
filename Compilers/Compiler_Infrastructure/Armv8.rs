@@ -1029,6 +1029,24 @@ pub fn feature_set(target: &Target, cpu: &str, attributes: &[String]) -> BTreeSe
     features
 }
 
+pub fn unknown_features(target: &Target, attributes: &[String]) -> Vec<String> {
+    let mut unknown = Vec::new();
+    for attribute in attributes {
+        let (sign, name) = match attribute.strip_prefix('-') {
+            Some(name) => ('-', name),
+            None => ('+', attribute.trim_start_matches('+')),
+        };
+        let known = name == "all"
+            || target.records.values().any(|record| {
+                record.is_a("SubtargetFeature") && table_text(record, "Name") == name
+            });
+        if !known {
+            unknown.push(format!("{sign}{name}"));
+        }
+    }
+    unknown
+}
+
 pub fn predicates_hold(
     target: &Target,
     predicates: &[String],
@@ -4221,6 +4239,23 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm_match_instruction(&self, operands: &[ParsedOperand]) -> ArmOutcome {
+        let short = self.arm_match_variant(operands, 1);
+        if short.status == ArmStatus::Success {
+            return short;
+        }
+        let long = self.arm_match_variant(operands, 0);
+        if long.status == ArmStatus::InvalidOperand
+            && long.error_index == Some(1)
+            && operands.len() > 1
+            && matches!(operands[1].kind, ParsedKind::Token(_))
+            && self.arm_suffixes.contains(&operands[1].start)
+        {
+            return short;
+        }
+        long
+    }
+
+    fn arm_match_variant(&self, operands: &[ParsedOperand], variant: usize) -> ArmOutcome {
         let matcher = self.matcher;
         let target = self.target;
         let failure = |status: ArmStatus, error_index: Option<usize>| ArmOutcome {
@@ -4239,7 +4274,7 @@ impl<'s> Assembler<'s> {
             .first()
             .map(|operand| operand.token_text().to_ascii_lowercase())
             .unwrap_or_default();
-        let Some((start, end)) = matcher.ranges.get(&(0, mnemonic.clone())).copied() else {
+        let Some((start, end)) = matcher.ranges.get(&(variant, mnemonic.clone())).copied() else {
             return failure(ArmStatus::MnemonicFail, None);
         };
         let mut had_match_other_than_features = false;

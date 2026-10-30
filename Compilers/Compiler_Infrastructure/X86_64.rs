@@ -7366,7 +7366,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
     };
     let variants: &[(usize, &str, &str)] = match target.isa {
         Isa::X86 => &[(0usize, "att", "%"), (1usize, "intel", "")],
-        Isa::Armv8 => &[(0usize, "generic", "")],
+        Isa::Armv8 => &[(0usize, "generic", ""), (1usize, "apple-neon", "")],
     };
     let mut matchables: Vec<Matchable> = Vec::new();
     let is_mode_predicate = |predicate: &String| {
@@ -7547,7 +7547,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
     matcher.matchables = sorted;
     let variant_names: &[&str] = match target.isa {
         Isa::X86 => &["att", "intel"],
-        Isa::Armv8 => &["generic"],
+        Isa::Armv8 => &["generic", "apple-neon"],
     };
     for &variant_name in variant_names {
         let mut aliases: BTreeMap<String, Vec<(String, [bool; 3], bool)>> = BTreeMap::new();

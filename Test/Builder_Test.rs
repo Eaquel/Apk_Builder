@@ -71927,7 +71927,20 @@ mod x86_assembly {
             }
         };
         let diagnostics = render_messages(&result);
-        let stderr = format_assembly_messages(&diagnostics);
+        let mut stderr = format_assembly_messages(&diagnostics);
+        if options.triple.starts_with("aarch64") || options.triple.starts_with("arm64") {
+            if let Ok(target) = crate::compilers::x86_64::armv8::target() {
+                let mut notices = String::new();
+                for name in
+                    crate::compilers::x86_64::armv8::unknown_features(target, &options.features)
+                {
+                    notices.push_str(&format!(
+                        "'{name}' is not a recognized feature for this target (ignoring feature)\n"
+                    ));
+                }
+                stderr.insert_str(0, &notices);
+            }
+        }
         let status = if result.failed { 1 } else { 0 };
         let mut stdout = Vec::new();
         match parsed.output.as_deref() {
