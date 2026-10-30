@@ -73173,6 +73173,149 @@ mod armv8_assembly {
 
     #[test]
     #[ignore]
+    fn armv8_records_of_class() {
+        let table = armv8::table().expect("the table reads");
+        let class = std::env::var("APK_BUILDER_CLASS").unwrap_or_default();
+        let limit: usize = std::env::var("APK_BUILDER_LIMIT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(3);
+        let mut count = 0;
+        for record in table.records.iter().filter(|record| record.is_a(&class)) {
+            count += 1;
+            if count > limit {
+                continue;
+            }
+            eprintln!("def {} : {}", record.name, record.classes.join(", "));
+            for field in &record.fields {
+                eprintln!("  {} = {}", field.name, value_text(&field.value));
+            }
+        }
+        eprintln!("records of {class}: {count}");
+    }
+
+    fn assemble_object(source: &str) -> Result<Vec<u8>, String> {
+        use crate::compilers::x86_64::{
+            assemble_source, AssemblerOptions, MessageKind, OutputKind,
+        };
+        let mut options = AssemblerOptions::new("aarch64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        let result = assemble_source(&options, source.as_bytes(), None)
+            .map_err(|diagnostic| diagnostic.message)?;
+        let errors: Vec<String> = result
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Error)
+            .map(|message| message.text.clone())
+            .collect();
+        if result.failed || !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        Ok(result.output)
+    }
+
+    #[test]
+    fn the_armv8_assembler_matches_llvm_mc_on_common_instructions() {
+        let cases: &[(&str, &str)] = &[
+            ("add x0, x1, #1", "20040091"),
+            ("add x0, x1, x2", "2000028b"),
+            ("add w0, w1, w2, lsl #3", "200c020b"),
+            ("add x0, sp, w1, uxtw #2", "e04b218b"),
+            ("ldr x0, [x1, #8]", "200440f9"),
+            ("str x30, [sp, #-16]!", "fe0f1ff8"),
+            ("ldp x29, x30, [sp], #16", "fd7bc1a8"),
+            ("mov x0, #1", "200080d2"),
+            ("mov x0, x1", "e00301aa"),
+            ("mov w0, #-1", "00008012"),
+            ("cmp x0, #0", "1f0000f1"),
+            ("ret", "c0035fd6"),
+            ("fadd d0, d1, d2", "2028621e"),
+            ("cset w0, eq", "e0179f1a"),
+            ("csel x0, x1, x2, ne", "2010829a"),
+            ("ubfx x0, x1, #4, #8", "202c44d3"),
+            ("lsl x0, x1, #3", "20f07dd3"),
+            ("movk x0, #1, lsl #16", "2000a0f2"),
+            ("add v0.4s, v1.4s, v2.4s", "2084a24e"),
+            ("ld1 {v0.16b}, [x0]", "0070404c"),
+            ("mrs x0, tpidr_el0", "40d03bd5"),
+            ("dmb ish", "bf3b03d5"),
+            ("sxtw x0, w1", "207c4093"),
+            ("and x0, x1, #0xff", "201c4092"),
+            ("ldr x0, [x1, x2, lsl #3]", "207862f8"),
+            ("ldr w0, [x1, w2, sxtw #2]", "20d862b8"),
+            ("fmov d0, #1.0", "00106e1e"),
+            ("fcmp d0, #0.0", "0820601e"),
+            ("nop", "1f2003d5"),
+            ("svc #0", "010000d4"),
+            ("brk #1", "200020d4"),
+            ("mul x0, x1, x2", "207c029b"),
+            ("sdiv w0, w1, w2", "200cc21a"),
+            ("neg x0, x1", "e00301cb"),
+            ("tst x0, #1", "1f0040f2"),
+            ("cbz x0, #8", "400000b4"),
+            ("tbnz w1, #3, #16", "81001837"),
+            ("bl #0x100", "40000094"),
+            ("adrp x0, #4096", "000000b0"),
+            ("ldrb w0, [x1], #1", "20144038"),
+            ("ldr q0, [x1, #16]", "2004c03d"),
+            ("sub sp, sp, #32", "ff8300d1"),
+            ("stp x19, x20, [sp, #16]", "f35301a9"),
+            ("mvn x0, x1", "e00321aa"),
+            ("orr x0, x1, x2, lsl #4", "201002aa"),
+            ("umov w0, v1.b[3]", "203c070e"),
+        ];
+        let mut failures = Vec::new();
+        for (source, expected) in cases {
+            let expected: Vec<u8> = (0..expected.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&expected[at..at + 2], 16).expect("hex"))
+                .collect();
+            match assemble_object(&format!("{source}\n")) {
+                Err(message) => failures.push(format!("{source}: {message}")),
+                Ok(object) => {
+                    if !object
+                        .windows(expected.len())
+                        .any(|window| window == expected)
+                    {
+                        failures.push(format!("{source}: bytes {expected:02x?} are missing"));
+                    }
+                }
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} failed",
+            failures.len(),
+            cases.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_debug_line() {
+        use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+        let source = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let mut options = AssemblerOptions::new("aarch64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        options.show_instruction_operands = true;
+        let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
+            .expect("the source assembles");
+        for message in &result.messages {
+            eprintln!("{:?}: {}", message.kind, message.text);
+        }
+        let hex: Vec<String> = result
+            .output
+            .iter()
+            .map(|byte| format!("{byte:02x}"))
+            .collect();
+        eprintln!("{}", hex.join(""));
+    }
+
+    #[test]
+    #[ignore]
     fn armv8_operand_methods() {
         let table = armv8::table().expect("the table reads");
         let mut seen = std::collections::BTreeMap::new();

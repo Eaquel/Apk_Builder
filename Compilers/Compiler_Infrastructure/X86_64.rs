@@ -7570,6 +7570,32 @@ fn assign_classes(builder: &mut MatcherBuilder, matchable: &mut Matchable) -> bo
                     return false;
                 };
                 let group = &instruction.groups[group_index];
+                if target.isa == Isa::Armv8 && group.count > 1 {
+                    let record = &target.operand_records[&group.record];
+                    let plain = target
+                        .records
+                        .get(&record.match_class)
+                        .is_some_and(|class| table_text(class, "Name") == "Imm");
+                    if plain {
+                        let template = matchable.operands[index].clone();
+                        let mut expanded = Vec::new();
+                        for (sub, sub_record) in record.sub_operands.iter().enumerate() {
+                            let Some(class) = builder.operand_class(sub_record) else {
+                                return false;
+                            };
+                            let mut entry = template.clone();
+                            entry.class = class;
+                            entry.sub_index = Some(sub);
+                            entry.source = name.clone();
+                            entry.original = name.clone();
+                            expanded.push(entry);
+                        }
+                        let count = expanded.len();
+                        matchable.operands.splice(index..index + 1, expanded);
+                        index += count;
+                        continue;
+                    }
+                }
                 let Some(class) = builder.operand_class(&group.record) else {
                     return false;
                 };
@@ -7832,6 +7858,7 @@ pub enum ParsedKind {
     Immediate(Expression),
     Memory(MemoryOperand),
     Prefix(u32),
+    Arm(Box<armv8::ArmOperand>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8588,6 +8615,7 @@ pub struct Lexer {
     peeking: bool,
     end_statement_at_end: bool,
     pub masm_integers: bool,
+    pub hash_token: bool,
     consumed_end_of_statement: bool,
 }
 
@@ -8666,6 +8694,7 @@ impl Lexer {
             peeking: false,
             end_statement_at_end: true,
             masm_integers: false,
+            hash_token: false,
             consumed_end_of_statement: false,
         }
     }
@@ -9199,6 +9228,11 @@ impl Lexer {
         let start = self.state.position;
         self.state.token_start = start;
         let character = self.next_character();
+        if self.hash_token && character == Some(b'#') {
+            self.state.at_start_of_line = false;
+            self.state.at_start_of_statement = false;
+            return self.make(TokenKind::Hash, start, start + 1);
+        }
         if !self.peeking && character == Some(b'#') && self.state.at_start_of_statement {
             let saved_skip = self.skip_space;
             self.skip_space = true;
@@ -9371,6 +9405,7 @@ pub struct TargetTriple {
     pub mode: Mode,
     pub format: ObjectFormat,
     pub x32: bool,
+    pub isa: Isa,
 }
 
 impl TargetTriple {
@@ -9397,6 +9432,12 @@ impl TargetTriple {
             .unwrap_or_default();
         let sixty_four = matches!(architecture.as_str(), "x86_64" | "amd64" | "x86_64h")
             || architecture.starts_with("x86_64");
+        let isa = if architecture.starts_with("aarch64") || architecture.starts_with("arm64") {
+            Isa::Armv8
+        } else {
+            Isa::X86
+        };
+        let sixty_four = sixty_four || isa == Isa::Armv8;
         let x32 = sixty_four && (environment.ends_with("x32") || environment == "gnux32");
         let mut mode = if sixty_four {
             Mode::Bits64
@@ -9435,6 +9476,7 @@ impl TargetTriple {
             mode,
             format,
             x32,
+            isa,
         }
     }
 
@@ -10636,6 +10678,9 @@ pub struct Assembler<'s> {
     pub streamer: Box<dyn Streamer + 's>,
     pub mode: Mode,
     pub dialect: Syntax,
+    pub arm_features: BTreeSet<String>,
+    pub arm_mnemonic: String,
+    pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
     conditions: Vec<ConditionState>,
@@ -10763,13 +10808,24 @@ impl<'s> Assembler<'s> {
         source: &[u8],
         streamer: Box<dyn Streamer + 's>,
     ) -> Result<Assembler<'s>, Diagnostic> {
-        let target = target()?;
-        let matcher = matcher(target);
         let triple = TargetTriple::parse(&options.triple);
+        let (target, matcher) = match triple.isa {
+            Isa::X86 => {
+                let target = target()?;
+                (target, matcher(target))
+            }
+            Isa::Armv8 => (armv8::target()?, armv8::matcher()),
+        };
         let mode = triple.mode;
         let dialect = options.input_syntax;
+        let arm_features = if triple.isa == Isa::Armv8 {
+            armv8::feature_set(target, &options.cpu, &options.features)
+        } else {
+            BTreeSet::new()
+        };
         let mut lexer = Lexer::new(&options.source_name, source);
         lexer.masm_integers = options.masm_integers;
+        lexer.hash_token = triple.isa == Isa::Armv8;
         Ok(Assembler {
             target,
             matcher,
@@ -10779,6 +10835,9 @@ impl<'s> Assembler<'s> {
             streamer,
             mode,
             dialect,
+            arm_features,
+            arm_mnemonic: String::new(),
+            arm_aliases: BTreeMap::new(),
             pending_errors: Vec::new(),
             condition: ConditionState {
                 kind: ConditionKind::None,
@@ -15872,6 +15931,9 @@ impl<'s> Assembler<'s> {
     }
 
     fn parse_and_match_instruction(&mut self, identifier: &str, identifier_token: Token) -> bool {
+        if self.target.isa == Isa::Armv8 {
+            return self.arm_parse_and_match(identifier, identifier_token);
+        }
         let name = identifier.to_ascii_lowercase();
         let mut state = InstructionState::default();
         self.extended_register_seen = false;
@@ -15914,6 +15976,7 @@ impl<'s> Assembler<'s> {
                 ),
                 ParsedKind::Memory(memory) => format!("Memory: ModeSize={}", memory.mode_size),
                 ParsedKind::Prefix(value) => format!("Prefix:{value}"),
+                ParsedKind::Arm(operand) => armv8::describe_operand(self.target, operand),
             });
         }
         pieces.join(", ")
@@ -19743,8 +19806,11 @@ pub fn assemble_source(
     source: &[u8],
     file_reader: Option<FileReader>,
 ) -> Result<AssemblyResult, Diagnostic> {
-    let target = target()?;
     let triple = TargetTriple::parse(&options.triple);
+    let target = match triple.isa {
+        Isa::X86 => target()?,
+        Isa::Armv8 => armv8::target()?,
+    };
     let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);
     let streamer: Box<dyn Streamer> = match options.output {
         OutputKind::Assembly => Box::new(TextStreamer::new(
@@ -25910,8 +25976,12 @@ pub mod object {
             mode: Mode,
             location: Option<SourceLocation>,
         ) -> Option<Encoded> {
-            let encoder = Encoder::new(self.target, mode);
-            match encoder.encode(instruction) {
+            let encoded = if self.target.isa == Isa::Armv8 {
+                armv8::encode(self.target, instruction)
+            } else {
+                Encoder::new(self.target, mode).encode(instruction)
+            };
+            match encoded {
                 Ok(encoded) => Some(encoded),
                 Err(diagnostic) => {
                     let cause = diagnostic
@@ -26014,6 +26084,10 @@ pub mod object {
                     state.has_instructions = true;
                 }
                 context.sections[section].has_instructions = true;
+            }
+            if self.target.isa == Isa::Armv8 {
+                self.emit_instruction_to_data(context, instruction, mode, location);
+                return;
             }
             let relax_to_fixpoint =
                 |streamer: &ObjectStreamer, instruction: &MachineInstruction| {
