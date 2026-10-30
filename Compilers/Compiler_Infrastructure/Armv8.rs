@@ -522,6 +522,11 @@ pub fn encode(
             });
         }
     }
+    if description.record == "TLSAUTHDESCCALL" {
+        return Err(unencodable(
+            "TLSAUTHDESCCALL: the relocation number of the authenticated TLS descriptor call is not available",
+        ));
+    }
     let plan = match &encoding_plans(target)[instruction.opcode] {
         Ok(plan) => plan,
         Err(cause) => {
@@ -5373,6 +5378,14 @@ fn arm_print_tables() -> &'static PrintTables {
     })
 }
 
+fn c_hex(value: u64) -> String {
+    if value == 0 {
+        "0".to_string()
+    } else {
+        format!("{value:#x}")
+    }
+}
+
 thread_local! {
     static PRINT_HEX: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
 }
@@ -5380,9 +5393,9 @@ thread_local! {
 fn format_immediate(value: i64) -> String {
     if PRINT_HEX.with(std::cell::Cell::get) {
         if value < 0 {
-            format!("-{:#x}", value.unsigned_abs())
+            format!("-{}", c_hex(value.unsigned_abs()))
         } else {
-            format!("{value:#x}")
+            c_hex(value as u64)
         }
     } else {
         value.to_string()
@@ -5529,10 +5542,11 @@ impl<'t> ArmPrinter<'t> {
 
     fn special(&self, instruction: &MachineInstruction) -> Option<String> {
         let record = self.target.instructions[instruction.opcode].record.as_str();
-        if record == "TLSDESCCALL" {
+        if record == "TLSDESCCALL" || record == "TLSAUTHDESCCALL" {
             if let MachineOperand::Expression(expression) = instruction.operand(0) {
                 return Some(format!(
-                    "\t.tlsdesccall {}",
+                    "\t.{} {}",
+                    record.to_ascii_lowercase(),
                     arm_expression_text(self.target, expression)
                 ));
             }
@@ -5781,7 +5795,7 @@ impl<'t> ArmPrinter<'t> {
                 }
             },
             "printImm" => out.push_str(&format!("#{}", format_immediate(operand.immediate()))),
-            "printImmHex" => out.push_str(&format!("#{:#x}", operand.immediate())),
+            "printImmHex" => out.push_str(&format!("#{}", c_hex(operand.immediate() as u64))),
             "printSImm" => {
                 let value = operand.immediate();
                 let value = match number(0) {
@@ -6334,14 +6348,19 @@ impl<'s> Assembler<'s> {
                 self.streamer.emit_variant_pcs(&mut self.context, symbol);
                 Some(false)
             }
-            ".tlsdesccall" => {
+            ".tlsdesccall" | ".tlsauthdesccall" => {
+                let record = if identifier == ".tlsdesccall" {
+                    "TLSDESCCALL"
+                } else {
+                    "TLSAUTHDESCCALL"
+                };
                 let Some(name) = self.parse_identifier() else {
                     return Some(self.token_error("expected symbol name"));
                 };
                 if self.parse_end_of_line() {
                     return Some(true);
                 }
-                let Some(opcode) = self.target.instruction_by_record.get("TLSDESCCALL") else {
+                let Some(opcode) = self.target.instruction_by_record.get(record) else {
                     return Some(true);
                 };
                 let mut instruction = MachineInstruction::new(*opcode);

@@ -10542,6 +10542,9 @@ pub enum CfiInstruction {
     Register(i64, i64),
     WindowSave,
     NegateReturnAddressStateWithPc,
+    NegateReturnAddressState,
+    BKeyFrame,
+    SetReturnAddressState(i64, i64),
     ValueOffset(i64, i64),
     GnuArgumentsSize(i64),
 }
@@ -12302,6 +12305,32 @@ impl<'s> Assembler<'s> {
             ".cfi_window_save" => self.parse_cfi_plain(location, CfiInstruction::WindowSave),
             ".cfi_negate_ra_state_with_pc" if self.target.isa == Isa::Armv8 => {
                 self.parse_cfi_plain(location, CfiInstruction::NegateReturnAddressStateWithPc)
+            }
+            ".cfi_negate_ra_state" if self.target.isa == Isa::Armv8 => {
+                self.parse_cfi_plain(location, CfiInstruction::NegateReturnAddressState)
+            }
+            ".cfi_b_key_frame" if self.target.isa == Isa::Armv8 => {
+                self.parse_cfi_plain(location, CfiInstruction::BKeyFrame)
+            }
+            ".cfi_set_ra_state" if self.target.isa == Isa::Armv8 => {
+                let Ok(state) = self.parse_absolute_expression() else {
+                    return true;
+                };
+                if self.parse_comma() {
+                    return true;
+                }
+                let Ok(offset) = self.parse_absolute_expression() else {
+                    return true;
+                };
+                if self.parse_end_of_line() {
+                    return true;
+                }
+                self.streamer.emit_cfi(
+                    &mut self.context,
+                    CfiInstruction::SetReturnAddressState(state, offset),
+                    location,
+                );
+                false
             }
             ".cfi_label" => {
                 let at = self.location();
@@ -19464,6 +19493,13 @@ impl Streamer for TextStreamer {
                     CfiInstruction::NegateReturnAddressStateWithPc => {
                         "\t.cfi_negate_ra_state_with_pc".to_string()
                     }
+                    CfiInstruction::NegateReturnAddressState => {
+                        "\t.cfi_negate_ra_state".to_string()
+                    }
+                    CfiInstruction::BKeyFrame => "\t.cfi_b_key_frame".to_string(),
+                    CfiInstruction::SetReturnAddressState(state, offset) => {
+                        format!("\t.cfi_set_ra_state {state}, {offset}")
+                    }
                     CfiInstruction::ValueOffset(register, offset) => format!(
                         "\t.cfi_val_offset {}, {offset}",
                         self.register_name_for_dwarf(context, register)
@@ -25087,6 +25123,7 @@ pub mod object {
         Register(i64, i64),
         WindowSave,
         NegateReturnAddressStateWithPc,
+        SetReturnAddressState(i64, i64),
         ValueOffset(i64, i64),
         GnuArgumentsSize(i64),
         Escape(Vec<u8>),
@@ -25111,6 +25148,7 @@ pub mod object {
         lsda_encoding: u8,
         simple: bool,
         signal: bool,
+        b_key: bool,
         return_register: Option<i64>,
     }
 
@@ -29282,6 +29320,11 @@ pub mod object {
                 }
                 FrameOperation::WindowSave => self.append(&[0x2d]),
                 FrameOperation::NegateReturnAddressStateWithPc => self.append(&[0x2c]),
+                FrameOperation::SetReturnAddressState(state, offset) => {
+                    self.append(&[0x2b]);
+                    self.emit_unsigned(*state as u64);
+                    self.emit_signed(*offset);
+                }
                 FrameOperation::Undefined(target) => {
                     self.append(&[0x07]);
                     self.emit_unsigned(*target as u64);
@@ -29440,6 +29483,9 @@ pub mod object {
                 augmentation.push('R');
                 if frame.signal {
                     augmentation.push('S');
+                }
+                if frame.b_key {
+                    augmentation.push('B');
                 }
                 self.append(augmentation.as_bytes());
             }
@@ -29638,6 +29684,7 @@ pub mod object {
                         frame.personality_encoding,
                         frame.lsda.map(|_| frame.lsda_encoding as i32).unwrap_or(-1),
                         frame.signal,
+                        frame.b_key,
                         frame.simple,
                         frame.return_register.unwrap_or(i64::MAX),
                     )
@@ -29646,6 +29693,7 @@ pub mod object {
                         String::new(),
                         0,
                         0,
+                        false,
                         false,
                         frame.simple,
                         frame.return_register.unwrap_or(i64::MAX),
@@ -30297,6 +30345,7 @@ pub mod object {
                         lsda_encoding: 0,
                         simple,
                         signal: false,
+                        b_key: false,
                         return_register: None,
                     });
                 }
@@ -30383,6 +30432,20 @@ pub mod object {
                     FrameOperation::NegateReturnAddressStateWithPc,
                     location,
                 ),
+                CfiInstruction::NegateReturnAddressState => {
+                    self.push_frame_instruction(context, FrameOperation::WindowSave, location)
+                }
+                CfiInstruction::BKeyFrame => {
+                    if let Some(frame) = self.current_frame(context, Some(location)) {
+                        self.frames[frame].b_key = true;
+                    }
+                }
+                CfiInstruction::SetReturnAddressState(state, offset) => self
+                    .push_frame_instruction(
+                        context,
+                        FrameOperation::SetReturnAddressState(state, offset),
+                        location,
+                    ),
                 CfiInstruction::ValueOffset(register, offset) => self.push_frame_instruction(
                     context,
                     FrameOperation::ValueOffset(register, offset),
