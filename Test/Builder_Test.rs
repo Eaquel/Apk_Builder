@@ -73301,6 +73301,11 @@ mod armv8_assembly {
         let mut options = AssemblerOptions::new("aarch64-unknown-linux-gnu");
         options.output = OutputKind::Object;
         options.show_instruction_operands = true;
+        if std::env::var("APK_BUILDER_TEXT").is_ok() {
+            options.output = OutputKind::Assembly;
+            options.show_instruction_operands = false;
+            options.show_encoding = true;
+        }
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
             .expect("the source assembles");
         for message in &result.messages {
@@ -73308,6 +73313,9 @@ mod armv8_assembly {
         }
         if let Ok(path) = std::env::var("APK_BUILDER_OUTPUT") {
             std::fs::write(path, &result.output).expect("the object is written");
+        }
+        if std::env::var("APK_BUILDER_TEXT").is_ok() {
+            print!("{}", String::from_utf8_lossy(&result.output));
         }
     }
 

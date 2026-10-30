@@ -4649,6 +4649,26 @@ pub fn elf_relocation(
     }
 }
 
+pub fn fixup_bits(kind: FixupKind) -> (usize, usize) {
+    match kind {
+        FixupKind::Arm(fixup) => match fixup {
+            ArmFixup::PcrelAdrImm21 | ArmFixup::PcrelAdrpImm21 => (0, 32),
+            ArmFixup::AddImm12
+            | ArmFixup::LdStImm12Scale1
+            | ArmFixup::LdStImm12Scale2
+            | ArmFixup::LdStImm12Scale4
+            | ArmFixup::LdStImm12Scale8
+            | ArmFixup::LdStImm12Scale16 => (10, 12),
+            ArmFixup::LdrPcrelImm19 | ArmFixup::PcrelBranch19 => (5, 19),
+            ArmFixup::Movw | ArmFixup::PcrelBranch16 => (5, 16),
+            ArmFixup::PcrelBranch9 => (5, 9),
+            ArmFixup::PcrelBranch14 => (5, 14),
+            ArmFixup::PcrelBranch26 | ArmFixup::PcrelCall26 => (0, 26),
+        },
+        other => (0, other.size() * 8),
+    }
+}
+
 pub fn fixup_target_offset(kind: FixupKind) -> u32 {
     match kind {
         FixupKind::Arm(fixup) => match fixup {
@@ -4820,4 +4840,790 @@ pub fn adjust_fixup_value(
             Ok((value >> 2) & 0x3ff_ffff)
         }
     }
+}
+
+pub fn decode_logical_immediate(value: u64, register_size: u32) -> u64 {
+    let n = (value >> 12) & 1;
+    let immr = (value >> 6) & 0x3f;
+    let imms = value & 0x3f;
+    let pattern_bits = ((n << 6) | (!imms & 0x3f)) as u32;
+    let length = 31 - pattern_bits.leading_zeros();
+    let mut size = 1u32 << length;
+    let rotation = immr & (u64::from(size) - 1);
+    let ones = imms & (u64::from(size) - 1);
+    let mut pattern = if ones + 1 >= 64 {
+        u64::MAX
+    } else {
+        (1u64 << (ones + 1)) - 1
+    };
+    for _ in 0..rotation {
+        pattern = ((pattern & 1) << (size - 1)) | (pattern >> 1);
+    }
+    while size != register_size {
+        pattern |= pattern << size;
+        size *= 2;
+    }
+    pattern
+}
+
+fn any_movw_alias(value: u64, width: u32) -> bool {
+    (0..=(width - 16))
+        .step_by(16)
+        .any(|shift| is_movz_alias(value, shift, width) || is_movn_alias(value, shift, width))
+}
+
+pub struct PrintedInstruction {
+    pub text: String,
+    pub comment: String,
+}
+
+fn arm_print_tables() -> &'static PrintTables {
+    static CELL: OnceLock<PrintTables> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let target = target().expect("the ARMv8 tables load");
+        PrintTables {
+            programs: target
+                .instructions
+                .iter()
+                .map(|instruction| print_program(target, instruction, 0))
+                .collect(),
+            aliases: alias_patterns(target, 0),
+        }
+    })
+}
+
+fn format_immediate(value: i64) -> String {
+    value.to_string()
+}
+
+fn arm_expression_text(target: &Target, expression: &Expression) -> String {
+    expression_text(target, expression, 0, Syntax::Att)
+}
+
+pub struct ArmPrinter<'t> {
+    pub target: &'t Target,
+    pub features: &'t BTreeSet<String>,
+    pub comment: std::cell::RefCell<String>,
+}
+
+impl<'t> ArmPrinter<'t> {
+    pub fn new(target: &'t Target, features: &'t BTreeSet<String>) -> ArmPrinter<'t> {
+        ArmPrinter {
+            target,
+            features,
+            comment: std::cell::RefCell::new(String::new()),
+        }
+    }
+
+    fn register_name(&self, register: RegisterId) -> String {
+        self.target.registers[register as usize]
+            .assembly_name
+            .clone()
+    }
+
+    fn vector_register_name(&self, register: RegisterId) -> String {
+        let held = &self.target.registers[register as usize];
+        if held.record.starts_with('D') || held.record.starts_with('Q') {
+            format!("v{}", held.encoding)
+        } else {
+            held.assembly_name.clone()
+        }
+    }
+
+    fn register_text(&self, instruction: &MachineInstruction, index: usize) -> String {
+        match instruction.operand(index) {
+            MachineOperand::Register(register) => self.register_name(*register),
+            _ => String::new(),
+        }
+    }
+
+    pub fn print(&self, instruction: &MachineInstruction) -> String {
+        if let Some(text) = self.special(instruction) {
+            return text;
+        }
+        let tables = arm_print_tables();
+        if let Some(text) = self.alias(tables, instruction) {
+            return text;
+        }
+        let mut out = String::new();
+        for piece in &tables.programs[instruction.opcode] {
+            match piece {
+                PrintPiece::Literal(text) => out.push_str(text),
+                PrintPiece::Operand { method, index, .. } => {
+                    self.call_method(method, instruction, *index, &mut out)
+                }
+            }
+        }
+        out
+    }
+
+    fn alias(&self, tables: &PrintTables, instruction: &MachineInstruction) -> Option<String> {
+        let patterns = tables.aliases.get(&instruction.opcode)?;
+        let mut chosen = None;
+        for pattern in patterns {
+            if instruction.operands.len() != pattern.operand_count {
+                return None;
+            }
+            let mut index = 0;
+            let matched = pattern.conditions.iter().all(|condition| {
+                let operand = instruction.operand(index);
+                index += 1;
+                match condition {
+                    AliasCondition::Ignore => true,
+                    AliasCondition::Immediate(value) => {
+                        matches!(operand, MachineOperand::Immediate(held) if *held == i64::from(*value))
+                    }
+                    AliasCondition::Register(register) => {
+                        matches!(operand, MachineOperand::Register(held) if held == register)
+                    }
+                    AliasCondition::TiedRegister(other) => {
+                        operand.is_register() && operand.register() == instruction.register_at(*other)
+                    }
+                    AliasCondition::RegisterClass(class) => match operand {
+                        MachineOperand::Register(held) => self.target.in_register_class(class, *held),
+                        _ => false,
+                    },
+                }
+            });
+            if matched {
+                chosen = Some(pattern);
+                break;
+            }
+        }
+        let pattern = chosen?;
+        let pieces = &pattern.pieces;
+        let mut out = String::from("\t");
+        let mut at = 0;
+        while at < pieces.len() {
+            match &pieces[at] {
+                AliasPiece::Literal(character) if *character != ' ' && *character != '\t' => {
+                    out.push(*character);
+                    at += 1;
+                }
+                _ => break,
+            }
+        }
+        if at < pieces.len() {
+            if matches!(
+                pieces[at],
+                AliasPiece::Literal(' ') | AliasPiece::Literal('\t')
+            ) {
+                out.push('\t');
+                at += 1;
+            }
+            while at < pieces.len() {
+                match &pieces[at] {
+                    AliasPiece::Literal(character) => out.push(*character),
+                    AliasPiece::Operand { index, method } => match method {
+                        Some(method) => self.call_method(method, instruction, *index, &mut out),
+                        None => self.call_method("printOperand", instruction, *index, &mut out),
+                    },
+                }
+                at += 1;
+            }
+        }
+        Some(out)
+    }
+
+    fn special(&self, instruction: &MachineInstruction) -> Option<String> {
+        let record = self.target.instructions[instruction.opcode].record.as_str();
+        let immediate = |index: usize| match instruction.operand(index) {
+            MachineOperand::Immediate(value) => Some(*value),
+            _ => None,
+        };
+        let is_expression =
+            |index: usize| matches!(instruction.operand(index), MachineOperand::Expression(_));
+        match record {
+            "SBFMXri" | "SBFMWri" | "UBFMXri" | "UBFMWri" => {
+                let signed = record.starts_with("SBFM");
+                let wide = record.contains('X');
+                let (Some(immr), Some(imms)) = (immediate(2), immediate(3)) else {
+                    return None;
+                };
+                let destination = self.register_text(instruction, 0);
+                if immr == 0 {
+                    let mnemonic = match imms {
+                        7 if signed => Some("sxtb"),
+                        7 if !wide => Some("uxtb"),
+                        15 if signed => Some("sxth"),
+                        15 if !wide => Some("uxth"),
+                        31 if wide && signed => Some("sxtw"),
+                        _ => None,
+                    };
+                    if let Some(mnemonic) = mnemonic {
+                        let source = self.target.arm_w_from_x(instruction.register_at(1));
+                        let source = if wide || mnemonic == "sxtw" {
+                            self.register_name(source)
+                        } else {
+                            self.register_text(instruction, 1)
+                        };
+                        return Some(format!("\t{mnemonic}\t{destination}, {source}"));
+                    }
+                }
+                let source = self.register_text(instruction, 1);
+                let shift_form = if record == "UBFMWri" && imms != 0x1f && imms + 1 == immr {
+                    Some(("lsl", 31 - imms))
+                } else if record == "UBFMXri" && imms != 0x3f && imms + 1 == immr {
+                    Some(("lsl", 63 - imms))
+                } else if (record == "UBFMWri" && imms == 0x1f)
+                    || (record == "UBFMXri" && imms == 0x3f)
+                {
+                    Some(("lsr", immr))
+                } else if (record == "SBFMWri" && imms == 0x1f)
+                    || (record == "SBFMXri" && imms == 0x3f)
+                {
+                    Some(("asr", immr))
+                } else {
+                    None
+                };
+                if let Some((mnemonic, shift)) = shift_form {
+                    return Some(format!("\t{mnemonic}\t{destination}, {source}, #{shift}"));
+                }
+                if immr > imms {
+                    let width = if wide { 64 } else { 32 };
+                    return Some(format!(
+                        "\t{}\t{destination}, {source}, #{}, #{}",
+                        if signed { "sbfiz" } else { "ubfiz" },
+                        width - immr,
+                        imms + 1
+                    ));
+                }
+                Some(format!(
+                    "\t{}\t{destination}, {source}, #{immr}, #{}",
+                    if signed { "sbfx" } else { "ubfx" },
+                    imms - immr + 1
+                ))
+            }
+            "BFMXri" | "BFMWri" => {
+                let (Some(immr), Some(imms)) = (immediate(3), immediate(4)) else {
+                    return None;
+                };
+                let width = if record == "BFMXri" { 64 } else { 32 };
+                let zero = matches!(
+                    self.target.registers[instruction.register_at(2) as usize]
+                        .record
+                        .as_str(),
+                    "WZR" | "XZR"
+                );
+                let destination = self.register_text(instruction, 0);
+                let source = self.register_text(instruction, 2);
+                if zero && (immr == 0 || imms < immr) && self.features.contains("HasV8_2aOps") {
+                    return Some(format!(
+                        "\tbfc\t{destination}, #{}, #{}",
+                        (width - immr) % width,
+                        imms + 1
+                    ));
+                }
+                if imms < immr {
+                    return Some(format!(
+                        "\tbfi\t{destination}, {source}, #{}, #{}",
+                        (width - immr) % width,
+                        imms + 1
+                    ));
+                }
+                Some(format!(
+                    "\tbfxil\t{destination}, {source}, #{immr}, #{}",
+                    imms - immr + 1
+                ))
+            }
+            "MOVZXi" | "MOVZWi" | "MOVNXi" | "MOVNWi" if is_expression(1) => {
+                let mnemonic = if record.starts_with("MOVZ") {
+                    "movz"
+                } else {
+                    "movn"
+                };
+                let MachineOperand::Expression(expression) = instruction.operand(1) else {
+                    return None;
+                };
+                Some(format!(
+                    "\t{mnemonic}\t{}, #{}",
+                    self.register_text(instruction, 0),
+                    arm_expression_text(self.target, expression)
+                ))
+            }
+            "MOVKXi" | "MOVKWi" if is_expression(2) => {
+                let MachineOperand::Expression(expression) = instruction.operand(2) else {
+                    return None;
+                };
+                Some(format!(
+                    "\tmovk\t{}, #{}",
+                    self.register_text(instruction, 0),
+                    arm_expression_text(self.target, expression)
+                ))
+            }
+            "MOVZXi" | "MOVZWi" => {
+                let (Some(value), Some(shift)) = (immediate(1), immediate(2)) else {
+                    return None;
+                };
+                let width = if record == "MOVZXi" { 64 } else { 32 };
+                let full = (value as u64).wrapping_shl(shift as u32);
+                if is_movz_alias(full, shift as u32, width) {
+                    return Some(self.mov_immediate(instruction, full, width));
+                }
+                None
+            }
+            "MOVNXi" | "MOVNWi" => {
+                let (Some(value), Some(shift)) = (immediate(1), immediate(2)) else {
+                    return None;
+                };
+                let width = if record == "MOVNXi" { 64 } else { 32 };
+                let mut full = !((value as u64).wrapping_shl(shift as u32));
+                if width == 32 {
+                    full &= 0xffff_ffff;
+                }
+                if is_movn_alias(full, shift as u32, width) {
+                    return Some(self.mov_immediate(instruction, full, width));
+                }
+                None
+            }
+            "ORRXri" | "ORRWri" => {
+                let zero = matches!(
+                    self.target.registers[instruction.register_at(1) as usize]
+                        .record
+                        .as_str(),
+                    "WZR" | "XZR"
+                );
+                let value = immediate(2)?;
+                if !zero {
+                    return None;
+                }
+                let width = if record == "ORRXri" { 64 } else { 32 };
+                let decoded = decode_logical_immediate(value as u64, width);
+                if !any_movw_alias(decoded, width) {
+                    return Some(self.mov_immediate(instruction, decoded, width));
+                }
+                None
+            }
+            _ => None,
+        }
+    }
+
+    fn mov_immediate(&self, instruction: &MachineInstruction, value: u64, width: u32) -> String {
+        let extended = if width == 64 {
+            value as i64
+        } else {
+            (value as u32) as i32 as i64
+        };
+        let mask = if width == 64 {
+            u64::MAX
+        } else {
+            (1u64 << width) - 1
+        };
+        self.comment
+            .borrow_mut()
+            .push_str(&format!("={:#x}\n", extended as u64 & mask));
+        format!(
+            "\tmov\t{}, #{}",
+            self.register_text(instruction, 0),
+            format_immediate(extended)
+        )
+    }
+
+    fn call_method(
+        &self,
+        method: &str,
+        instruction: &MachineInstruction,
+        index: usize,
+        out: &mut String,
+    ) {
+        let (name, arguments) = split_method(method);
+        let operand = instruction.operand(index);
+        let number = |at: usize| argument_number(&arguments, at);
+        let scaled_immediate = |scale: i64| match operand {
+            MachineOperand::Immediate(value) => format!("#{}", format_immediate(value * scale)),
+            MachineOperand::Expression(expression) => arm_expression_text(self.target, expression),
+            _ => String::new(),
+        };
+        match name.as_str() {
+            "" | "printOperand" => match operand {
+                MachineOperand::Register(register) => out.push_str(&self.register_name(*register)),
+                MachineOperand::Immediate(value) => {
+                    out.push_str(&format!("#{}", format_immediate(*value)))
+                }
+                MachineOperand::Expression(expression) => {
+                    out.push_str(&arm_expression_text(self.target, expression))
+                }
+            },
+            "printImm" => out.push_str(&format!("#{}", format_immediate(operand.immediate()))),
+            "printImmHex" => out.push_str(&format!("#{:#x}", operand.immediate())),
+            "printSImm" => {
+                let value = operand.immediate();
+                let value = match number(0) {
+                    8 => i64::from(value as i8),
+                    16 => i64::from(value as i16),
+                    _ => value,
+                };
+                out.push_str(&format!("#{}", format_immediate(value)))
+            }
+            "printPostIncOperand" => match operand {
+                MachineOperand::Register(register) => {
+                    if self.target.registers[*register as usize].record == "XZR" {
+                        out.push_str(&format!("#{}", number(0)));
+                    } else {
+                        out.push_str(&self.register_name(*register));
+                    }
+                }
+                _ => {}
+            },
+            "printVRegOperand" => {
+                if let MachineOperand::Register(register) = operand {
+                    out.push_str(&self.vector_register_name(*register));
+                }
+            }
+            "printSysCROperand" => out.push_str(&format!("c{}", operand.immediate())),
+            "printAddSubImm" => match operand {
+                MachineOperand::Immediate(value) => {
+                    let value = value & 0xfff;
+                    let shift = instruction.immediate_at(index + 1) & 0x3f;
+                    out.push_str(&format!("#{}", format_immediate(value)));
+                    if shift != 0 {
+                        self.shifter(instruction.immediate_at(index + 1), out);
+                        self.comment
+                            .borrow_mut()
+                            .push_str(&format!("={}\n", format_immediate(value << shift)));
+                    }
+                }
+                MachineOperand::Expression(expression) => {
+                    out.push_str(&arm_expression_text(self.target, expression));
+                    self.shifter(instruction.immediate_at(index + 1), out);
+                }
+                _ => {}
+            },
+            "printLogicalImm" => {
+                let width = match arguments.first().map(String::as_str).unwrap_or("") {
+                    text if text.contains("64") => 64,
+                    text if text.contains("16") => 16,
+                    text if text.contains('8') && !text.contains("32") => 8,
+                    _ => 32,
+                };
+                out.push_str(&format!(
+                    "#{:#x}",
+                    decode_logical_immediate(operand.immediate() as u64, width)
+                ));
+            }
+            "printShifter" => self.shifter(operand.immediate(), out),
+            "printShiftedRegister" => {
+                out.push_str(&self.register_text(instruction, index));
+                self.shifter(instruction.immediate_at(index + 1), out);
+            }
+            "printExtendedRegister" => {
+                out.push_str(&self.register_text(instruction, index));
+                self.arith_extend(instruction, index + 1, out);
+            }
+            "printArithExtend" => self.arith_extend(instruction, index, out),
+            "printMemExtend" => {
+                let kind = arguments
+                    .first()
+                    .map(|text| text.trim_matches('\''))
+                    .unwrap_or("x");
+                let sign = operand.immediate() != 0;
+                let shift = instruction.immediate_at(index + 1) != 0;
+                self.mem_extend(sign, shift, number(1), kind, out);
+            }
+            "printRegWithShiftExtend" => {
+                let sign = arguments.first().is_some_and(|text| text == "true");
+                let width = number(1);
+                let kind = arguments
+                    .get(2)
+                    .map(|text| text.trim_matches('\''))
+                    .unwrap_or("x");
+                let suffix = arguments
+                    .get(3)
+                    .map(|text| text.trim_matches('\''))
+                    .unwrap_or("0");
+                self.call_method("printOperand", instruction, index, out);
+                if suffix == "s" || suffix == "d" {
+                    out.push('.');
+                    out.push_str(suffix);
+                }
+                let shift = width != 8;
+                if sign || shift || kind == "w" {
+                    out.push_str(", ");
+                    self.mem_extend(sign, shift, width, kind, out);
+                }
+            }
+            "printCondCode" => out.push_str(condition_name(operand.immediate() as u32)),
+            "printInverseCondCode" => {
+                out.push_str(condition_name((operand.immediate() as u32) ^ 1))
+            }
+            "printAMNoIndex" => {
+                out.push('[');
+                out.push_str(&self.register_text(instruction, index));
+                out.push(']');
+            }
+            "printImmScale" => out.push_str(&scaled_immediate(number(0))),
+            "printImmRangeScale" => {
+                let first = number(0) * operand.immediate();
+                out.push_str(&format!(
+                    "{}:{}",
+                    format_immediate(first),
+                    format_immediate(first + number(1))
+                ));
+            }
+            "printUImm12Offset" => out.push_str(&scaled_immediate(number(0).max(1))),
+            "printAMIndexedWB" => {
+                out.push('[');
+                out.push_str(&self.register_text(instruction, index));
+                out.push_str(", ");
+                out.push_str(&match instruction.operand(index + 1) {
+                    MachineOperand::Immediate(value) => {
+                        format!("#{}", format_immediate(value * number(0).max(1)))
+                    }
+                    MachineOperand::Expression(expression) => {
+                        arm_expression_text(self.target, expression)
+                    }
+                    _ => String::new(),
+                });
+                out.push(']');
+            }
+            "printPrefetchOp" | "printRPRFMOperand" => {
+                let value = operand.immediate() as u32;
+                let tables = system_tables_for();
+                match tables.prefetch_names.get(&value) {
+                    Some(held) if name == "printPrefetchOp" => out.push_str(held),
+                    _ => out.push_str(&format!("#{}", format_immediate(i64::from(value)))),
+                }
+            }
+            "printTIndexHintOp" => {
+                let value = operand.immediate() as u32;
+                let tables = system_tables_for();
+                match tables.hints.values().find(|entry| entry.encoding == value) {
+                    Some(entry) => out.push_str(&entry.name),
+                    None => out.push_str(&format!("#{}", format_immediate(i64::from(value)))),
+                }
+            }
+            "printFPImmOperand" => {
+                let value = float_from_immediate(operand.immediate() as u32) as f32;
+                out.push_str(&format!("#{:.8}", f64::from(value)));
+            }
+            "printGPRSeqPairsClassOperand" => {
+                if let MachineOperand::Register(register) = operand {
+                    let members = &self.target.registers[*register as usize].sub_registers;
+                    let names: Vec<String> = members
+                        .iter()
+                        .map(|member| self.register_name(*member))
+                        .collect();
+                    out.push_str(&names.join(", "));
+                }
+            }
+            "printImplicitlyTypedVectorList" => self.vector_list(instruction, index, "", out),
+            "printTypedVectorList" => {
+                let lanes = number(0);
+                let kind = arguments
+                    .get(1)
+                    .map(|text| text.trim_matches('\''))
+                    .unwrap_or("0");
+                if kind == "0" {
+                    self.vector_list(instruction, index, "", out);
+                } else if lanes != 0 {
+                    self.vector_list(instruction, index, &format!(".{lanes}{kind}"), out);
+                } else {
+                    self.vector_list(instruction, index, &format!(".{kind}"), out);
+                }
+            }
+            "printVectorIndex" => {
+                let scale = if arguments.is_empty() { 1 } else { number(0) };
+                out.push_str(&format!("[{}]", scale * operand.immediate()))
+            }
+            "printAlignedLabel" => match operand {
+                MachineOperand::Immediate(value) => {
+                    out.push_str(&format!("#{}", format_immediate(value * 4)))
+                }
+                MachineOperand::Expression(expression) => match expression.constant_value() {
+                    Some(value) => out.push_str(&format!("{:#x}", value as u64)),
+                    None => out.push_str(&arm_expression_text(self.target, expression)),
+                },
+                _ => {}
+            },
+            "printAdrAdrpLabel" => match operand {
+                MachineOperand::Immediate(value) => {
+                    let record = self.target.instructions[instruction.opcode].record.as_str();
+                    let offset = if record == "ADRP" {
+                        value * 4096
+                    } else {
+                        *value
+                    };
+                    out.push_str(&format!("#{offset}"));
+                }
+                MachineOperand::Expression(expression) => {
+                    out.push_str(&arm_expression_text(self.target, expression))
+                }
+                _ => {}
+            },
+            "printBarrierOption" => {
+                let value = operand.immediate() as u32;
+                let record = self.target.instructions[instruction.opcode].record.as_str();
+                let named = if record == "ISB" {
+                    (value == 15).then(|| "sy".to_string())
+                } else {
+                    system_tables_for().barrier_names.get(&value).cloned()
+                };
+                match named {
+                    Some(held) => out.push_str(&held),
+                    None => out.push_str(&format!("#{value}")),
+                }
+            }
+            "printBarriernXSOption" => {
+                let value = operand.immediate() as u32;
+                let found = system_tables_for()
+                    .barriers_no_xs
+                    .values()
+                    .find(|(entry, _)| entry.encoding == value);
+                match found {
+                    Some((entry, _)) => out.push_str(&entry.name),
+                    None => out.push_str(&format!("#{value}")),
+                }
+            }
+            "printMRSSystemRegister" | "printMSRSystemRegister" => {
+                let value = operand.immediate() as u32;
+                let read = name == "printMRSSystemRegister";
+                let found = system_tables_for().registers.values().find(|entry| {
+                    entry.encoding == value
+                        && (if read {
+                            entry.readable
+                        } else {
+                            entry.writeable
+                        })
+                        && predicates_features(&entry.requires, self.features)
+                });
+                match found {
+                    Some(entry) => out.push_str(&entry.name),
+                    None => out.push_str(&generic_register_string(value)),
+                }
+            }
+            "printSystemPStateField" => {
+                let value = operand.immediate() as u32;
+                let tables = system_tables_for();
+                let fifteen = tables.pstate_fifteen.values().find(|entry| {
+                    entry.encoding == value && predicates_features(&entry.requires, self.features)
+                });
+                let one = tables.pstate_one.values().find(|entry| {
+                    entry.encoding == value && predicates_features(&entry.requires, self.features)
+                });
+                match fifteen.or(one) {
+                    Some(entry) => out.push_str(&entry.name),
+                    None => out.push_str(&format!("#{value}")),
+                }
+            }
+            "printSIMDType10Operand" => {
+                let raw = operand.immediate() as u32;
+                let value = (0..8).fold(0u64, |value, bit| {
+                    if raw & (1 << bit) != 0 {
+                        value | (0xffu64 << (bit * 8))
+                    } else {
+                        value
+                    }
+                });
+                out.push_str(&format!("#{value:#018x}"));
+            }
+            "printComplexRotationOp" => {
+                out.push_str(&format!("#{}", operand.immediate() * number(0) + number(1)))
+            }
+            "printGPR64as32" => {
+                if let MachineOperand::Register(register) = operand {
+                    out.push_str(&self.register_name(self.target.arm_w_from_x(*register)));
+                }
+            }
+            "printGPR64x8" => {
+                if let MachineOperand::Register(register) = operand {
+                    let members = &self.target.registers[*register as usize].sub_registers;
+                    match members.first() {
+                        Some(first) => out.push_str(&self.register_name(*first)),
+                        None => out.push_str(&self.register_name(*register)),
+                    }
+                }
+            }
+            "printSyspXzrPair" => out.push_str("xzr, xzr"),
+            _ => self.call_method("printOperand", instruction, index, out),
+        }
+    }
+
+    fn shifter(&self, value: i64, out: &mut String) {
+        let kind = (value >> 6) & 7;
+        let amount = value & 0x3f;
+        if kind == 0 && amount == 0 {
+            return;
+        }
+        let names = ["lsl", "lsr", "asr", "ror", "msl"];
+        out.push_str(&format!(
+            ", {} #{}",
+            names.get(kind as usize).copied().unwrap_or("lsl"),
+            amount
+        ));
+    }
+
+    fn arith_extend(&self, instruction: &MachineInstruction, index: usize, out: &mut String) {
+        let value = instruction.immediate_at(index);
+        let extension = ((value >> 3) & 7) as usize;
+        let amount = value & 7;
+        let names = [
+            "uxtb", "uxth", "uxtw", "uxtx", "sxtb", "sxth", "sxtw", "sxtx",
+        ];
+        let name = names[extension];
+        if name == "uxtw" || name == "uxtx" {
+            let destination = self.target.registers[instruction.register_at(0) as usize]
+                .record
+                .as_str();
+            let source = self.target.registers[instruction.register_at(1) as usize]
+                .record
+                .as_str();
+            if ((destination == "SP" || source == "SP") && name == "uxtx")
+                || ((destination == "WSP" || source == "WSP") && name == "uxtw")
+            {
+                if amount != 0 {
+                    out.push_str(&format!(", lsl #{amount}"));
+                }
+                return;
+            }
+        }
+        out.push_str(&format!(", {name}"));
+        if amount != 0 {
+            out.push_str(&format!(" #{amount}"));
+        }
+    }
+
+    fn mem_extend(&self, sign: bool, shift: bool, width: i64, kind: &str, out: &mut String) {
+        let lsl = !sign && kind == "x";
+        if lsl {
+            out.push_str("lsl");
+        } else {
+            out.push_str(&format!("{}xt{kind}", if sign { 's' } else { 'u' }));
+        }
+        if shift || lsl {
+            out.push_str(&format!(" #{}", (width / 8).max(1).ilog2()));
+        }
+    }
+
+    fn vector_list(
+        &self,
+        instruction: &MachineInstruction,
+        index: usize,
+        suffix: &str,
+        out: &mut String,
+    ) {
+        let MachineOperand::Register(register) = instruction.operand(index) else {
+            return;
+        };
+        let held = &self.target.registers[*register as usize];
+        let members: Vec<RegisterId> = if held.sub_registers.len() > 1 && held.record.contains('_')
+        {
+            held.sub_registers.clone()
+        } else {
+            vec![*register]
+        };
+        let names: Vec<String> = members
+            .iter()
+            .map(|member| format!("{}{suffix}", self.vector_register_name(*member)))
+            .collect();
+        out.push_str(&format!("{{ {} }}", names.join(", ")));
+    }
+}
+
+fn generic_register_string(value: u32) -> String {
+    let op0 = 2 | ((value >> 14) & 1);
+    let op1 = (value >> 11) & 7;
+    let crn = (value >> 7) & 15;
+    let crm = (value >> 3) & 15;
+    let op2 = value & 7;
+    format!("S{op0}_{op1}_C{crn}_C{crm}_{op2}")
 }

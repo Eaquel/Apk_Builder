@@ -4225,8 +4225,12 @@ pub fn expression_text(
         Expression::Symbol { name, specifier } => {
             let mut out = symbol_text_with(target, name, syntax);
             if let Some(specifier) = specifier {
-                out.push('@');
-                out.push_str(specifier);
+                if target.isa == Isa::Armv8 {
+                    out = format!(":{specifier}:{out}");
+                } else {
+                    out.push('@');
+                    out.push_str(specifier);
+                }
             }
             out
         }
@@ -18430,6 +18434,7 @@ pub struct TextStreamer {
     pub hexadecimal_immediates: bool,
     pub comment_column: usize,
     pub markup: bool,
+    pub arm_features: BTreeSet<String>,
     output: String,
     column: usize,
     comments: String,
@@ -18454,6 +18459,7 @@ impl TextStreamer {
             hexadecimal_immediates,
             comment_column,
             markup: false,
+            arm_features: BTreeSet::new(),
             output: String::new(),
             column: 0,
             comments: String::new(),
@@ -18499,7 +18505,12 @@ impl TextStreamer {
         loop {
             self.pad_to_comment_column();
             let position = rest.find('\n').unwrap_or(rest.len());
-            let line = format!("# {}\n", &rest[..position]);
+            let prefix = if self.target.isa == Isa::Armv8 {
+                "//"
+            } else {
+                "#"
+            };
+            let line = format!("{prefix} {}\n", &rest[..position]);
             self.write(&line);
             rest = if position < rest.len() {
                 &rest[position + 1..]
@@ -18667,8 +18678,12 @@ impl TextStreamer {
         mode: Mode,
         location: SourceLocation,
     ) -> bool {
-        let encoder = Encoder::new(self.target, mode);
-        let encoded = match encoder.encode(instruction) {
+        let encoded = if self.target.isa == Isa::Armv8 {
+            armv8::encode(self.target, instruction)
+        } else {
+            Encoder::new(self.target, mode).encode(instruction)
+        };
+        let encoded = match encoded {
             Ok(encoded) => encoded,
             Err(diagnostic) => {
                 let cause = diagnostic
@@ -18684,9 +18699,13 @@ impl TextStreamer {
         let bytes = &encoded.bytes;
         let mut map = vec![0usize; bytes.len() * 8];
         for (index, fixup) in encoded.fixups.iter().enumerate() {
-            let size = fixup.kind.size() * 8;
+            let (first_bit, size) = if self.target.isa == Isa::Armv8 {
+                armv8::fixup_bits(fixup.kind)
+            } else {
+                (0, fixup.kind.size() * 8)
+            };
             for bit in 0..size {
-                let at = fixup.offset * 8 + bit;
+                let at = fixup.offset * 8 + first_bit + bit;
                 if at < map.len() {
                     map[at] = index + 1;
                 }
@@ -19214,6 +19233,17 @@ impl Streamer for TextStreamer {
         location: SourceLocation,
     ) {
         if self.show_encoding && !self.encoding_comment(context, instruction, mode, location) {
+            return;
+        }
+        if self.target.isa == Isa::Armv8 {
+            let printer = armv8::ArmPrinter::new(self.target, &self.arm_features);
+            let text = printer.print(instruction);
+            self.comments.push_str(&printer.comment.borrow());
+            self.write(&text);
+            if !self.comments.is_empty() && !self.comments.ends_with('\n') {
+                self.comments.push('\n');
+            }
+            self.end_of_line();
             return;
         }
         let printer = Printer::new(
@@ -19813,13 +19843,19 @@ pub fn assemble_source(
     };
     let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);
     let streamer: Box<dyn Streamer> = match options.output {
-        OutputKind::Assembly => Box::new(TextStreamer::new(
-            target,
-            output_syntax,
-            options.show_encoding,
-            options.hexadecimal_immediates,
-            options.comment_column,
-        )),
+        OutputKind::Assembly => {
+            let mut text = TextStreamer::new(
+                target,
+                output_syntax,
+                options.show_encoding,
+                options.hexadecimal_immediates,
+                options.comment_column,
+            );
+            if triple.isa == Isa::Armv8 {
+                text.arm_features = armv8::feature_set(target, &options.cpu, &options.features);
+            }
+            Box::new(text)
+        }
         OutputKind::Null => Box::new(NullStreamer::new()),
         OutputKind::Object => Box::new(object::ObjectStreamer::new(target, options)),
     };
