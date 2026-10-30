@@ -71970,6 +71970,26 @@ mod x86_assembly {
 
     const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
         (
+            "MC/AArch64/armv9a-tlbip.s",
+            "llvm-objdump 18 prints the TLBIP nXS operations as generic SYSP instructions",
+        ),
+        (
+            "MC/AArch64/data-directive-specifier.s",
+            "llvm-readobj 18 does not name R_AARCH64_FUNCINIT64, whose number is not in the available sources",
+        ),
+        (
+            "MC/AArch64/adrp-auth-relocation.s",
+            "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
+            "MC/AArch64/elf-reloc-ptrauth.s",
+            "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
+            "MC/AArch64/tls-auth-relocs.s",
+            "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
             "MC/AArch64/build-attributes-asm-arch-specific-empty.s",
             "llvm-readelf 18 prints nothing for --arch-specific on AArch64 objects",
         ),

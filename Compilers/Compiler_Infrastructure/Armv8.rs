@@ -855,6 +855,8 @@ pub struct SystemTables {
     pub barriers_no_xs: BTreeMap<String, (SystemEntry, u32)>,
     pub prefetches: BTreeMap<String, SystemEntry>,
     pub prefetch_names: BTreeMap<u32, String>,
+    pub range_prefetches: BTreeMap<String, SystemEntry>,
+    pub range_prefetch_names: BTreeMap<u32, String>,
     pub pstate_one: BTreeMap<String, SystemEntry>,
     pub pstate_fifteen: BTreeMap<String, SystemEntry>,
     pub pstate_one_encodings: BTreeSet<u32>,
@@ -915,6 +917,12 @@ pub fn system_tables(target: &'static Target) -> &'static SystemTables {
                         .prefetch_names
                         .insert(held.encoding, held.name.clone());
                     tables.prefetches.insert(lower(&held), held);
+                } else if record.is_a("RPRFM") {
+                    let held = entry();
+                    tables
+                        .range_prefetch_names
+                        .insert(held.encoding, held.name.clone());
+                    tables.range_prefetches.insert(lower(&held), held);
                 } else if record.is_a("PStateImm0_1") {
                     let held = entry();
                     tables.pstate_one_encodings.insert(held.encoding);
@@ -985,6 +993,19 @@ pub fn system_tables(target: &'static Target) -> &'static SystemTables {
                     );
                 }
             }
+        }
+        if tables.hints.is_empty() {
+            tables.hints.insert(
+                "nb".to_string(),
+                SystemEntry {
+                    order: 0,
+                    name: "nb".to_string(),
+                    encoding: 1,
+                    readable: true,
+                    writeable: true,
+                    requires: Vec::new(),
+                },
+            );
         }
         tables
     })
@@ -2696,7 +2717,20 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm_try_parse_prefetch(&mut self, operands: &mut Vec<ParsedOperand>) -> Status {
+        self.arm_try_parse_prefetch_kind(operands, false)
+    }
+
+    fn arm_try_parse_prefetch_kind(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        range: bool,
+    ) -> Status {
         let tables = system_tables_for();
+        let (names, by_name, maximum) = if range {
+            (&tables.range_prefetch_names, &tables.range_prefetches, 63)
+        } else {
+            (&tables.prefetch_names, &tables.prefetches, 31)
+        };
         let start = self.lexer.token.start;
         if self.is(TokenKind::Hash) || self.is(TokenKind::Integer) {
             self.parse_optional_token(TokenKind::Hash);
@@ -2707,15 +2741,13 @@ impl<'s> Assembler<'s> {
                 self.token_error("immediate value expected for prefetch operand");
                 return Status::Failure;
             };
-            if !(0..=31).contains(&value) {
-                self.token_error("prefetch operand out of range, [0,31] expected");
+            if !(0..=maximum).contains(&value) {
+                self.token_error(&format!(
+                    "prefetch operand out of range, [0,{maximum}] expected"
+                ));
                 return Status::Failure;
             }
-            let name = tables
-                .prefetch_names
-                .get(&(value as u32))
-                .cloned()
-                .unwrap_or_default();
+            let name = names.get(&(value as u32)).cloned().unwrap_or_default();
             self.arm_push(
                 operands,
                 start,
@@ -2731,7 +2763,7 @@ impl<'s> Assembler<'s> {
             return Status::Failure;
         }
         let text = self.lexer.token.text.clone();
-        let Some(entry) = tables.prefetches.get(&text.to_ascii_lowercase()) else {
+        let Some(entry) = by_name.get(&text.to_ascii_lowercase()) else {
             self.token_error("prefetch hint expected");
             return Status::Failure;
         };
@@ -2910,17 +2942,13 @@ impl<'s> Assembler<'s> {
             );
             return Status::Failure;
         }
-        let name = format!(
-            "X{}_X{}_X{}_X{}_X{}_X{}_X{}_X{}",
-            encoding,
-            encoding + 1,
-            encoding + 2,
-            encoding + 3,
-            encoding + 4,
-            encoding + 5,
-            encoding + 6,
-            encoding + 7
-        );
+        let name = (0..8)
+            .map(|offset| match encoding + offset {
+                29 => "FP".to_string(),
+                number => format!("X{number}"),
+            })
+            .collect::<Vec<String>>()
+            .join("_");
         let tuple = self.target.named_register(&name);
         let register = if tuple == NO_REGISTER {
             register
@@ -3104,6 +3132,7 @@ impl<'s> Assembler<'s> {
             "tryParseSysReg" => self.arm_try_parse_sys_reg(operands),
             "tryParseSysCROperand" => self.arm_try_parse_sys_cr(operands),
             "tryParsePrefetch" => self.arm_try_parse_prefetch(operands),
+            "tryParseRPRFMOperand" => self.arm_try_parse_prefetch_kind(operands, true),
             "tryParseTIndexHint" => self.arm_try_parse_t_index_hint(operands),
             "tryParseSyspXzrPair" => self.arm_try_parse_syp_xzr_pair(operands),
             "tryParseGPRSeqPair" => self.arm_try_parse_gpr_seq_pair(operands),
@@ -5502,6 +5531,11 @@ impl<'t> ArmPrinter<'t> {
                 return Some(text);
             }
         }
+        if record == "PRFMroX" || record == "PRFMroW" {
+            if let Some(text) = self.range_prefetch_alias(instruction, record == "PRFMroX") {
+                return Some(text);
+            }
+        }
         if record == "SYSLxt" {
             if let Some(text) = self.sysl_alias(instruction) {
                 return Some(text);
@@ -5869,9 +5903,14 @@ impl<'t> ArmPrinter<'t> {
             "printPrefetchOp" | "printRPRFMOperand" => {
                 let value = operand.immediate() as u32;
                 let tables = system_tables_for();
-                match tables.prefetch_names.get(&value) {
-                    Some(held) if name == "printPrefetchOp" => out.push_str(held),
-                    _ => out.push_str(&format!("#{}", format_immediate(i64::from(value)))),
+                let names = if name == "printPrefetchOp" {
+                    &tables.prefetch_names
+                } else {
+                    &tables.range_prefetch_names
+                };
+                match names.get(&value) {
+                    Some(held) => out.push_str(held),
+                    None => out.push_str(&format!("#{}", format_immediate(i64::from(value)))),
                 }
             }
             "printTIndexHintOp" => {
@@ -6836,6 +6875,34 @@ impl<'t> ArmPrinter<'t> {
             value(first + 3)?,
         );
         Some((cn, cm, op2 | (cm << 3) | (cn << 7) | (op1 << 11)))
+    }
+
+    fn range_prefetch_alias(
+        &self,
+        instruction: &MachineInstruction,
+        extended: bool,
+    ) -> Option<String> {
+        let operation = instruction.immediate_at(0) as u32;
+        if operation & 0x18 != 0x18 {
+            return None;
+        }
+        let mut register = self.register_text(instruction, 2);
+        if register.starts_with('w') {
+            register.replace_range(0..1, "x");
+        }
+        let sign = instruction.immediate_at(3) as u32 & 1;
+        let shift = instruction.immediate_at(4) as u32 & 1;
+        let option = u32::from(extended);
+        let code = (sign << 5) | (option << 4) | (shift << 3) | (operation & 7);
+        let tables = system_tables_for();
+        let name = match tables.range_prefetch_names.get(&code) {
+            Some(name) => name.clone(),
+            None => format!("#{}", format_immediate(i64::from(code))),
+        };
+        Some(format!(
+            "\trprfm {name}, {register}, [{}]",
+            self.register_text(instruction, 1)
+        ))
     }
 
     fn sysl_alias(&self, instruction: &MachineInstruction) -> Option<String> {
