@@ -11387,7 +11387,7 @@ impl<'s> Assembler<'s> {
                 let resolved_name = self.context.symbols[symbol].name.clone();
                 if let Some(value) = self.context.symbols[symbol].value.clone() {
                     let inline = matches!(value, Expression::Constant(_) | Expression::Register(_));
-                    if inline && specifier.is_none() {
+                    if inline && specifier.is_none() && !self.arm_keep_symbols {
                         return Ok((value, end));
                     }
                     if matches!(value, Expression::Register(_)) && specifier.is_some() {

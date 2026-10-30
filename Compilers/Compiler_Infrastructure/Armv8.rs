@@ -4796,17 +4796,20 @@ impl<'s> Assembler<'s> {
                 let mut text = "instruction requires:".to_string();
                 let mut seen: Vec<String> = Vec::new();
                 for feature in &outcome.missing {
-                    if seen.contains(feature) {
-                        continue;
+                    if !seen.contains(feature) {
+                        seen.push(feature.clone());
                     }
-                    seen.push(feature.clone());
-                    let name = match self
-                        .target
-                        .records
-                        .get(feature)
-                        .and_then(|record| record.field("AssemblerCondDag"))
-                    {
-                        Some(condition) => requirement_text(self.target, condition).0,
+                }
+                seen.sort();
+                for feature in &seen {
+                    let name = match self.target.records.get(feature) {
+                        Some(record) if !table_text(record, "PredicateName").is_empty() => {
+                            table_text(record, "PredicateName")
+                        }
+                        Some(record) => match record.field("AssemblerCondDag") {
+                            Some(condition) => requirement_text(self.target, condition).0,
+                            None => feature.clone(),
+                        },
                         None => feature.clone(),
                     };
                     text.push(' ');
