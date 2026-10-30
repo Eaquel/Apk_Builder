@@ -3796,6 +3796,7 @@ pub struct AliasPattern {
     pub pieces: Vec<AliasPiece>,
     pub operand_count: usize,
     pub conditions: Vec<AliasCondition>,
+    pub predicates: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -4060,6 +4061,7 @@ fn alias_patterns(target: &Target, variant: usize) -> BTreeMap<usize, Vec<AliasP
                 pieces,
                 operand_count,
                 conditions,
+                predicates: alias.predicates.clone(),
             });
         }
         let unique: Vec<AliasPattern> = patterns
@@ -4070,6 +4072,7 @@ fn alias_patterns(target: &Target, variant: usize) -> BTreeMap<usize, Vec<AliasP
                     other_index != *index
                         && other.operand_count == pattern.operand_count
                         && other.conditions == pattern.conditions
+                        && (target.isa == Isa::X86 || other.predicates == pattern.predicates)
                 })
             })
             .map(|(_, pattern)| pattern.clone())

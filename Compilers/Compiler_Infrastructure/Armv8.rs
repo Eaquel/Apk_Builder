@@ -848,6 +848,17 @@ pub struct SystemTables {
     pub pstate_fifteen_encodings: BTreeSet<u32>,
     pub hints: BTreeMap<String, SystemEntry>,
     pub exact_floats: BTreeMap<u32, String>,
+    pub sys_aliases: BTreeMap<&'static str, Vec<SysAlias>>,
+}
+
+#[derive(Clone, Debug)]
+pub struct SysAlias {
+    pub order: u64,
+    pub name: String,
+    pub encoding: u32,
+    pub requires: Vec<String>,
+    pub needs_register: bool,
+    pub optional_register: bool,
 }
 
 fn system_entry(record: &TableRecord) -> SystemEntry {
@@ -901,6 +912,41 @@ pub fn system_tables(target: &'static Target) -> &'static SystemTables {
                 } else if record.is_a("TIndex") {
                     let held = entry();
                     tables.hints.insert(lower(&held), held);
+                } else if let Some(group) = ["IC", "DC", "AT", "TLBIEntry"]
+                    .into_iter()
+                    .find(|class| record.is_a(class))
+                {
+                    let requires_text = if record.field("RequiresStr").is_some() {
+                        table_text(record, "RequiresStr")
+                    } else {
+                        table_text(record, "Requires")
+                    };
+                    let reg_use = match record.field("RegUse") {
+                        Some(TableValue::Record(name)) => name.clone(),
+                        _ => String::new(),
+                    };
+                    let needs_register = match group {
+                        "IC" => table_bit(record, "NeedsReg"),
+                        "TLBIEntry" => reg_use == "REG_REQUIRED",
+                        _ => true,
+                    };
+                    tables
+                        .sys_aliases
+                        .entry(match group {
+                            "TLBIEntry" => "TLBI",
+                            "IC" => "IC",
+                            "DC" => "DC",
+                            _ => "AT",
+                        })
+                        .or_default()
+                        .push(SysAlias {
+                            order: record.definition_order,
+                            name: table_text(record, "Name"),
+                            encoding: table_integer(record, "Encoding") as u32,
+                            requires: requirement_features(&requires_text),
+                            needs_register,
+                            optional_register: reg_use == "REG_OPTIONAL",
+                        });
                 } else if record.is_a("ExactFPImm") {
                     tables.exact_floats.insert(
                         table_integer(record, "Enum") as u32,
@@ -3264,6 +3310,16 @@ impl<'s> Assembler<'s> {
         let mut operands: Vec<ParsedOperand> = Vec::new();
         let head_end = name.find('.').unwrap_or(name.len());
         let head = name[..head_end].to_string();
+        if matches!(
+            head.as_str(),
+            "ic" | "dc" | "at" | "tlbi" | "cfp" | "dvp" | "cpp" | "cosp"
+        ) {
+            if name.contains('.') {
+                self.token_error("invalid operand");
+                return Err(());
+            }
+            return self.arm_parse_sys_alias(&head, name_start);
+        }
         self.arm_push_token(&mut operands, &head, name_start);
         self.arm_mnemonic = head.clone();
         let mut next = name.find('.');
@@ -3462,9 +3518,10 @@ pub fn requirement_text(target: &Target, value: &TableValue) -> (String, bool) {
 }
 
 fn predicates_features(requires: &[String], features: &BTreeSet<String>) -> bool {
-    requires
-        .iter()
-        .all(|feature| features.contains(feature) || feature.is_empty())
+    features.contains("FeatureAll")
+        || requires
+            .iter()
+            .all(|feature| features.contains(feature) || feature.is_empty())
 }
 
 fn generic_system_register(name: &str) -> Option<u32> {
@@ -5103,6 +5160,11 @@ impl<'t> ArmPrinter<'t> {
 
     fn special(&self, instruction: &MachineInstruction) -> Option<String> {
         let record = self.target.instructions[instruction.opcode].record.as_str();
+        if record == "SYSxt" {
+            if let Some(text) = self.sys_alias(instruction) {
+                return Some(text);
+            }
+        }
         let immediate = |index: usize| match instruction.operand(index) {
             MachineOperand::Immediate(value) => Some(*value),
             _ => None,
@@ -5978,5 +6040,297 @@ impl<'s> Assembler<'s> {
             }
         }
         false
+    }
+}
+
+fn required_features_text(target: &Target, requires: &[String]) -> String {
+    for (feature, text) in [
+        ("HasV8_0aOps", "ARMv8a"),
+        ("HasV8_1aOps", "ARMv8.1a"),
+        ("HasV8_2aOps", "ARMv8.2a"),
+        ("HasV8_3aOps", "ARMv8.3a"),
+        ("HasV8_4aOps", "ARMv8.4a"),
+        ("HasV8_5aOps", "ARMv8.5a"),
+        ("HasV8_6aOps", "ARMv8.6a"),
+        ("HasV8_7aOps", "ARMv8.7a"),
+        ("HasV8_8aOps", "ARMv8.8a"),
+        ("HasV8_9aOps", "ARMv8.9a"),
+        ("HasV9_0aOps", "ARMv9-a"),
+        ("HasV9_1aOps", "ARMv9.1a"),
+        ("HasV9_2aOps", "ARMv9.2a"),
+        ("HasV9_3aOps", "ARMv9.3a"),
+        ("HasV9_4aOps", "ARMv9.4a"),
+        ("HasV8_0rOps", "ARMv8r"),
+    ] {
+        if requires.iter().any(|held| held == feature) {
+            return text.to_string();
+        }
+    }
+    let mut names: Vec<(u64, String)> = Vec::new();
+    for record in target.records.values() {
+        if !record.is_a("Extension") || !requires.contains(&record.name) {
+            continue;
+        }
+        let visible = table_text(record, "UserVisibleName");
+        let alias = table_text(record, "UserVisibleAlias");
+        if !visible.is_empty() {
+            names.push((record.definition_order, visible));
+        }
+        if !alias.is_empty() {
+            names.push((record.definition_order, alias));
+        }
+    }
+    names.sort();
+    if names.is_empty() {
+        "(unknown)".to_string()
+    } else {
+        names
+            .into_iter()
+            .map(|(_, name)| name)
+            .collect::<Vec<_>>()
+            .join(", ")
+    }
+}
+
+impl<'s> Assembler<'s> {
+    fn arm_sys_cr_operands(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        encoding: u32,
+        start: usize,
+    ) {
+        let op2 = i64::from(encoding & 7);
+        let cm = (encoding & 0x78) >> 3;
+        let cn = (encoding & 0x780) >> 7;
+        let op1 = i64::from((encoding & 0x3800) >> 11);
+        for operand in [
+            ArmOperand::Immediate(Expression::Constant(op1)),
+            ArmOperand::SystemCr(cn),
+            ArmOperand::SystemCr(cm),
+            ArmOperand::Immediate(Expression::Constant(op2)),
+        ] {
+            operands.push(ParsedOperand {
+                kind: ParsedKind::Arm(Box::new(operand)),
+                start,
+                end: start,
+            });
+        }
+    }
+
+    fn arm_parse_sys_alias(
+        &mut self,
+        head: &str,
+        name_start: usize,
+    ) -> Result<Vec<ParsedOperand>, ()> {
+        let mut operands = Vec::new();
+        self.arm_mnemonic = head.to_string();
+        self.arm_push_token(&mut operands, "sys", name_start);
+        let start = self.lexer.token.start;
+        let op = self.lexer.token.text.clone();
+        let all = self.arm_features.contains("FeatureAll");
+        let tlbid = self.arm_features.contains("FeatureTLBID");
+        let mut expect_register = true;
+        let mut optional_register = false;
+        let tables = system_tables_for();
+        let group = match head {
+            "ic" => Some("IC"),
+            "dc" => Some("DC"),
+            "at" => Some("AT"),
+            "tlbi" => Some("TLBI"),
+            _ => None,
+        };
+        if let Some(group) = group {
+            let found = tables.sys_aliases.get(group).and_then(|list| {
+                list.iter()
+                    .find(|entry| entry.name.eq_ignore_ascii_case(&op))
+            });
+            let Some(entry) = found else {
+                self.token_error(&format!(
+                    "invalid operand for {} instruction",
+                    head.to_ascii_uppercase()
+                ));
+                return Err(());
+            };
+            if !predicates_features(&entry.requires, &self.arm_features) {
+                let text = format!(
+                    "{} {} requires: {}",
+                    head.to_ascii_uppercase(),
+                    entry.name,
+                    required_features_text(self.target, &entry.requires)
+                );
+                self.token_error(&text);
+                return Err(());
+            }
+            if group == "IC" || group == "TLBI" {
+                expect_register = entry.needs_register;
+            }
+            if group == "TLBI" && (all || tlbid) {
+                optional_register = entry.optional_register;
+            }
+            self.arm_sys_cr_operands(&mut operands, entry.encoding, start);
+        } else {
+            if !op.eq_ignore_ascii_case("rctx") {
+                self.token_error("invalid operand for prediction restriction instruction");
+                return Err(());
+            }
+            let predres = all || self.arm_features.contains("FeaturePredRes");
+            let specres2 = all || self.arm_features.contains("FeatureSPECRES2");
+            if head == "cosp" && !specres2 {
+                self.token_error("COSP requires: predres2");
+                return Err(());
+            }
+            if !predres {
+                self.token_error(&format!(
+                    "{}RCTX requires: predres",
+                    head.to_ascii_uppercase()
+                ));
+                return Err(());
+            }
+            let op2 = match head {
+                "cfp" => 0b100,
+                "dvp" => 0b101,
+                "cosp" => 0b110,
+                _ => 0b111,
+            };
+            let encoding = (0b011_0111_0011u32 << 3) | op2;
+            self.arm_sys_cr_operands(&mut operands, encoding, start);
+        }
+        self.lex();
+        let mut has_register = false;
+        if self.parse_optional_token(TokenKind::Comma) {
+            if !self.is(TokenKind::Identifier) || self.arm_parse_register(&mut operands) {
+                self.token_error("expected register operand");
+                return Err(());
+            }
+            has_register = true;
+        }
+        if !optional_register {
+            if expect_register && !has_register {
+                self.token_error(&format!("specified {head} op requires a register"));
+                return Err(());
+            } else if !expect_register && has_register {
+                self.token_error(&format!("specified {head} op does not use a register"));
+                return Err(());
+            }
+        }
+        if self.parse_token(
+            TokenKind::EndOfStatement,
+            "unexpected token in argument list",
+        ) {
+            return Err(());
+        }
+        Ok(operands)
+    }
+}
+
+impl<'t> ArmPrinter<'t> {
+    fn sys_alias(&self, instruction: &MachineInstruction) -> Option<String> {
+        let value = |index: usize| match instruction.operand(index) {
+            MachineOperand::Immediate(value) => Some(*value as u32),
+            _ => None,
+        };
+        let (op1, cn, cm, op2) = (value(0)?, value(1)?, value(2)?, value(3)?);
+        let encoding = op2 | (cm << 3) | (cn << 7) | (op1 << 11);
+        let tables = system_tables_for();
+        let all = self.features.contains("FeatureAll");
+        let tlbid = self.features.contains("FeatureTLBID");
+        let find = |group: &str| -> Option<&SysAlias> {
+            tables
+                .sys_aliases
+                .get(group)?
+                .iter()
+                .filter(|entry| {
+                    entry.encoding == encoding
+                        && predicates_features(&entry.requires, self.features)
+                })
+                .min_by_key(|entry| entry.order)
+        };
+        let needs_register;
+        let mut optional_register = false;
+        let instruction_name;
+        let name;
+        if cn == 7 {
+            match cm {
+                1 | 3 if op1 == 3 && cm == 3 || (cm == 1 && op1 == 3) => {
+                    if op1 != 3 || cn != 7 || cm != 3 {
+                        return None;
+                    }
+                    let required = if op2 == 6 {
+                        "FeatureSPECRES2"
+                    } else {
+                        "FeaturePredRes"
+                    };
+                    if !(all || self.features.contains(required)) {
+                        return None;
+                    }
+                    needs_register = true;
+                    instruction_name = match op2 {
+                        4 => "cfp",
+                        5 => "dvp",
+                        6 => "cosp",
+                        7 => "cpp",
+                        _ => return None,
+                    };
+                    name = "rctx".to_string();
+                }
+                1 if op1 == 0 => {
+                    let entry = find("IC")?;
+                    needs_register = entry.needs_register;
+                    instruction_name = "ic";
+                    name = entry.name.clone();
+                }
+                5 => {
+                    let entry = find("IC")?;
+                    needs_register = entry.needs_register;
+                    instruction_name = "ic";
+                    name = entry.name.clone();
+                }
+                4 | 6 | 10..=14 => {
+                    let entry = find("DC")?;
+                    needs_register = true;
+                    instruction_name = "dc";
+                    name = entry.name.clone();
+                }
+                8 | 9 => {
+                    let entry = find("AT")?;
+                    needs_register = true;
+                    instruction_name = "at";
+                    name = entry.name.clone();
+                }
+                15 => {
+                    if let Some(entry) = find("AT") {
+                        needs_register = true;
+                        instruction_name = "at";
+                        name = entry.name.clone();
+                    } else {
+                        let entry = find("DC")?;
+                        needs_register = true;
+                        instruction_name = "dc";
+                        name = entry.name.clone();
+                    }
+                }
+                _ => return None,
+            }
+        } else if cn == 8 || cn == 9 {
+            let entry = find("TLBI")?;
+            needs_register = entry.needs_register;
+            if all || tlbid {
+                optional_register = entry.optional_register;
+            }
+            instruction_name = "tlbi";
+            name = entry.name.clone();
+        } else {
+            return None;
+        }
+        let register = self.register_text(instruction, 4);
+        let not_zero = register != "xzr";
+        if not_zero && !needs_register && !optional_register {
+            return None;
+        }
+        let mut text = format!("\t{instruction_name}\t{name}").to_ascii_lowercase();
+        if needs_register || (optional_register && not_zero) {
+            text.push_str(&format!(", {register}"));
+        }
+        Some(text)
     }
 }
