@@ -74977,6 +74977,52 @@ mod armv8_assembly {
             .collect()
     }
 
+    fn armv7_text_expected(source: &str) -> Option<String> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("llvm-mc-18")
+            .args(["-triple=armv7a-linux-gnueabihf", "-mcpu=cortex-a15"])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(format!("{source}\n").as_bytes())
+            .ok()?;
+        let output = child.wait_with_output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        text.lines()
+            .find(|line| line.starts_with('\t') && !line.trim_start().starts_with('.'))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    fn armv7_text(source: &str) -> Result<String, String> {
+        use crate::compilers::x86_64::{
+            assemble_source, AssemblerOptions, MessageKind, OutputKind,
+        };
+        let mut options = AssemblerOptions::new("armv7a-linux-gnueabihf");
+        options.output = OutputKind::Assembly;
+        options.cpu = "cortex-a15".to_string();
+        let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
+            .map_err(|diagnostic| diagnostic.message)?;
+        let errors: Vec<String> = result
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Error)
+            .map(|message| message.text.clone())
+            .collect();
+        if result.failed || !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        let text = String::from_utf8_lossy(&result.output).to_string();
+        text.lines()
+            .find(|line| line.starts_with('\t') && !line.trim_start().starts_with('.'))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .ok_or_else(|| "no instruction line".to_string())
+    }
+
     fn armv7_object(source: &str) -> Result<Vec<u8>, String> {
         use crate::compilers::x86_64::{
             assemble_source, AssemblerOptions, MessageKind, OutputKind,
@@ -75094,11 +75140,24 @@ mod armv8_assembly {
             "pld [r0, #4]",
         ];
         let mut failures = Vec::new();
+        let mut printed = 0;
         for source in cases {
+            if armv7_text_expected(source).is_some() {
+                printed += 1;
+            }
             let Some(expected) = armv7_expected(source) else {
                 failures.push(format!("{source}: llvm-mc rejects it"));
                 continue;
             };
+            if let Some(want) = armv7_text_expected(source) {
+                match armv7_text(source) {
+                    Ok(got) if got == want => {}
+                    Ok(got) => failures.push(format!(
+                        "{source}: prints `{got}` but llvm-mc prints `{want}`"
+                    )),
+                    Err(message) => failures.push(format!("{source}: text output: {message}")),
+                }
+            }
             match armv7_object(source) {
                 Err(message) => failures.push(format!("{source}: {message}")),
                 Ok(bytes) => {
@@ -75113,6 +75172,7 @@ mod armv8_assembly {
         for failure in &failures {
             eprintln!("{failure}");
         }
+        assert_eq!(printed, cases.len(), "llvm-mc prints every case");
         assert!(
             failures.is_empty(),
             "{} of {} failed",

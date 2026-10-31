@@ -2601,3 +2601,911 @@ pub fn encode(
         fixups: Vec::new(),
     })
 }
+
+fn print_tables() -> &'static PrintTables {
+    static CELL: OnceLock<PrintTables> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let target = target().expect("the ARMv7 tables load");
+        PrintTables {
+            programs: target
+                .instructions
+                .iter()
+                .map(|instruction| print_program(target, instruction, 0))
+                .collect(),
+            aliases: alias_patterns(target, 0),
+        }
+    })
+}
+
+fn condition_name(code: u32) -> &'static str {
+    const NAMES: [&str; 15] = [
+        "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "",
+    ];
+    NAMES.get(code as usize).copied().unwrap_or("")
+}
+
+fn shift_name(shift: u32) -> &'static str {
+    match shift {
+        1 => "asr",
+        2 => "lsl",
+        3 => "lsr",
+        4 => "ror",
+        5 => "rrx",
+        6 => "uxtw",
+        _ => "",
+    }
+}
+
+fn translate_shift(amount: u32) -> u32 {
+    if amount == 0 {
+        32
+    } else {
+        amount
+    }
+}
+
+fn print_hexadecimal(value: u64) -> String {
+    if value == 0 {
+        "0".to_string()
+    } else {
+        format!("{value:#x}")
+    }
+}
+
+fn floating_text(value: f64) -> String {
+    let text = format!("{value:.6e}");
+    match text.split_once('e') {
+        Some((mantissa, exponent)) => {
+            let (sign, digits) = match exponent.strip_prefix('-') {
+                Some(digits) => ('-', digits),
+                None => ('+', exponent),
+            };
+            format!("{mantissa}e{sign}{digits:0>2}")
+        }
+        None => text,
+    }
+}
+
+pub struct Printer<'t> {
+    pub target: &'t Target,
+    pub features: &'t BTreeSet<String>,
+    pub hexadecimal: bool,
+    pub markup: bool,
+}
+
+impl<'t> Printer<'t> {
+    pub fn new(target: &'t Target, features: &'t BTreeSet<String>) -> Printer<'t> {
+        Printer {
+            target,
+            features,
+            hexadecimal: false,
+            markup: false,
+        }
+    }
+
+    fn register_name(&self, register: RegisterId) -> String {
+        self.target.registers[register as usize]
+            .assembly_name
+            .clone()
+    }
+
+    fn register_text(&self, instruction: &MachineInstruction, index: usize) -> String {
+        match instruction.operand(index) {
+            MachineOperand::Register(register) => self.register_name(*register),
+            _ => String::new(),
+        }
+    }
+
+    fn immediate_text(&self, value: i64) -> String {
+        if self.hexadecimal {
+            if value < 0 {
+                format!("-{}", print_hexadecimal(value.unsigned_abs()))
+            } else {
+                print_hexadecimal(value as u64)
+            }
+        } else {
+            value.to_string()
+        }
+    }
+
+    fn expression(&self, expression: &Expression) -> String {
+        expression_text(self.target, expression, 0, Syntax::Att)
+    }
+
+    fn predicate(&self, instruction: &MachineInstruction, index: usize) -> String {
+        let code = instruction.immediate_at(index) as u32;
+        if code == 15 {
+            "<und>".to_string()
+        } else {
+            condition_name(code).to_string()
+        }
+    }
+
+    fn carry(&self, instruction: &MachineInstruction, index: usize) -> &'static str {
+        if instruction.register_at(index) != NO_REGISTER {
+            "s"
+        } else {
+            ""
+        }
+    }
+
+    fn shift_suffix(&self, shift: u32, amount: u32) -> String {
+        if shift == 0 || (shift == 2 && amount == 0) {
+            return String::new();
+        }
+        let mut text = format!(", {}", shift_name(shift));
+        if shift != 5 {
+            text.push_str(&format!(" #{}", translate_shift(amount)));
+        }
+        text
+    }
+
+    fn register_list(&self, instruction: &MachineInstruction, first: usize) -> String {
+        let names: Vec<String> = (first..instruction.operands.len())
+            .map(|index| self.register_text(instruction, index))
+            .collect();
+        format!("{{{}}}", names.join(", "))
+    }
+
+    pub fn print(&self, instruction: &MachineInstruction) -> String {
+        let text = self.print_plain(instruction);
+        if self.markup {
+            armv8::apply_markup(&text)
+        } else {
+            text
+        }
+    }
+
+    fn special(&self, instruction: &MachineInstruction) -> Option<String> {
+        let record = self.target.instructions[instruction.opcode].record.as_str();
+        let stack = |index: usize| {
+            self.target.register_by_name.get("sp").copied() == Some(instruction.register_at(index))
+        };
+        match record {
+            "MOVsr" => {
+                let shift = (instruction.immediate_at(3) as u32) & 7;
+                Some(format!(
+                    "\t{}{}{}\t{}, {}, {}",
+                    shift_name(shift),
+                    self.carry(instruction, 6),
+                    self.predicate(instruction, 4),
+                    self.register_text(instruction, 0),
+                    self.register_text(instruction, 1),
+                    self.register_text(instruction, 2)
+                ))
+            }
+            "MOVsi" => {
+                let packed = instruction.immediate_at(2) as u32;
+                let shift = packed & 7;
+                let mut text = format!(
+                    "\t{}{}{}\t{}, {}",
+                    shift_name(shift),
+                    self.carry(instruction, 5),
+                    self.predicate(instruction, 3),
+                    self.register_text(instruction, 0),
+                    self.register_text(instruction, 1)
+                );
+                if shift != 5 {
+                    text.push_str(&format!(", #{}", translate_shift(packed >> 3)));
+                }
+                Some(text)
+            }
+            "STMDB_UPD" | "t2STMDB_UPD" if stack(0) && instruction.operands.len() > 5 => {
+                Some(format!(
+                    "\tpush{}{}\t{}",
+                    self.predicate(instruction, 2),
+                    if record == "t2STMDB_UPD" { ".w" } else { "" },
+                    self.register_list(instruction, 4)
+                ))
+            }
+            "STR_PRE_IMM" if stack(2) && instruction.immediate_at(3) == -4 => Some(format!(
+                "\tpush{}\t{{{}}}",
+                self.predicate(instruction, 4),
+                self.register_text(instruction, 1)
+            )),
+            "LDMIA_UPD" | "t2LDMIA_UPD" if stack(0) && instruction.operands.len() > 5 => {
+                Some(format!(
+                    "\tpop{}{}\t{}",
+                    self.predicate(instruction, 2),
+                    if record == "t2LDMIA_UPD" { ".w" } else { "" },
+                    self.register_list(instruction, 4)
+                ))
+            }
+            "LDR_POST_IMM" if stack(2) && instruction.immediate_at(4) == 4 => Some(format!(
+                "\tpop{}\t{{{}}}",
+                self.predicate(instruction, 5),
+                self.register_text(instruction, 0)
+            )),
+            "VSTMSDB_UPD" | "VSTMDDB_UPD" if stack(0) => Some(format!(
+                "\tvpush{}\t{}",
+                self.predicate(instruction, 2),
+                self.register_list(instruction, 4)
+            )),
+            "VLDMSIA_UPD" | "VLDMDIA_UPD" if stack(0) => Some(format!(
+                "\tvpop{}\t{}",
+                self.predicate(instruction, 2),
+                self.register_list(instruction, 4)
+            )),
+            "TSB" | "t2TSB" => Some("\ttsb\tcsync".to_string()),
+            _ => None,
+        }
+    }
+
+    fn print_plain(&self, instruction: &MachineInstruction) -> String {
+        if let Some(text) = self.special(instruction) {
+            return text;
+        }
+        let tables = print_tables();
+        if let Some(text) = self.alias(tables, instruction) {
+            return text;
+        }
+        let mut out = String::new();
+        for piece in &tables.programs[instruction.opcode] {
+            match piece {
+                PrintPiece::Literal(text) => out.push_str(text),
+                PrintPiece::Operand { method, index, .. } => {
+                    self.call_method(method, instruction, *index, &mut out)
+                }
+            }
+        }
+        out
+    }
+
+    fn alias(&self, tables: &PrintTables, instruction: &MachineInstruction) -> Option<String> {
+        let patterns = tables.aliases.get(&instruction.opcode)?;
+        let mut chosen = None;
+        for pattern in patterns {
+            if instruction.operands.len() != pattern.operand_count {
+                return None;
+            }
+            if let Some(record) = self.target.records.get(&pattern.record) {
+                let predicates = table_record_list(record, "Predicates");
+                if !armv8::predicates_hold(self.target, &predicates, self.features) {
+                    continue;
+                }
+            }
+            let mut index = 0;
+            let matched = pattern.conditions.iter().all(|condition| {
+                let operand = instruction.operand(index);
+                index += 1;
+                match condition {
+                    AliasCondition::Ignore => true,
+                    AliasCondition::InvertibleCondition => {
+                        matches!(operand, MachineOperand::Immediate(held) if *held != 14 && *held != 15)
+                    }
+                    AliasCondition::Immediate(value) => {
+                        matches!(operand, MachineOperand::Immediate(held) if *held == i64::from(*value))
+                    }
+                    AliasCondition::Register(register) => {
+                        matches!(operand, MachineOperand::Register(held) if held == register)
+                    }
+                    AliasCondition::TiedRegister(other) => {
+                        operand.is_register() && operand.register() == instruction.register_at(*other)
+                    }
+                    AliasCondition::RegisterClass(class) => match operand {
+                        MachineOperand::Register(held) => in_class(self.target, class, *held),
+                        _ => false,
+                    },
+                }
+            });
+            if matched {
+                chosen = Some(pattern);
+                break;
+            }
+        }
+        let pattern = chosen?;
+        let pieces = &pattern.pieces;
+        let mut out = String::from("\t");
+        let mut at = 0;
+        while at < pieces.len() {
+            match &pieces[at] {
+                AliasPiece::Literal(character) if *character != ' ' && *character != '\t' => {
+                    out.push(*character);
+                    at += 1;
+                }
+                _ => break,
+            }
+        }
+        if at < pieces.len() {
+            if matches!(
+                pieces[at],
+                AliasPiece::Literal(' ') | AliasPiece::Literal('\t')
+            ) {
+                out.push('\t');
+                at += 1;
+            }
+            while at < pieces.len() {
+                match &pieces[at] {
+                    AliasPiece::Literal(character) => out.push(*character),
+                    AliasPiece::Operand { index, method } => match method {
+                        Some(method) => self.call_method(method, instruction, *index, &mut out),
+                        None => self.call_method("printOperand", instruction, *index, &mut out),
+                    },
+                }
+                at += 1;
+            }
+        }
+        Some(out)
+    }
+
+    fn memory_barrier(&self, value: u32) -> String {
+        let version8 = self.features.contains("HasV8Ops");
+        let named = |name: &str, plain: bool| {
+            if plain || version8 {
+                name.to_string()
+            } else {
+                format!("#0x{value:x}")
+            }
+        };
+        match value {
+            1 => named("oshld", false),
+            2 => "oshst".to_string(),
+            3 => "osh".to_string(),
+            5 => named("nshld", false),
+            6 => "nshst".to_string(),
+            7 => "nsh".to_string(),
+            9 => named("ishld", false),
+            10 => "ishst".to_string(),
+            11 => "ish".to_string(),
+            13 => named("ld", false),
+            14 => "st".to_string(),
+            15 => "sy".to_string(),
+            other => format!("#0x{other:x}"),
+        }
+    }
+
+    fn address_offset_sign(sub: bool) -> &'static str {
+        if sub {
+            "-"
+        } else {
+            ""
+        }
+    }
+
+    fn call_method(
+        &self,
+        method: &str,
+        instruction: &MachineInstruction,
+        index: usize,
+        out: &mut String,
+    ) {
+        let (name, arguments) = split_arguments(method);
+        let operand = instruction.operand(index);
+        let flag = |at: usize| arguments.get(at).is_some_and(|argument| argument == "true");
+        let value = |at: usize| instruction.immediate_at(index + at);
+        let register = |at: usize| self.register_text(instruction, index + at);
+        let has_register = |at: usize| instruction.register_at(index + at) != NO_REGISTER;
+        match name.as_str() {
+            "" | "printOperand" => match operand {
+                MachineOperand::Register(held) => out.push_str(&self.register_name(*held)),
+                MachineOperand::Immediate(held) => {
+                    out.push_str(&format!("#{}", self.immediate_text(*held)))
+                }
+                MachineOperand::Expression(expression) => match expression {
+                    Expression::Binary { .. } => {
+                        out.push('#');
+                        out.push_str(&self.expression(expression));
+                    }
+                    other => out.push_str(&self.expression(other)),
+                },
+            },
+            "printPredicateOperand" => out.push_str(&self.predicate(instruction, index)),
+            "printMandatoryPredicateOperand" => {
+                out.push_str(condition_name(value(0) as u32).max("al"))
+            }
+            "printMandatoryRestrictedPredicateOperand" => {
+                if value(0) == 2 {
+                    out.push_str("cs")
+                } else {
+                    out.push_str(condition_name(value(0) as u32).max("al"))
+                }
+            }
+            "printMandatoryInvertedPredicateOperand" => {
+                out.push_str(condition_name(value(0) as u32 ^ 1).max("al"))
+            }
+            "printSBitModifierOperand" => out.push_str(self.carry(instruction, index)),
+            "printSORegRegOperand" => {
+                out.push_str(&register(0));
+                let shift = (value(2) as u32) & 7;
+                out.push_str(&format!(", {}", shift_name(shift)));
+                if shift != 5 {
+                    out.push(' ');
+                    out.push_str(&register(1));
+                }
+            }
+            "printSORegImmOperand" | "printT2SOOperand" => {
+                out.push_str(&register(0));
+                let packed = value(1) as u32;
+                out.push_str(&self.shift_suffix(packed & 7, packed >> 3));
+            }
+            "printAddrMode2Operand" | "printAddrMode3Operand" | "printAddrModeImm12Operand" => {
+                if !matches!(operand, MachineOperand::Register(_)) {
+                    self.call_method("printOperand", instruction, index, out);
+                    return;
+                }
+                out.push('[');
+                out.push_str(&register(0));
+                match name.as_str() {
+                    "printAddrMode2Operand" => {
+                        let packed = value(2) as u32;
+                        let sub = (packed >> 12) & 1 == 1;
+                        let amount = packed & 0xfff;
+                        if !has_register(1) {
+                            if amount != 0 {
+                                out.push_str(&format!(
+                                    ", #{}{}",
+                                    Self::address_offset_sign(sub),
+                                    amount
+                                ));
+                            }
+                        } else {
+                            out.push_str(", ");
+                            out.push_str(Self::address_offset_sign(sub));
+                            out.push_str(&register(1));
+                            out.push_str(&self.shift_suffix((packed >> 13) & 7, amount));
+                        }
+                    }
+                    "printAddrMode3Operand" => {
+                        let packed = value(2) as u32;
+                        let sub = (packed >> 8) & 1 == 1;
+                        if has_register(1) {
+                            out.push_str(&format!(
+                                ", {}{}",
+                                Self::address_offset_sign(sub),
+                                register(1)
+                            ));
+                        } else {
+                            let amount = packed & 0xff;
+                            if flag(0) || amount != 0 || sub {
+                                out.push_str(&format!(
+                                    ", #{}{}",
+                                    Self::address_offset_sign(sub),
+                                    amount
+                                ));
+                            }
+                        }
+                    }
+                    _ => {
+                        let offset = value(1) as i32;
+                        if offset == i32::MIN {
+                            if flag(0) {
+                                out.push_str(", #0");
+                            }
+                        } else if offset < 0 {
+                            out.push_str(&format!(
+                                ", #-{}",
+                                self.immediate_text(-i64::from(offset))
+                            ));
+                        } else if flag(0) || offset > 0 {
+                            out.push_str(&format!(", #{}", self.immediate_text(i64::from(offset))));
+                        }
+                    }
+                }
+                out.push(']');
+            }
+            "printAddrMode2OffsetOperand" => {
+                let packed = value(1) as u32;
+                let sub = (packed >> 12) & 1 == 1;
+                let amount = packed & 0xfff;
+                if !has_register(0) {
+                    out.push_str(&format!("#{}{}", Self::address_offset_sign(sub), amount));
+                } else {
+                    out.push_str(Self::address_offset_sign(sub));
+                    out.push_str(&register(0));
+                    out.push_str(&self.shift_suffix((packed >> 13) & 7, amount));
+                }
+            }
+            "printAddrMode3OffsetOperand" => {
+                let packed = value(1) as u32;
+                let sub = (packed >> 8) & 1 == 1;
+                if has_register(0) {
+                    out.push_str(Self::address_offset_sign(sub));
+                    out.push_str(&register(0));
+                } else {
+                    out.push_str(&format!(
+                        "#{}{}",
+                        Self::address_offset_sign(sub),
+                        packed & 0xff
+                    ));
+                }
+            }
+            "printPostIdxImm8Operand" => {
+                let packed = value(0) as u32;
+                out.push_str(&format!(
+                    "#{}{}",
+                    if packed & 256 != 0 { "" } else { "-" },
+                    packed & 0xff
+                ));
+            }
+            "printPostIdxImm8s4Operand" => {
+                let packed = value(0) as u32;
+                out.push_str(&format!(
+                    "#{}{}",
+                    if packed & 256 != 0 { "" } else { "-" },
+                    (packed & 0xff) << 2
+                ));
+            }
+            "printPostIdxRegOperand" => {
+                out.push_str(if value(1) != 0 { "" } else { "-" });
+                out.push_str(&register(0));
+            }
+            "printLdStmModeOperand" => out.push_str(match value(0) {
+                1 => "ia",
+                2 => "ib",
+                3 => "da",
+                4 => "db",
+                _ => "",
+            }),
+            "printAddrMode5Operand" | "printAddrMode5FP16Operand" => {
+                if !matches!(operand, MachineOperand::Register(_)) {
+                    self.call_method("printOperand", instruction, index, out);
+                    return;
+                }
+                out.push('[');
+                out.push_str(&register(0));
+                let packed = value(1) as u32;
+                let amount = packed & 0xff;
+                let sub = (packed >> 8) & 1 == 1;
+                let scale = if name == "printAddrMode5Operand" {
+                    4
+                } else {
+                    2
+                };
+                if flag(0) || amount != 0 || sub {
+                    out.push_str(&format!(
+                        ", #{}{}",
+                        Self::address_offset_sign(sub),
+                        amount * scale
+                    ));
+                }
+                out.push(']');
+            }
+            "printAddrMode6Operand" => {
+                out.push('[');
+                out.push_str(&register(0));
+                if value(1) != 0 {
+                    out.push_str(&format!(":{}", value(1) << 3));
+                }
+                out.push(']');
+            }
+            "printAddrMode7Operand" => out.push_str(&format!("[{}]", register(0))),
+            "printAddrMode6OffsetOperand" => {
+                if !has_register(0) {
+                    out.push('!');
+                } else {
+                    out.push_str(&format!(", {}", register(0)));
+                }
+            }
+            "printAddrModeTBB" => out.push_str(&format!("[{}, {}]", register(0), register(1))),
+            "printAddrModeTBH" => {
+                out.push_str(&format!("[{}, {}, lsl #1]", register(0), register(1)))
+            }
+            "printBitfieldInvMaskImmOperand" => {
+                let inverted = !(value(0) as u32);
+                let lsb = inverted.trailing_zeros();
+                let width = (32 - inverted.leading_zeros()) - lsb;
+                out.push_str(&format!("#{lsb}, #{width}"));
+            }
+            "printMemBOption" => out.push_str(&self.memory_barrier(value(0) as u32)),
+            "printInstSyncBOption" => {
+                let held = value(0);
+                if held == 15 {
+                    out.push_str("sy")
+                } else {
+                    out.push_str(&format!("#0x{held:x}"))
+                }
+            }
+            "printTraceSyncBOption" => out.push_str("csync"),
+            "printShiftImmOperand" => {
+                let packed = value(0) as u32;
+                let amount = packed & 0x1f;
+                if packed & 32 != 0 {
+                    out.push_str(&format!(", asr #{}", translate_shift(amount)));
+                } else if amount != 0 {
+                    out.push_str(&format!(", lsl #{amount}"));
+                }
+            }
+            "printPKHLSLShiftImm" => {
+                if value(0) != 0 {
+                    out.push_str(&format!(", lsl #{}", value(0)));
+                }
+            }
+            "printPKHASRShiftImm" => {
+                let held = if value(0) == 0 { 32 } else { value(0) };
+                out.push_str(&format!(", asr #{held}"));
+            }
+            "printRegisterList" => out.push_str(&self.register_list(instruction, index)),
+            "printGPRPairOperand" => {
+                if let MachineOperand::Register(held) = operand {
+                    let members = &self.target.registers[*held as usize].sub_registers;
+                    let names: Vec<String> = members
+                        .iter()
+                        .map(|member| self.register_name(*member))
+                        .collect();
+                    out.push_str(&names.join(", "));
+                }
+            }
+            "printSetendOperand" => out.push_str(if value(0) != 0 { "be" } else { "le" }),
+            "printCPSIMod" => out.push_str(match value(0) {
+                2 => "ie",
+                3 => "id",
+                _ => "",
+            }),
+            "printCPSIFlag" => {
+                let flags = value(0) as u32;
+                for bit in (0..3).rev() {
+                    if flags & (1 << bit) != 0 {
+                        out.push_str(["f", "i", "a"][bit]);
+                    }
+                }
+                if flags == 0 {
+                    out.push_str("none");
+                }
+            }
+            "printMSRMaskOperand" => {
+                let held = value(0) as u32;
+                let spsr = held >> 4;
+                let mask = held & 0xf;
+                if spsr == 0 && matches!(mask, 8 | 4 | 12) {
+                    out.push_str("APSR_");
+                    out.push_str(match mask {
+                        4 => "g",
+                        8 => "nzcvq",
+                        _ => "nzcvqg",
+                    });
+                    return;
+                }
+                out.push_str(if spsr != 0 { "SPSR" } else { "CPSR" });
+                if mask != 0 {
+                    out.push('_');
+                    for (bit, letter) in [(8, 'f'), (4, 's'), (2, 'x'), (1, 'c')] {
+                        if mask & bit != 0 {
+                            out.push(letter);
+                        }
+                    }
+                }
+            }
+            "printNoHashImmediate" => out.push_str(&value(0).to_string()),
+            "printPImmediate" => out.push_str(&format!("p{}", value(0))),
+            "printCImmediate" => out.push_str(&format!("c{}", value(0))),
+            "printCoprocOptionImm" => out.push_str(&format!("{{{}}}", value(0))),
+            "printAdrLabelOperand" => match operand {
+                MachineOperand::Expression(expression) => {
+                    out.push_str(&self.expression(expression))
+                }
+                _ => {
+                    let scale = arguments
+                        .first()
+                        .and_then(|argument| argument.parse::<u32>().ok())
+                        .unwrap_or(0);
+                    let offset = (value(0) as i32).wrapping_shl(scale);
+                    if offset == i32::MIN {
+                        out.push_str("#-0");
+                    } else if offset < 0 {
+                        out.push_str(&format!("#-{}", -i64::from(offset)));
+                    } else {
+                        out.push_str(&format!("#{offset}"));
+                    }
+                }
+            },
+            "printFPImmOperand" => {
+                let held = armv8::float_from_immediate(value(0) as u32);
+                out.push_str(&format!("#{}", floating_text(held)));
+            }
+            "printImmPlusOneOperand" => out.push_str(&format!("#{}", value(0) + 1)),
+            "printRotImmOperand" => {
+                if value(0) != 0 {
+                    out.push_str(&format!(", ror #{}", 8 * value(0)));
+                }
+            }
+            "printModImmOperand" => {
+                if let MachineOperand::Expression(expression) = operand {
+                    out.push_str(&self.expression(expression));
+                    return;
+                }
+                let held = value(0) as u32;
+                let bits = held & 0xff;
+                let rotation = (held & 0xf00) >> 7;
+                let record = self.target.instructions[instruction.opcode].record.as_str();
+                let unsigned = match record {
+                    "MOVi" => {
+                        index > 0
+                            && self.target.register_by_name.get("pc").copied()
+                                == Some(instruction.register_at(index - 1))
+                    }
+                    "MSRi" => true,
+                    _ => false,
+                };
+                let rotated = bits.rotate_right(rotation);
+                if so_immediate(rotated) == Some(held) {
+                    if unsigned {
+                        out.push_str(&format!("#{rotated}"));
+                    } else {
+                        out.push_str(&format!("#{}", rotated as i32));
+                    }
+                } else {
+                    out.push_str(&format!("#{bits}, #{rotation}"));
+                }
+            }
+            "printFBits16" => out.push_str(&format!("#{}", 16 - value(0))),
+            "printFBits32" => out.push_str(&format!("#{}", 32 - value(0))),
+            "printVectorIndex" => out.push_str(&format!("[{}]", value(0))),
+            "printThumbITMask" => {
+                let mask = value(0) as u32;
+                let trailing = mask.trailing_zeros();
+                for position in (trailing + 1..=3).rev() {
+                    out.push(if (mask >> position) & 1 == 1 {
+                        'e'
+                    } else {
+                        't'
+                    });
+                }
+            }
+            "printThumbS4ImmOperand" => out.push_str(&format!("#{}", value(0) * 4)),
+            "printThumbSRImm" => {
+                out.push_str(&format!("#{}", if value(0) == 0 { 32 } else { value(0) }))
+            }
+            "printThumbAddrModeRROperand" => {
+                if !matches!(operand, MachineOperand::Register(_)) {
+                    self.call_method("printOperand", instruction, index, out);
+                    return;
+                }
+                out.push('[');
+                out.push_str(&register(0));
+                if has_register(1) {
+                    out.push_str(&format!(", {}", register(1)));
+                }
+                out.push(']');
+            }
+            "printThumbAddrModeImm5S1Operand"
+            | "printThumbAddrModeImm5S2Operand"
+            | "printThumbAddrModeImm5S4Operand"
+            | "printThumbAddrModeSPOperand" => {
+                if !matches!(operand, MachineOperand::Register(_)) {
+                    self.call_method("printOperand", instruction, index, out);
+                    return;
+                }
+                let scale = match name.as_str() {
+                    "printThumbAddrModeImm5S1Operand" => 1,
+                    "printThumbAddrModeImm5S2Operand" => 2,
+                    _ => 4,
+                };
+                out.push('[');
+                out.push_str(&register(0));
+                if value(1) != 0 {
+                    out.push_str(&format!(", #{}", value(1) * scale));
+                }
+                out.push(']');
+            }
+            "printThumbLdrLabelOperand" => match operand {
+                MachineOperand::Expression(expression) => {
+                    out.push_str(&self.expression(expression))
+                }
+                _ => {
+                    let offset = value(0) as i32;
+                    if offset < 0 && offset != i32::MIN {
+                        out.push_str(&format!("[pc, #-{}]", -i64::from(offset)));
+                    } else {
+                        out.push_str(&format!(
+                            "[pc, #{}]",
+                            if offset == i32::MIN { 0 } else { offset }
+                        ));
+                    }
+                }
+            },
+            "printT2AddrModeImm8Operand" | "printT2AddrModeImm8s4Operand" => {
+                if !matches!(operand, MachineOperand::Register(_)) {
+                    self.call_method("printOperand", instruction, index, out);
+                    return;
+                }
+                out.push('[');
+                out.push_str(&register(0));
+                let offset = value(1) as i32;
+                if offset == i32::MIN {
+                    if flag(0) {
+                        out.push_str(", #0");
+                    }
+                } else if offset < 0 {
+                    out.push_str(&format!(", #-{}", -i64::from(offset)));
+                } else if flag(0) || offset > 0 {
+                    out.push_str(&format!(", #{offset}"));
+                }
+                out.push(']');
+            }
+            "printT2AddrModeImm8OffsetOperand" | "printT2AddrModeImm8s4OffsetOperand" => {
+                let offset = value(0) as i32;
+                if offset == i32::MIN {
+                    out.push_str(", #-0");
+                } else if offset < 0 {
+                    out.push_str(&format!(", #-{}", -i64::from(offset)));
+                } else {
+                    out.push_str(&format!(", #{offset}"));
+                }
+            }
+            "printT2AddrModeImm0_1020s4Operand" => {
+                out.push('[');
+                out.push_str(&register(0));
+                if value(1) != 0 {
+                    out.push_str(&format!(", #{}", value(1) * 4));
+                }
+                out.push(']');
+            }
+            "printT2AddrModeSoRegOperand" => {
+                out.push_str(&format!("[{}, {}", register(0), register(1)));
+                if value(2) != 0 {
+                    out.push_str(&format!(", lsl #{}", value(2)));
+                }
+                out.push(']');
+            }
+            "printVectorListOne" => out.push_str(&format!("{{{}}}", register(0))),
+            "printVectorListOneAllLanes" => out.push_str(&format!("{{{}[]}}", register(0))),
+            "printVectorListTwo"
+            | "printVectorListTwoSpaced"
+            | "printVectorListTwoAllLanes"
+            | "printVectorListTwoSpacedAllLanes" => {
+                let spaced = name.contains("Spaced");
+                let lanes = if name.contains("AllLanes") { "[]" } else { "" };
+                let held = self.vector_members(instruction.register_at(index), 2, spaced);
+                out.push_str(&format!("{{{}{lanes}, {}{lanes}}}", held[0], held[1]));
+            }
+            "printVectorListThree"
+            | "printVectorListFour"
+            | "printVectorListThreeSpaced"
+            | "printVectorListFourSpaced"
+            | "printVectorListThreeAllLanes"
+            | "printVectorListFourAllLanes"
+            | "printVectorListThreeSpacedAllLanes"
+            | "printVectorListFourSpacedAllLanes" => {
+                let spaced = name.contains("Spaced");
+                let lanes = if name.contains("AllLanes") { "[]" } else { "" };
+                let count = if name.contains("Three") { 3 } else { 4 };
+                let first = instruction.register_at(index);
+                let step = if spaced { 2 } else { 1 };
+                let encoding = u32::from(self.target.registers[first as usize].encoding);
+                let names: Vec<String> = (0..count)
+                    .map(|at| format!("d{}{lanes}", encoding + at * step))
+                    .collect();
+                out.push_str(&format!("{{{}}}", names.join(", ")));
+            }
+            "printVPTPredicateOperand" => out.push_str(match value(0) {
+                1 => "t",
+                2 => "e",
+                _ => "",
+            }),
+            "printComplexRotationOp" => {
+                let angle = arguments
+                    .first()
+                    .and_then(|argument| argument.parse::<i64>().ok())
+                    .unwrap_or(0);
+                let remainder = arguments
+                    .get(1)
+                    .and_then(|argument| argument.parse::<i64>().ok())
+                    .unwrap_or(0);
+                out.push_str(&format!("#{}", value(0) * angle + remainder));
+            }
+            _ => {
+                out.push_str(&format!("<{name}>"));
+            }
+        }
+    }
+
+    fn vector_members(&self, register: RegisterId, count: usize, spaced: bool) -> Vec<String> {
+        let held = &self.target.registers[register as usize];
+        if held.sub_registers.len() >= count && !spaced {
+            let members: Vec<String> = held
+                .sub_registers
+                .iter()
+                .take(count)
+                .map(|member| self.register_name(*member))
+                .collect();
+            if members.len() == count {
+                return members;
+            }
+        }
+        let encoding = u32::from(held.encoding);
+        let step = if spaced { 2 } else { 1 };
+        (0..count as u32)
+            .map(|at| format!("d{}", encoding + at * step))
+            .collect()
+    }
+}

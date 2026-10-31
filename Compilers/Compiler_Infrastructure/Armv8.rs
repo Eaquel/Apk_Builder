@@ -6064,7 +6064,7 @@ const LDSTN_DESCRIPTIONS: &[(&str, &str, &str, usize, bool, i64)] = &[
     ("ST4Fourv2s_POST", "st4", ".2s", 1, false, 32),
 ];
 
-fn is_register_word(word: &str) -> bool {
+pub(super) fn is_register_word(word: &str) -> bool {
     if matches!(word, "sp" | "wsp" | "xzr" | "wzr" | "zt0" | "za" | "ffr") {
         return true;
     }
@@ -6078,7 +6078,7 @@ fn is_register_word(word: &str) -> bool {
         )
 }
 
-fn apply_markup(text: &str) -> String {
+pub(super) fn apply_markup(text: &str) -> String {
     let characters: Vec<char> = text.chars().collect();
     let mut out = String::new();
     let mut at = 0;

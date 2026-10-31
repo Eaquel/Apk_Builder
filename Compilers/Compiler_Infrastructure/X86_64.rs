@@ -18754,10 +18754,10 @@ impl TextStreamer {
         loop {
             self.pad_to_comment_column();
             let position = rest.find('\n').unwrap_or(rest.len());
-            let prefix = if self.target.isa == Isa::Armv8 {
-                "//"
-            } else {
-                "#"
+            let prefix = match self.target.isa {
+                Isa::Armv8 => "//",
+                Isa::Armv7 => "@",
+                Isa::X86 => "#",
             };
             let line = format!("{prefix} {}\n", &rest[..position]);
             self.write(&line);
@@ -19488,6 +19488,18 @@ impl Streamer for TextStreamer {
         if self.show_encoding && !self.encoding_comment(context, instruction, mode, location) {
             return;
         }
+        if self.target.isa == Isa::Armv7 {
+            let mut printer = armv7::Printer::new(self.target, &self.arm_features);
+            printer.hexadecimal = self.hexadecimal_immediates;
+            printer.markup = self.markup;
+            let text = printer.print(instruction);
+            self.write(&text);
+            if !self.comments.is_empty() && !self.comments.ends_with('\n') {
+                self.comments.push('\n');
+            }
+            self.end_of_line();
+            return;
+        }
         if self.target.isa == Isa::Armv8 {
             let mut printer = armv8::ArmPrinter::new(self.target, &self.arm_features);
             printer.hexadecimal = self.hexadecimal_immediates;
@@ -20158,7 +20170,7 @@ pub fn assemble_source(
                 options.hexadecimal_immediates,
                 options.comment_column,
             );
-            if triple.isa == Isa::Armv8 {
+            if triple.isa != Isa::X86 {
                 text.arm_features = armv8::feature_set(target, &options.cpu, &options.features);
             }
             Box::new(text)
