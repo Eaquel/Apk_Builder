@@ -9740,6 +9740,7 @@ pub struct Symbol {
     pub coff_storage_class: Option<i64>,
     pub coff_type: Option<i64>,
     pub address_significant: bool,
+    pub thumb_function: bool,
 }
 
 impl Symbol {
@@ -9769,6 +9770,7 @@ impl Symbol {
             coff_storage_class: None,
             coff_type: None,
             address_significant: false,
+            thumb_function: false,
         }
     }
 
@@ -10839,6 +10841,15 @@ pub trait Streamer {
     fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
     fn emit_arm32_attributes(&mut self, _contents: &[u8]) {}
+    fn emit_arm32_inst(
+        &mut self,
+        context: &mut AssemblyContext,
+        value: i64,
+        _suffix: char,
+        location: SourceLocation,
+    ) {
+        self.emit_inst(context, value, location);
+    }
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
     fn emit_mode_change(&mut self, context: &mut AssemblyContext, mode: Mode);
     fn emit_coff_directive(
@@ -10884,6 +10895,8 @@ pub struct Assembler<'s> {
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pub arm_keep_symbols: bool,
     pub arm_thumb: bool,
+    pub arm_next_thumb: bool,
+    pub arm_thumb_labels: BTreeSet<usize>,
     pub arm_it_remaining: u32,
     pub arm_operand_count: usize,
     pub arm_writeback: bool,
@@ -11058,6 +11071,8 @@ impl<'s> Assembler<'s> {
             arm_aliases: BTreeMap::new(),
             arm_keep_symbols: false,
             arm_thumb: starts_thumb,
+            arm_next_thumb: false,
+            arm_thumb_labels: BTreeSet::new(),
             arm_it_remaining: 0,
             arm_operand_count: 0,
             arm_writeback: false,
@@ -11955,8 +11970,18 @@ impl<'s> Assembler<'s> {
             self.print_error(location, &format!("symbol '{name}' is already defined"));
             return false;
         }
+        if self.target.isa == Isa::Armv7 && self.arm_next_thumb {
+            self.arm_next_thumb = false;
+            self.arm32_mark_thumb_function(symbol);
+        }
         self.streamer
             .emit_label(&mut self.context, symbol, Some(location));
+        if self.target.isa == Isa::Armv7 && self.arm_thumb {
+            self.arm_thumb_labels.insert(symbol);
+            if self.context.symbols[symbol].symbol_type == Some(SymbolType::Function) {
+                self.context.symbols[symbol].thumb_function = true;
+            }
+        }
         false
     }
 
@@ -14351,6 +14376,16 @@ impl<'s> Assembler<'s> {
         self.lex();
         self.streamer
             .emit_symbol_attribute(&mut self.context, symbol, attribute);
+        if self.target.isa == Isa::Armv7
+            && matches!(
+                attribute,
+                SymbolAttribute::TypeFunction | SymbolAttribute::TypeIndirectFunction
+            )
+            && self.context.symbols[symbol].defined
+            && self.arm_thumb_labels.contains(&symbol)
+        {
+            self.context.symbols[symbol].thumb_function = true;
+        }
         false
     }
 
@@ -18752,9 +18787,14 @@ impl<'s> Assembler<'s> {
             self.context.sections[section].has_instructions = true;
         }
         let mode = self.mode;
-        if self.target.isa == Isa::Armv7 && self.arm_thumb {
+        if self.target.isa == Isa::Armv7 {
             let mut marked = instruction.clone();
-            marked.flags |= armv7::THUMB_MODE;
+            if self.arm_thumb {
+                marked.flags |= armv7::THUMB_MODE;
+            }
+            if self.arm_features.contains("HasMVEIntegerOps") {
+                marked.flags |= armv7::MVE_MODE;
+            }
             self.streamer
                 .emit_instruction(&mut self.context, &marked, mode, location);
             return;
@@ -19853,6 +19893,20 @@ impl Streamer for TextStreamer {
 
     fn emit_inst(&mut self, _context: &mut AssemblyContext, value: i64, _location: SourceLocation) {
         self.line(&format!("\t.inst\t{value:#x}"));
+    }
+
+    fn emit_arm32_inst(
+        &mut self,
+        _context: &mut AssemblyContext,
+        value: i64,
+        suffix: char,
+        _location: SourceLocation,
+    ) {
+        if suffix == '\0' {
+            self.line(&format!("\t.inst\t{:#x}", value as u32));
+        } else {
+            self.line(&format!("\t.inst.{suffix}\t{:#x}", value as u32));
+        }
     }
 
     fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
@@ -25798,6 +25852,8 @@ pub mod object {
         implicit_mapping_symbols: bool,
         arm_attributes: armv8::AttributeSet,
         arm32_attributes: Vec<u8>,
+        arm32_mapping: BTreeMap<usize, (u8, Option<(usize, u64)>)>,
+        arm32_thumb: bool,
         thumb_two_features: bool,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
@@ -25988,6 +26044,8 @@ pub mod object {
                 implicit_mapping_symbols: options.implicit_mapping_symbols,
                 arm_attributes: armv8::AttributeSet::default(),
                 arm32_attributes: Vec::new(),
+                arm32_mapping: BTreeMap::new(),
+                arm32_thumb: false,
                 thumb_two_features: triple.isa == Isa::Armv7
                     && armv7::initial_features(target, &triple, &options.cpu, &options.features)
                         .contains("FeatureThumb2"),
@@ -26447,7 +26505,77 @@ pub mod object {
             }
         }
 
+        fn arm32_mapping_symbol(&mut self, context: &mut AssemblyContext, name: &str) -> usize {
+            let symbol = context.symbols.len();
+            context.symbols.push(Symbol::new(name, false));
+            self.emit_label(context, symbol, None);
+            symbol
+        }
+
+        fn arm32_mapping_change(&mut self, context: &mut AssemblyContext, kind: u8) {
+            let Some(section) = self.current_section() else {
+                return;
+            };
+            let (state, pending) = self
+                .arm32_mapping
+                .get(&section)
+                .copied()
+                .unwrap_or((0, None));
+            if state == kind {
+                return;
+            }
+            if kind == 3 {
+                if state == 0 {
+                    let fragment = self.fragment();
+                    let offset = self.fragments[fragment].fixed.len() as u64;
+                    self.arm32_mapping
+                        .insert(section, (3, Some((fragment, offset))));
+                    return;
+                }
+                self.arm32_mapping_symbol(context, "$d");
+                self.arm32_mapping.insert(section, (3, pending));
+                return;
+            }
+            if let Some((fragment, offset)) = pending {
+                let symbol = self.arm32_mapping_symbol(context, "$d");
+                context.symbols[symbol].fragment = Some(fragment);
+                context.symbols[symbol].offset = offset;
+            }
+            self.arm32_mapping_symbol(context, if kind == 1 { "$a" } else { "$t" });
+            self.arm32_mapping.insert(section, (kind, None));
+        }
+
+        fn is_thumb_function(&self, context: &AssemblyContext, symbol: usize) -> bool {
+            let mut current = symbol;
+            let mut seen = BTreeSet::new();
+            loop {
+                let held = &context.symbols[current];
+                if held.thumb_function {
+                    return true;
+                }
+                if !seen.insert(current) {
+                    return false;
+                }
+                let Some(Expression::Symbol { name, .. }) = &held.value else {
+                    return false;
+                };
+                let Some(next) = context.lookup(name) else {
+                    return false;
+                };
+                current = next;
+            }
+        }
+
         fn arm_mapping(&mut self, context: &mut AssemblyContext, instruction: bool) {
+            if self.target.isa == Isa::Armv7 {
+                let kind = match (instruction, self.arm32_thumb) {
+                    (false, _) => 3,
+                    (true, false) => 1,
+                    (true, true) => 2,
+                };
+                self.arm32_mapping_change(context, kind);
+                return;
+            }
             if self.target.isa != Isa::Armv8 {
                 return;
             }
@@ -28386,6 +28514,15 @@ pub mod object {
                     return false;
                 }
             }
+            if self.target.isa == Isa::Armv7 {
+                if context.symbols[symbol].temporary {
+                    return true;
+                }
+                if self.is_thumb_function(context, symbol) {
+                    return false;
+                }
+                return relocation_type == 2 || relocation_type == 42;
+            }
             !matches!(
                 Self::specifier_of(target).as_str(),
                 "GOT" | "PLT" | "GOTPCREL" | "GOTPCREL_NORELAX"
@@ -29580,11 +29717,18 @@ pub mod object {
                 SymbolVisibility::Protected => 3,
             };
             let other = held.other | visibility;
-            let value = if let Some((_, alignment)) = held.common {
+            let mut value = if let Some((_, alignment)) = held.common {
                 alignment
             } else {
                 self.symbol_value(context, symbol).unwrap_or(0)
             };
+            if self.target.isa == Isa::Armv7
+                && held.common.is_none()
+                && self.symbol_value(context, symbol).is_some()
+                && self.is_thumb_function(context, symbol)
+            {
+                value |= 1;
+            }
             let mut size_expression = held.size.clone();
             if size_expression.is_none() {
                 if let Some(base) = base {
@@ -30221,6 +30365,26 @@ pub mod object {
             self.arm32_attributes = contents.to_vec();
         }
 
+        fn emit_arm32_inst(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: i64,
+            suffix: char,
+            _location: SourceLocation,
+        ) {
+            self.arm32_thumb = suffix != '\0';
+            self.arm_mapping(context, true);
+            let value = value as u32;
+            match suffix {
+                'n' => self.append(&(value as u16).to_le_bytes()),
+                'w' => {
+                    self.append(&((value >> 16) as u16).to_le_bytes());
+                    self.append(&(value as u16).to_le_bytes());
+                }
+                _ => self.append(&value.to_le_bytes()),
+            }
+        }
+
         fn emit_arm_attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {
             self.arm_attributes.attribute(vendor, tag, value, text);
         }
@@ -30740,6 +30904,7 @@ pub mod object {
                 return;
             }
             self.mode = mode;
+            self.arm32_thumb = instruction.flags & armv7::THUMB_MODE != 0;
             self.arm_mapping(context, true);
             let padding = self.auto_padding() || self.pad_for_align || self.bundle_alignment != 0;
             if !padding {

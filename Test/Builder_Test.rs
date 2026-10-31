@@ -75598,6 +75598,13 @@ mod armv8_assembly {
         if let Ok(cpu) = std::env::var("APK_BUILDER_CPU") {
             options.cpu = cpu;
         }
+        if let Ok(features) = std::env::var("APK_BUILDER_FEATURES") {
+            options.features = features
+                .split(',')
+                .filter(|held| !held.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
         let result = assemble_source(&options, source.replace("\\n", "\n").as_bytes(), None)
             .expect("the source assembles");
         for message in &result.messages {

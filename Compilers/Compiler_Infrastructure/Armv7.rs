@@ -28,6 +28,7 @@ pub fn matcher() -> &'static Matcher {
 }
 
 pub const THUMB_MODE: u32 = 1 << 30;
+pub const MVE_MODE: u32 = 1 << 29;
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
 pub enum Fixup32 {
@@ -4011,11 +4012,47 @@ impl<'s> Assembler<'s> {
                     .emit_arm_directive(if value { "\t.code\t16" } else { "\t.code\t32" });
                 Some(false)
             }
-            ".thumb_func" | ".thumb_set" | ".fnstart" | ".fnend" | ".cantunwind"
-            | ".handlerdata" | ".personality" | ".personalityindex" | ".save" | ".vsave"
-            | ".setfp" | ".pad" | ".movsp" | ".unwind_raw" | ".tlsdescseq" | ".even" => {
-                self.arm32_text_directive(identifier)
+            ".thumb_func" => {
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                if !self.arm_thumb {
+                    self.arm_thumb = true;
+                    self.arm32_switch_mode();
+                }
+                self.streamer.emit_arm_directive("\t.code\t16");
+                self.arm_next_thumb = true;
+                Some(false)
             }
+            ".thumb_set" => Some(self.arm32_directive_thumb_set()),
+            ".inst" | ".inst.n" | ".inst.w" => {
+                let suffix = match identifier {
+                    ".inst.n" => 'n',
+                    ".inst.w" => 'w',
+                    _ => '\0',
+                };
+                Some(self.arm32_directive_inst(location, suffix))
+            }
+            ".even" => {
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                if self.check_for_valid_section() {
+                    return Some(true);
+                }
+                if self.current_section_is_code() {
+                    let mode = self.mode;
+                    self.streamer
+                        .emit_code_alignment(&mut self.context, 2, 0, mode);
+                } else {
+                    self.streamer
+                        .emit_value_to_alignment(&mut self.context, 2, 0, 1, 0);
+                }
+                Some(false)
+            }
+            ".fnstart" | ".fnend" | ".cantunwind" | ".handlerdata" | ".personality"
+            | ".personalityindex" | ".save" | ".vsave" | ".setfp" | ".pad" | ".movsp"
+            | ".unwind_raw" | ".tlsdescseq" => self.arm32_text_directive(identifier),
             ".eabi_attribute" => Some(self.arm32_directive_eabi_attribute()),
             ".object_arch" => Some(self.arm32_directive_object_arch()),
             ".arch_extension" => Some(self.arm32_directive_arch_extension()),
@@ -4929,6 +4966,7 @@ fn operand_value(
     first: usize,
     encoder: &OperandEncoder,
     thumb: bool,
+    mve: bool,
     fixups: &mut Vec<Fixup>,
 ) -> Result<u64, Diagnostic> {
     let mut add_fixup = |expression: &Expression, kind: Fixup32| {
@@ -4949,7 +4987,9 @@ fn operand_value(
         OperandEncoder::Machine => match operand {
             MachineOperand::Register(register) => {
                 let number = u64::from(register_encoding(target, *register));
-                if in_class(target, "QPR", *register) || in_class(target, "QQPR", *register) {
+                if !mve
+                    && (in_class(target, "QPR", *register) || in_class(target, "QQPR", *register))
+                {
                     number * 2
                 } else {
                     number
@@ -5496,6 +5536,7 @@ pub fn encode(
 ) -> Result<Encoded, Diagnostic> {
     let description = &target.instructions[instruction.opcode];
     let thumb = instruction.flags & THUMB_MODE != 0;
+    let mve = instruction.flags & MVE_MODE != 0;
     let plan = match &encoding_plans(target)[instruction.opcode] {
         Ok(plan) => plan,
         Err(cause) => {
@@ -5511,6 +5552,7 @@ pub fn encode(
             variable.first_operand,
             &variable.encoder,
             thumb,
+            mve,
             &mut fixups,
         )?;
         for (source, destination) in &variable.bits {
@@ -8343,6 +8385,101 @@ fn architecture_synonym(text: &str) -> &str {
         "v8m.main" => "v8-m.main",
         "v8.1m.main" => "v8.1-m.main",
         other => other,
+    }
+}
+
+impl<'a> Assembler<'a> {
+    pub(super) fn arm32_mark_thumb_function(&mut self, symbol: usize) {
+        self.context.symbols[symbol].thumb_function = true;
+        self.context.symbols[symbol].symbol_type = Some(SymbolType::Function);
+        self.streamer.emit_arm_directive("\t.thumb_func");
+    }
+
+    fn arm32_directive_thumb_set(&mut self) -> bool {
+        let Some(name) = self.parse_identifier() else {
+            return self.token_error("expected identifier after '.thumb_set'");
+        };
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let Ok((expression, _)) = self.parse_expression() else {
+            return true;
+        };
+        let symbol = self.context.symbol(&name);
+        let defined_source = match &expression {
+            Expression::Symbol { name: source, .. } => self
+                .context
+                .lookup(source)
+                .is_some_and(|held| !self.context.symbols[held].is_undefined()),
+            _ => true,
+        };
+        let plain = matches!(expression, Expression::Symbol { .. });
+        let text = expression_text(self.target, &expression, 0, Syntax::Att);
+        self.streamer
+            .emit_arm_directive(&format!("\t.thumb_set\t{name}, {text}"));
+        if plain && !defined_source {
+            self.streamer
+                .emit_assignment(&mut self.context, symbol, &expression);
+            return false;
+        }
+        self.context.symbols[symbol].thumb_function = true;
+        self.context.symbols[symbol].symbol_type = Some(SymbolType::Function);
+        self.streamer
+            .emit_assignment(&mut self.context, symbol, &expression);
+        false
+    }
+
+    fn arm32_directive_inst(&mut self, location: SourceLocation, suffix: char) -> bool {
+        if self.arm_thumb {
+            if !matches!(suffix, '\0' | 'n' | 'w') {
+                return true;
+            }
+        } else if suffix != '\0' {
+            return self.error(location, "width suffixes are invalid in ARM mode");
+        }
+        if self.is(TokenKind::EndOfStatement) {
+            return self.error(location, "expected expression following directive");
+        }
+        self.parse_many(|parser| {
+            let Ok((expression, _)) = parser.parse_expression() else {
+                return true;
+            };
+            let Some(value) = parser.context.evaluate_absolute(&expression, None) else {
+                return parser.error(location, "expected constant expression");
+            };
+            let mut current = suffix;
+            if parser.arm_thumb {
+                match suffix {
+                    'n' if value > 0xffff => {
+                        return parser
+                            .error(location, "inst.n operand is too big, use inst.w instead");
+                    }
+                    'w' if value > 0xffff_ffff => {
+                        return parser.error(location, "inst.w operand is too big");
+                    }
+                    '\0' => {
+                        if value < 0xe800 {
+                            current = 'n';
+                        } else if value >= 0xe800_0000 {
+                            current = 'w';
+                        } else {
+                            return parser.error(
+                                location,
+                                "cannot determine Thumb instruction size, use inst.n/inst.w instead",
+                            );
+                        }
+                    }
+                    _ => {}
+                }
+            } else if value > 0xffff_ffff {
+                return parser.error(location, "inst operand is too big");
+            }
+            parser
+                .streamer
+                .emit_arm32_inst(&mut parser.context, value, current, location);
+            parser.arm_it_remaining = parser.arm_it_remaining.saturating_sub(1);
+            false
+        })
     }
 }
 
