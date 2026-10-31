@@ -75286,7 +75286,11 @@ mod armv8_assembly {
             text.lines()
                 .filter_map(|line| line.strip_prefix("<stdin>:"))
                 .filter(|line| line.contains(": error: ") || line.contains(": note: "))
-                .map(str::to_string)
+                .filter_map(|line| {
+                    let (number, rest) = line.split_once(':')?;
+                    let (_, rest) = rest.split_once(':')?;
+                    Some(format!("{number}:{rest}"))
+                })
                 .collect(),
         )
     }
@@ -75315,10 +75319,7 @@ mod armv8_assembly {
                     .find_map(|line| line.strip_prefix("Cause: "))
                     .unwrap_or_default();
                 let location = diagnostic.location.as_ref()?;
-                Some(format!(
-                    "{}:{}: {kind}: {cause}",
-                    location.line, location.column
-                ))
+                Some(format!("{}: {kind}: {cause}", location.line))
             })
             .collect()
     }
@@ -75358,6 +75359,37 @@ mod armv8_assembly {
             ("armv7-linux-gnueabi", "cortex-a15", "push {r0, r1"),
             ("armv7-linux-gnueabi", "cortex-a15", "ssat r0, #33, r1"),
             ("thumbv7-linux-gnueabi", "cortex-a15", "adds r0, r1, r2"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ldrexd r2, r4, [r0]"),
+            ("armv7-linux-gnueabi", "cortex-a15", "strd r1, r2, [r0]"),
+            (
+                "armv7-linux-gnueabi",
+                "cortex-a15",
+                "ldrd r0, r1, [r0, #8]!",
+            ),
+            ("armv7-linux-gnueabi", "cortex-a15", "umull r0, r0, r1, r2"),
+            ("armv7-linux-gnueabi", "cortex-a15", "sbfx r0, r1, #4, #32"),
+            (
+                "thumbv7-linux-gnueabi",
+                "cortex-a15",
+                "it eq\nadds r0, r1, r2",
+            ),
+            (
+                "thumbv7-linux-gnueabi",
+                "cortex-a15",
+                "it eq\naddeq r0, r1, r2\naddne r0, r1, r2",
+            ),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "addeq r0, r1, r2"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "push {r0, sp}"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "pop {r0, pc, lr}"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "cbz r0, #200"),
+            (
+                "thumbv7-linux-gnueabi",
+                "cortex-a15",
+                "strd r0, r1, [r0, #8]!",
+            ),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "ldr r0, [r0, #4]!"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "it al\nmov r0, r1"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "it eq\nb #4\nnop"),
             ("thumbv7-linux-gnueabi", "cortex-a15", "pop {sp}"),
             ("thumbv7-linux-gnueabi", "cortex-a15", "mul r0, r1, r2"),
             ("thumbv7-linux-gnueabi", "cortex-a15", "cbz r8, #4"),
@@ -75994,6 +76026,26 @@ mod armv8_assembly {
                 .filter(|held| held.is_a(&filter))
                 .count()
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_pseudos() {
+        let matcher = crate::compilers::x86_64::armv7::matcher();
+        let target = crate::compilers::x86_64::armv7::target().expect("the tables load");
+        let mut names: Vec<String> = Vec::new();
+        for entry in &matcher.matchables {
+            let record = &target.instructions[entry.result].record;
+            let has = target
+                .records
+                .get(record)
+                .is_some_and(|held| held.field("Inst").is_some());
+            if !has && !names.contains(record) {
+                names.push(record.clone());
+            }
+        }
+        names.sort();
+        eprintln!("{} {}", names.len(), names.join(" "));
     }
 
     #[test]

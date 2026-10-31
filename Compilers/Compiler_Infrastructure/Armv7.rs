@@ -693,6 +693,58 @@ impl Operand {
     }
 }
 
+#[derive(Clone, Copy, Debug)]
+pub struct ItState {
+    pub condition: u32,
+    pub mask: u32,
+    pub position: u32,
+    pub explicit: bool,
+}
+
+impl ItState {
+    pub const NONE: ItState = ItState {
+        condition: 0,
+        mask: 0,
+        position: u32::MAX,
+        explicit: false,
+    };
+
+    pub fn active(&self) -> bool {
+        self.position != u32::MAX
+    }
+
+    pub fn explicit_block(&self) -> bool {
+        self.active() && self.explicit
+    }
+
+    pub fn last(&self) -> bool {
+        self.position == 4 - self.mask.trailing_zeros().min(4)
+    }
+
+    pub fn forward(&mut self) {
+        if !self.active() {
+            return;
+        }
+        let zeros = self.mask.trailing_zeros().min(4);
+        self.position += 1;
+        if self.position == 5 - zeros && self.explicit {
+            self.position = u32::MAX;
+        }
+    }
+
+    pub fn current(&self) -> u32 {
+        if (self.mask >> (5 - self.position.min(5))) & 1 == 1 {
+            self.condition ^ 1
+        } else {
+            self.condition
+        }
+    }
+}
+
+const CONDITION_NAMES: [&str; 15] = [
+    "eq", "ne", "hs", "lo", "mi", "pl", "vs", "vc", "hi", "ls", "ge", "lt", "gt", "le", "al",
+];
+
 struct SystemRegister {
     name: String,
     m1_encoding: u32,
@@ -4198,12 +4250,7 @@ impl<'s> Assembler<'s> {
                 })
                 .cloned()
                 .collect();
-            required.sort_by_key(|name| {
-                target
-                    .records
-                    .get(name)
-                    .map_or(u64::MAX, |record| record.definition_order)
-            });
+            required.sort();
             required.dedup();
             let mut actual_of: Vec<Option<usize>> = Vec::new();
             let mut actual = 1;
@@ -4621,14 +4668,16 @@ impl<'s> Assembler<'s> {
             .is_none_or(|held| !self.arm_features.contains(&held))
     }
 
-    fn arm32_track_it_block(&mut self, instruction: &MachineInstruction) {
+    fn arm32_start_it_block(&mut self, instruction: &MachineInstruction) {
         let record = self.target.instructions[instruction.opcode].record.as_str();
         if record == "ITasm" || record == "t2IT" {
-            let mask = instruction.immediate_at(1) as u32;
-            self.arm_it_remaining = 4 - mask.trailing_zeros().min(3);
-            return;
+            self.arm_it = ItState {
+                condition: instruction.immediate_at(0) as u32,
+                mask: instruction.immediate_at(1) as u32,
+                position: 0,
+                explicit: true,
+            };
         }
-        self.arm_it_remaining = self.arm_it_remaining.saturating_sub(1);
     }
 
     fn arm32_thumb_two(&self) -> bool {
@@ -4647,7 +4696,7 @@ impl<'s> Assembler<'s> {
         });
         let thumb_two = self.arm32_thumb_two();
         let thumb_one = self.arm_thumb && !thumb_two;
-        let in_it = self.arm_it_remaining > 0;
+        let in_it = self.arm_it.active();
         let version8 = self.arm_features.contains("HasV8Ops");
         let register = |name: &str| {
             target
@@ -4758,7 +4807,7 @@ impl<'s> Assembler<'s> {
         let target = self.target;
         let record = target.instructions[instruction.opcode].record.as_str();
         let operand = |index: usize| instruction.operand(index).clone();
-        let in_it = self.arm_it_remaining > 0;
+        let in_it = self.arm_it.active();
         let register = |name: &str| {
             target
                 .register_by_name
@@ -5217,6 +5266,10 @@ impl<'s> Assembler<'s> {
             return true;
         }
         let location = identifier_token.location();
+        let mut operands = operands;
+        if self.arm32_fix_pair_operands(&mut operands, location) {
+            return true;
+        }
         match self.arm32_match(&operands) {
             Outcome::Success(mut instruction) => {
                 self.arm_mnemonic = operands
@@ -5237,8 +5290,16 @@ impl<'s> Assembler<'s> {
                 if self.arm32_constant_pool(&mut instruction, location) {
                     return true;
                 }
+                if self.arm32_validate_instruction(&instruction, &operands, location) {
+                    self.arm_it.forward();
+                    return true;
+                }
                 while self.arm32_process(&mut instruction, wide) {}
-                self.arm32_track_it_block(&instruction);
+                self.arm32_start_it_block(&instruction);
+                self.arm_it.forward();
+                if self.target.instructions[instruction.opcode].record == "ITasm" {
+                    return false;
+                }
                 let locations = std::mem::take(&mut self.expression_locations);
                 self.streamer.note_expression_locations(&locations);
                 self.emit_instruction(&instruction, location);
@@ -5260,6 +5321,926 @@ impl<'s> Assembler<'s> {
                 self.arm32_report_near_misses(&misses, &operands, location)
             }
         }
+    }
+
+    fn arm32_mnemonic_operand_end(operands: &[ParsedOperand]) -> usize {
+        const DATA_TYPES: [&str; 22] = [
+            ".8", ".16", ".32", ".64", ".i8", ".i16", ".i32", ".i64", ".u8", ".u16", ".u32",
+            ".u64", ".s8", ".s16", ".s32", ".s64", ".p8", ".p16", ".f32", ".f64", ".f", ".d",
+        ];
+        let mut end = 1;
+        if operands
+            .first()
+            .is_some_and(|held| held.token_text() == "cps")
+        {
+            if let Some(Operand::Immediate(Expression::Constant(value))) =
+                operands.get(1).and_then(operand_of)
+            {
+                if *value == 2 || *value == 3 {
+                    end += 1;
+                }
+            }
+        }
+        let mut right_hand_condition = false;
+        while end < operands.len() {
+            let held = &operands[end];
+            let text = held.token_text();
+            if matches!(operand_of(held), Some(Operand::ItMask(_)))
+                || matches!(text, ".w" | ".bf16" | ".p64" | ".f16")
+                || DATA_TYPES.contains(&text)
+            {
+                right_hand_condition = true;
+                end += 1;
+            } else if matches!(operand_of(held), Some(Operand::CarrySet(_)))
+                || (matches!(operand_of(held), Some(Operand::Condition(_)))
+                    && !right_hand_condition)
+            {
+                end += 1;
+            } else {
+                break;
+            }
+        }
+        end
+    }
+
+    fn arm32_signed_offset(operand: Option<&ParsedOperand>, width: u32, scale: u32) -> bool {
+        match operand.and_then(operand_of) {
+            Some(Operand::Immediate(Expression::Symbol { .. })) => true,
+            Some(Operand::Immediate(Expression::Constant(value))) => {
+                let align = 1i64 << scale;
+                let maximum = align * ((1i64 << (width - 1)) - 1);
+                let minimum = -align * (1i64 << (width - 1));
+                value % align == 0 && *value >= minimum && *value <= maximum
+            }
+            _ => false,
+        }
+    }
+
+    fn arm32_unsigned_offset(operand: Option<&ParsedOperand>, width: u32, scale: u32) -> bool {
+        match operand.and_then(operand_of) {
+            Some(Operand::Immediate(Expression::Symbol { .. })) => true,
+            Some(Operand::Immediate(Expression::Constant(value))) => {
+                let align = 1i64 << scale;
+                let maximum = align * ((1i64 << width) - 1);
+                value % align == 0 && *value >= 0 && *value <= maximum
+            }
+            _ => false,
+        }
+    }
+
+    fn arm32_is_coprocessor_data_engine(&self, coprocessor: i64) -> bool {
+        (0..8).contains(&coprocessor)
+            && self
+                .arm_features
+                .contains(&format!("FeatureCoprocCDE{coprocessor}"))
+    }
+
+    fn arm32_validate_instruction(
+        &mut self,
+        instruction: &MachineInstruction,
+        operands: &[ParsedOperand],
+        location: SourceLocation,
+    ) -> bool {
+        let target = self.target;
+        let description = &target.instructions[instruction.opcode];
+        let record = description.record.as_str();
+        let end = Self::arm32_mnemonic_operand_end(operands);
+        let register = |name: &str| register_named(target, name).unwrap_or(NO_REGISTER);
+        let (stack, counter, link) = (register("sp"), register("pc"), register("lr"));
+        let encoding = |held: RegisterId| register_encoding(target, held);
+        let version8 = self.arm_features.contains("HasV8Ops");
+        let thumb_two = self.arm32_thumb_two();
+        let predicate_group = description.groups.iter().find(|group| {
+            target
+                .records
+                .get(&group.record)
+                .is_some_and(|held| held.is_a("PredicateOp"))
+        });
+        let predicate_value = predicate_group.map(|group| instruction.immediate_at(group.first));
+        let vector_group = description.groups.iter().find(|group| {
+            target
+                .operand_records
+                .get(&group.record)
+                .is_some_and(|held| held.operand_type.starts_with("OPERAND_VPRED"))
+        });
+        let breakpoint = matches!(record, "tBKPT" | "BKPT" | "tHLT" | "HLT");
+        let positions: Vec<usize> = operands.iter().map(|held| held.start).collect();
+        let ends: Vec<usize> = operands.iter().map(|held| held.end).collect();
+        let statement = self.statement_start.buffer;
+        let spot = move |index: usize| -> SourceLocation {
+            SourceLocation {
+                buffer: statement,
+                position: positions.get(index).copied().unwrap_or(0),
+            }
+        };
+        if self.arm_it.active() && !breakpoint {
+            let Some(condition) = predicate_value else {
+                return self.error(location, "instructions in IT block must be predicable");
+            };
+            let expected = self.arm_it.current();
+            if condition as u32 != expected {
+                let condition_location = operands
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .find(|(_, held)| matches!(operand_of(held), Some(Operand::Condition(_))))
+                    .map_or(location, |(index, _)| spot(index));
+                return self.error(
+                    condition_location,
+                    &format!(
+                        "incorrect condition in IT block; got '{}', but expected '{}'",
+                        CONDITION_NAMES
+                            .get(condition as usize)
+                            .copied()
+                            .unwrap_or("al"),
+                        CONDITION_NAMES
+                            .get(expected as usize)
+                            .copied()
+                            .unwrap_or("al")
+                    ),
+                );
+            }
+        } else if thumb_two
+            && predicate_value.is_some_and(|value| value != 14)
+            && !matches!(record, "tBcc" | "t2Bcc" | "t2BFic")
+        {
+            return self.error(location, "predicated instructions must be in IT block");
+        }
+        if self.arm_it.explicit_block() && !self.arm_it.last() {
+            let held = target.records.get(record);
+            let terminator = held.is_some_and(|held| {
+                table_bit(held, "isTerminator")
+                    || (table_bit(held, "isCall") && record != "tSVC")
+                    || table_bit(held, "isReturn")
+                    || table_bit(held, "isBranch")
+                    || table_bit(held, "isIndirectBranch")
+            }) || description.groups.iter().any(|group| {
+                group.output
+                    && (0..group.count)
+                        .any(|offset| instruction.register_at(group.first + offset) == counter)
+            });
+            if terminator {
+                return self.error(
+                    location,
+                    "instruction must be outside of IT block or the last instruction in an IT block",
+                );
+            }
+        }
+        if let Some(group) = vector_group {
+            if instruction.immediate_at(group.first) != 0 {
+                return self.error(location, "VPT predicated instructions must be in VPT block");
+            }
+        }
+        let sequential = |first: usize, second: usize| {
+            encoding(instruction.register_at(second))
+                == encoding(instruction.register_at(first)) + 1
+        };
+        let immediate = |index: usize| instruction.immediate_at(index);
+        let same_encoding = |first: usize, second: usize| {
+            encoding(instruction.register_at(first)) == encoding(instruction.register_at(second))
+        };
+        let list_contains = |from: usize, held: RegisterId| {
+            (from..instruction.operands.len()).any(|index| instruction.register_at(index) == held)
+        };
+        let register_list_index = || {
+            operands
+                .iter()
+                .enumerate()
+                .skip(end)
+                .find(|(_, held)| matches!(operand_of(held), Some(Operand::RegisterList(_))))
+                .map_or(0, |(index, _)| index)
+        };
+        let load_list = |from: usize, allow_stack: bool, me: &mut Self| -> bool {
+            let contains_stack = list_contains(from, stack);
+            let contains_link = list_contains(from, link);
+            let contains_counter = list_contains(from, counter);
+            if !allow_stack && contains_stack {
+                return me.error(
+                    spot(register_list_index()),
+                    "SP may not be in the register list",
+                );
+            }
+            if contains_counter && contains_link {
+                return me.error(
+                    spot(register_list_index()),
+                    "PC and LR may not be in the register list simultaneously",
+                );
+            }
+            false
+        };
+        let store_list = |from: usize, me: &mut Self| -> bool {
+            let contains_stack = list_contains(from, stack);
+            let contains_counter = list_contains(from, counter);
+            if contains_stack && contains_counter {
+                return me.error(
+                    spot(register_list_index()),
+                    "SP and PC may not be in the register list",
+                );
+            }
+            if contains_stack {
+                return me.error(
+                    spot(register_list_index()),
+                    "SP may not be in the register list",
+                );
+            }
+            if contains_counter {
+                return me.error(
+                    spot(register_list_index()),
+                    "PC may not be in the register list",
+                );
+            }
+            false
+        };
+        let pair_check = |load: bool, arm_mode: bool, writeback: bool, me: &mut Self| -> bool {
+            let first = if load || !writeback { 0 } else { 1 };
+            let rt = encoding(instruction.register_at(first));
+            let rt2 = encoding(instruction.register_at(first + 1));
+            if arm_mode {
+                if rt == 14 {
+                    return me.error(spot(end), "Rt can't be R14");
+                }
+                if rt & 1 == 1 {
+                    return me.error(spot(end), "Rt must be even-numbered");
+                }
+                if rt2 != rt + 1 {
+                    return me.error(
+                        spot(end),
+                        if load {
+                            "destination operands must be sequential"
+                        } else {
+                            "source operands must be sequential"
+                        },
+                    );
+                }
+            }
+            if !arm_mode && load && rt2 == rt {
+                return me.error(spot(end), "destination operands can't be identical");
+            }
+            if writeback {
+                let base = encoding(instruction.register_at(3));
+                if base == rt || base == rt2 {
+                    return if load {
+                        me.error(
+                            spot(end),
+                            "base register needs to be different from destination registers",
+                        )
+                    } else {
+                        me.error(
+                            spot(end + 2),
+                            "source register and base register can't be identical",
+                        )
+                    };
+                }
+            }
+            false
+        };
+        let low = |held: RegisterId| in_class(target, "tGPR", held);
+        let offset_index = |first: usize| {
+            if matches!(
+                operands.get(first).and_then(operand_of),
+                Some(Operand::Immediate(_))
+            ) {
+                first
+            } else {
+                first + 1
+            }
+        };
+        match record {
+            "VLLDM" | "VLLDM_T2" | "VLSTM" | "VLSTM_T2" => {
+                if operands.len() == end + 2 {
+                    if let Some(Operand::RegisterList(list)) =
+                        operands.get(end + 1).and_then(operand_of)
+                    {
+                        let thirty_two = self
+                            .arm32_feature("d32")
+                            .is_some_and(|held| self.arm_features.contains(&held));
+                        let at_end = SourceLocation {
+                            buffer: statement,
+                            position: ends[end + 1],
+                        };
+                        if list.len() == 32 && !self.arm_features.contains("HasV8_1MMainlineOps") {
+                            return self.error(at_end, "T2 version requires v8.1-M.Main");
+                        }
+                        if thirty_two && list.len() != 32 {
+                            return self.error(at_end, "operand must be exactly {d0-d31}");
+                        }
+                        if !thirty_two && list.len() != 16 && list.len() != 32 {
+                            return self.error(
+                                at_end,
+                                "operand must be exactly {d0-d15} (T1) or {d0-d31} (T2)",
+                            );
+                        }
+                    }
+                }
+                return false;
+            }
+            "t2IT" | "ITasm" => {
+                if immediate(0) == 14 && (immediate(1) as u32).count_ones() != 1 {
+                    return self.error(location, "unpredictable IT predicate sequence");
+                }
+            }
+            "LDRD" if pair_check(true, true, false, self) => return true,
+            "LDRD_PRE" | "LDRD_POST" if pair_check(true, true, true, self) => return true,
+            "t2LDRDi8" if pair_check(true, false, false, self) => return true,
+            "t2LDRD_PRE" | "t2LDRD_POST" if pair_check(true, false, true, self) => return true,
+            "STRD" if pair_check(false, true, false, self) => return true,
+            "STRD_PRE" | "STRD_POST" if pair_check(false, true, true, self) => return true,
+            "t2STRD_PRE" | "t2STRD_POST" if pair_check(false, false, true, self) => return true,
+            "t2BXJ" => {
+                if instruction.register_at(0) == stack && !version8 {
+                    return self.error(spot(end), "r13 (SP) is an unpredictable operand to BXJ");
+                }
+                return false;
+            }
+            "STR_PRE_IMM" | "STR_PRE_REG" | "t2STR_PRE" | "STR_POST_IMM" | "STR_POST_REG"
+            | "t2STR_POST" | "STRH_PRE" | "t2STRH_PRE" | "STRH_POST" | "t2STRH_POST"
+            | "STRB_PRE_IMM" | "STRB_PRE_REG" | "t2STRB_PRE" | "STRB_POST_IMM"
+            | "STRB_POST_REG" | "t2STRB_POST" => {
+                if same_encoding(1, 2) {
+                    return self.error(
+                        spot(end + 1),
+                        "source register and base register can't be identical",
+                    );
+                }
+                return false;
+            }
+            "t2LDR_PRE_imm" | "t2LDR_POST_imm" | "t2STR_PRE_imm" | "t2STR_POST_imm" => {
+                if same_encoding(0, 1) {
+                    return self.error(
+                        spot(end),
+                        "destination register and base register can't be identical",
+                    );
+                }
+                if matches!(record, "t2LDR_POST_imm" | "t2STR_POST_imm") {
+                    let value = immediate(2);
+                    if !(-255..=255).contains(&value) {
+                        return self.error(spot(end + 2), "operand must be in range [-255, 255]");
+                    }
+                }
+                if matches!(record, "t2STR_PRE_imm" | "t2STR_POST_imm")
+                    && instruction.register_at(0) == counter
+                {
+                    return self.error(spot(end), "operand must be a register in range [r0, r14]");
+                }
+                return false;
+            }
+            "t2LDRB_OFFSET_imm" | "t2LDRB_PRE_imm" | "t2LDRB_POST_imm" | "t2STRB_OFFSET_imm"
+            | "t2STRB_PRE_imm" | "t2STRB_POST_imm" | "t2LDRH_OFFSET_imm" | "t2LDRH_PRE_imm"
+            | "t2LDRH_POST_imm" | "t2STRH_OFFSET_imm" | "t2STRH_PRE_imm" | "t2STRH_POST_imm"
+            | "t2LDRSB_OFFSET_imm" | "t2LDRSB_PRE_imm" | "t2LDRSB_POST_imm"
+            | "t2LDRSH_OFFSET_imm" | "t2LDRSH_PRE_imm" | "t2LDRSH_POST_imm" => {
+                let value = immediate(2);
+                if record.contains("_POST_") || record.contains("_PRE_") {
+                    if !(-255..=255).contains(&value) {
+                        return self.error(spot(end + 2), "operand must be in range [-255, 255]");
+                    }
+                } else if !(-255..=0).contains(&value) {
+                    return self.error(
+                        spot(end + 2),
+                        "operand must be in range [0, 255] with a negative sign",
+                    );
+                }
+                if instruction.register_at(0) == counter {
+                    let (place, text) = match record {
+                        "t2LDRB_OFFSET_imm" | "t2LDRB_PRE_imm" | "t2LDRB_POST_imm"
+                        | "t2STRB_OFFSET_imm" | "t2STRB_PRE_imm" | "t2STRB_POST_imm" => {
+                            (end, "if operand is PC, should call the LDRB (literal)")
+                        }
+                        "t2LDRSB_OFFSET_imm" | "t2LDRSB_PRE_imm" | "t2LDRSB_POST_imm" => {
+                            (end + 2, "if operand is PC, should call the LDRH (literal)")
+                        }
+                        _ => (end, "if operand is PC, should call the LDRH (literal)"),
+                    };
+                    return self.error(spot(place), text);
+                }
+                return false;
+            }
+            "LDR_PRE_IMM" | "LDR_PRE_REG" | "t2LDR_PRE" | "LDR_POST_IMM" | "LDR_POST_REG"
+            | "t2LDR_POST" | "LDRH_PRE" | "t2LDRH_PRE" | "LDRH_POST" | "t2LDRH_POST"
+            | "LDRSH_PRE" | "t2LDRSH_PRE" | "LDRSH_POST" | "t2LDRSH_POST" | "LDRB_PRE_IMM"
+            | "LDRB_PRE_REG" | "t2LDRB_PRE" | "LDRB_POST_IMM" | "LDRB_POST_REG" | "t2LDRB_POST"
+            | "LDRSB_PRE" | "t2LDRSB_PRE" | "LDRSB_POST" | "t2LDRSB_POST" => {
+                if same_encoding(0, 2) {
+                    return self.error(
+                        spot(end),
+                        "destination register and base register can't be identical",
+                    );
+                }
+                return false;
+            }
+            "SBFX" | "t2SBFX" | "UBFX" | "t2UBFX" => {
+                let lsb = immediate(2) as u32;
+                let width_minus_one = immediate(3) as u32;
+                if width_minus_one >= 32u32.saturating_sub(lsb) {
+                    return self.error(spot(end + 2), "bitfield width must be in range [1,32-lsb]");
+                }
+                return false;
+            }
+            "tLDMIA" => {
+                let base = instruction.register_at(0);
+                let writeback_token = operands
+                    .get(end + 1)
+                    .is_some_and(|held| held.token_text() == "!");
+                let contains_base = list_contains(3, base);
+                let invalid_low = (3..instruction.operands.len())
+                    .any(|index| !low(instruction.register_at(index)));
+                if invalid_low && !thumb_two {
+                    return self.error(
+                        spot(register_list_index()),
+                        "registers must be in range r0-r7",
+                    );
+                }
+                if !contains_base && !writeback_token && !thumb_two {
+                    return self.error(
+                        spot(register_list_index()),
+                        "writeback operator '!' expected",
+                    );
+                }
+                if contains_base && writeback_token {
+                    return self.error(
+                        spot(end + 1),
+                        "writeback operator '!' not allowed when base register in register list",
+                    );
+                }
+                if load_list(3, false, self) {
+                    return true;
+                }
+            }
+            "LDMIA_UPD" | "LDMDB_UPD" | "LDMIB_UPD" | "LDMDA_UPD" => {
+                if self.arm_features.contains("HasV7Ops")
+                    && list_contains(3, instruction.register_at(0))
+                {
+                    return self.error(
+                        spot(operands.len().saturating_sub(1)),
+                        "writeback register not allowed in register list",
+                    );
+                }
+            }
+            "t2LDMIA" | "t2LDMDB" if load_list(3, false, self) => return true,
+            "t2STMIA" | "t2STMDB" if store_list(3, self) => return true,
+            "t2LDMIA_UPD" | "t2LDMDB_UPD" | "t2STMIA_UPD" | "t2STMDB_UPD" => {
+                if list_contains(3, instruction.register_at(0)) {
+                    return self.error(
+                        spot(operands.len().saturating_sub(1)),
+                        "writeback register not allowed in register list",
+                    );
+                }
+                if matches!(record, "t2LDMIA_UPD" | "t2LDMDB_UPD") {
+                    if load_list(3, false, self) {
+                        return true;
+                    }
+                } else if store_list(3, self) {
+                    return true;
+                }
+            }
+            "sysLDMIA_UPD" | "sysLDMDA_UPD" | "sysLDMDB_UPD" | "sysLDMIB_UPD" => {
+                if !list_contains(3, counter) {
+                    return self.error(
+                        spot(end + 1),
+                        "writeback register only allowed on system LDM if PC in register-list",
+                    );
+                }
+            }
+            "sysSTMIA_UPD" | "sysSTMDA_UPD" | "sysSTMDB_UPD" | "sysSTMIB_UPD" => {
+                return self.error(spot(end), "system STM cannot have writeback register");
+            }
+            "tPOP" => {
+                let invalid = (2..instruction.operands.len()).any(|index| {
+                    let held = instruction.register_at(index);
+                    !low(held) && held != counter
+                });
+                if invalid && !thumb_two {
+                    return self.error(spot(end), "registers must be in range r0-r7 or pc");
+                }
+                let m_class = self
+                    .arm32_feature("mclass")
+                    .is_some_and(|held| self.arm_features.contains(&held));
+                if load_list(2, !m_class, self) {
+                    return true;
+                }
+            }
+            "tPUSH" => {
+                let invalid = (2..instruction.operands.len()).any(|index| {
+                    let held = instruction.register_at(index);
+                    !low(held) && held != link
+                });
+                if invalid && !thumb_two {
+                    return self.error(spot(end), "registers must be in range r0-r7 or lr");
+                }
+                if store_list(2, self) {
+                    return true;
+                }
+            }
+            "tSTMIA_UPD" => {
+                let base = instruction.register_at(0);
+                let invalid_low = (4..instruction.operands.len())
+                    .any(|index| !low(instruction.register_at(index)));
+                let contains_base = list_contains(4, base);
+                if invalid_low && !thumb_two {
+                    return self.error(spot(end + 2), "registers must be in range r0-r7");
+                }
+                if invalid_low && contains_base {
+                    return self.error(
+                        spot(end),
+                        "writeback operator '!' not allowed when base register in register list",
+                    );
+                }
+                if store_list(4, self) {
+                    return true;
+                }
+            }
+            "tADDrSP" => {
+                if !thumb_two && instruction.register_at(0) != instruction.register_at(2) {
+                    return self.error(
+                        spot(end + 2),
+                        "source register must be the same as destination",
+                    );
+                }
+            }
+            "t2ADDrr" | "t2ADDrs" | "t2SUBrr" | "t2SUBrs" => {
+                if instruction.register_at(0) == stack && instruction.register_at(1) != stack {
+                    return self.error(
+                        spot(end + 1),
+                        "source register must be sp if destination is sp",
+                    );
+                }
+            }
+            "tB" => {
+                if !Self::arm32_signed_offset(operands.get(end), 11, 1) {
+                    return self.error(spot(end), "branch target out of range");
+                }
+            }
+            "t2B" => {
+                let index = offset_index(end);
+                let binary = matches!(
+                    operands.get(index).and_then(operand_of),
+                    Some(Operand::Immediate(Expression::Binary { .. }))
+                );
+                if !binary && !Self::arm32_signed_offset(operands.get(index), 24, 1) {
+                    return self.error(spot(index), "branch target out of range");
+                }
+            }
+            "tBcc" => {
+                if !Self::arm32_signed_offset(operands.get(end), 8, 1) {
+                    return self.error(spot(end), "branch target out of range");
+                }
+            }
+            "t2Bcc" => {
+                let index = offset_index(end);
+                if !Self::arm32_signed_offset(operands.get(index), 20, 1) {
+                    return self.error(spot(index), "branch target out of range");
+                }
+            }
+            "tCBZ" | "tCBNZ" => {
+                if !Self::arm32_unsigned_offset(operands.get(end + 1), 6, 1) {
+                    return self.error(spot(end + 1), "branch target out of range");
+                }
+            }
+            "MOVi16" | "MOVTi16" | "t2MOVi16" | "t2MOVTi16" => {
+                let index = offset_index(end);
+                if let Some(Operand::Immediate(expression)) =
+                    operands.get(index).and_then(operand_of)
+                {
+                    let specified = matches!(
+                        expression,
+                        Expression::Symbol { specifier: Some(name), .. }
+                            if name == "lower16" || name == "upper16"
+                    );
+                    if !matches!(expression, Expression::Constant(_)) && !specified {
+                        return self.error(
+                            spot(index),
+                            "immediate expression for mov requires :lower16: or :upper16",
+                        );
+                    }
+                }
+            }
+            "tADDi8" | "tMOVi8" => {
+                let index = if record == "tMOVi8"
+                    || matches!(
+                        operands.get(end + 1).and_then(operand_of),
+                        Some(Operand::Immediate(_))
+                    ) {
+                    end + 1
+                } else {
+                    end + 2
+                };
+                if let Some(Operand::Immediate(expression)) =
+                    operands.get(index).and_then(operand_of)
+                {
+                    if !matches!(expression, Expression::Constant(_)) {
+                        let allowed = matches!(
+                            expression,
+                            Expression::Symbol { specifier: Some(name), .. }
+                                if matches!(
+                                    name.as_str(),
+                                    "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15"
+                                )
+                        );
+                        if !allowed {
+                            return self.error(
+                                spot(index),
+                                if record == "tADDi8" {
+                                    "Immediate expression for Thumb adds requires :lower0_7:, :lower8_15:, :upper0_7: or :upper8_15:"
+                                } else {
+                                    "Immediate expression for Thumb movs requires :lower0_7:, :lower8_15:, :upper0_7: or :upper8_15:"
+                                },
+                            );
+                        }
+                    }
+                }
+            }
+            "HINT" | "t2HINT" => {
+                let hint = immediate(0);
+                let predicate = immediate(1);
+                if hint == 0x10 && predicate != 14 && self.arm_features.contains("FeatureRAS") {
+                    return self.error(
+                        spot(1),
+                        "instruction 'esb' is not predicable, but condition code specified",
+                    );
+                }
+                if hint == 0x14 && predicate != 14 {
+                    return self.error(
+                        spot(1),
+                        "instruction 'csdb' is not predicable, but condition code specified",
+                    );
+                }
+            }
+            "t2BFi" | "t2BFr" | "t2BFLi" | "t2BFLr" => {
+                let zero = matches!(instruction.operand(0), MachineOperand::Immediate(0));
+                if !Self::arm32_unsigned_offset(operands.get(end), 4, 1) || zero {
+                    return self.error(
+                        spot(end),
+                        "branch location out of range or not a multiple of 2",
+                    );
+                }
+                if record == "t2BFi" && !Self::arm32_signed_offset(operands.get(end + 1), 16, 1) {
+                    return self.error(
+                        spot(end),
+                        "branch target out of range or not a multiple of 2",
+                    );
+                }
+                if record == "t2BFLi" && !Self::arm32_signed_offset(operands.get(end + 1), 18, 1) {
+                    return self.error(
+                        spot(end),
+                        "branch target out of range or not a multiple of 2",
+                    );
+                }
+            }
+            "t2BFic" => {
+                let zero = matches!(instruction.operand(0), MachineOperand::Immediate(0));
+                if !Self::arm32_unsigned_offset(operands.get(end), 4, 1) || zero {
+                    return self.error(
+                        spot(1),
+                        "branch location out of range or not a multiple of 2",
+                    );
+                }
+                if !Self::arm32_signed_offset(operands.get(end + 1), 16, 1) {
+                    return self.error(
+                        spot(end + 1),
+                        "branch target out of range or not a multiple of 2",
+                    );
+                }
+                if let (MachineOperand::Immediate(first), MachineOperand::Immediate(second)) =
+                    (instruction.operand(0), instruction.operand(2))
+                {
+                    let difference = second - first;
+                    if difference != 4 && difference != 2 {
+                        return self.error(
+                            spot(3),
+                            "else branch target must be 2 or 4 greater than the branch location",
+                        );
+                    }
+                }
+            }
+            "t2CLRM" => {
+                for index in 2..instruction.operands.len() {
+                    if let MachineOperand::Register(held) = instruction.operand(index) {
+                        if !in_class(target, "GPRwithAPSRnosp", *held) {
+                            return self.error(
+                                spot(end),
+                                "invalid register in register list. Valid registers are r0-r12, lr/r14 and APSR.",
+                            );
+                        }
+                    }
+                }
+            }
+            "DSB" | "t2DSB" => {
+                if instruction.operands.len() >= 2 {
+                    let option = immediate(0);
+                    let predicate = immediate(1);
+                    if option == 0 && predicate != 14 {
+                        return self.error(
+                            spot(1),
+                            "instruction 'ssbb' is not predicable, but condition code specified",
+                        );
+                    }
+                    if option == 4 && predicate != 14 {
+                        return self.error(
+                            spot(1),
+                            "instruction 'pssbb' is not predicable, but condition code specified",
+                        );
+                    }
+                }
+            }
+            "VMOVRRS" => {
+                if !sequential(2, 3) {
+                    return self.error(spot(end + 2), "source operands must be sequential");
+                }
+            }
+            "VMOVSRR" => {
+                if !sequential(0, 1) {
+                    return self.error(spot(end), "destination operands must be sequential");
+                }
+            }
+            "VLDMDIA" | "VSTMDIA" => {
+                if let Some(Operand::RegisterList(list)) =
+                    operands.get(end + 1).and_then(operand_of)
+                {
+                    if list.is_empty() || list.len() > 16 {
+                        return self.error(
+                            spot(end + 1),
+                            "list of registers must be at least 1 and at most 16",
+                        );
+                    }
+                }
+            }
+            "MVE_SQRSHR" | "MVE_UQRSHL" => {
+                if instruction.register_at(0) == instruction.register_at(1) {
+                    return self
+                        .error(spot(end), "Rda register and Rm register can't be identical");
+                }
+            }
+            "UMAAL" | "UMLAL" | "UMULL" | "t2UMAAL" | "t2UMLAL" | "t2UMULL" | "SMLAL"
+            | "SMLALBB" | "SMLALBT" | "SMLALD" | "SMLALDX" | "SMLALTB" | "SMLALTT" | "SMLSLD"
+            | "SMLSLDX" | "SMULL" | "t2SMLAL" | "t2SMLALBB" | "t2SMLALBT" | "t2SMLALD"
+            | "t2SMLALDX" | "t2SMLALTB" | "t2SMLALTT" | "t2SMLSLD" | "t2SMLSLDX" | "t2SMULL" => {
+                if instruction.register_at(0) == instruction.register_at(1) {
+                    return self.error(
+                        location,
+                        "unpredictable instruction, RdHi and RdLo must be different",
+                    );
+                }
+            }
+            "VTOSHH" | "VTOUHH" | "VTOSLH" | "VTOULH" | "VTOSHS" | "VTOUHS" | "VTOSLS"
+            | "VTOULS" | "VTOSHD" | "VTOUHD" | "VTOSLD" | "VTOULD" | "VSHTOH" | "VUHTOH"
+            | "VSLTOH" | "VULTOH" | "VSHTOS" | "VUHTOS" | "VSLTOS" | "VULTOS" | "VSHTOD"
+            | "VUHTOD" | "VSLTOD" | "VULTOD" => {
+                let first = operands.get(end).and_then(operand_of);
+                let second = operands.get(end + 1).and_then(operand_of);
+                if let (Some(Operand::Register(left)), Some(Operand::Register(right))) =
+                    (first, second)
+                {
+                    if left != right {
+                        return self.error(
+                            spot(end),
+                            "source and destination registers must be the same",
+                        );
+                    }
+                }
+            }
+            name if name.starts_with("CDE_") => {
+                let coprocessor = immediate(1);
+                if coprocessor < 8 && !self.arm32_is_coprocessor_data_engine(coprocessor) {
+                    return self.error(spot(1), "coprocessor must be configured as CDE");
+                } else if coprocessor >= 8 {
+                    return self.error(spot(1), "coprocessor must be in the range [p0, p7]");
+                }
+            }
+            "t2CDP" | "t2CDP2" | "t2MCR" | "t2MCR2" | "t2MCRR" | "t2MCRR2" | "t2MRC" | "t2MRC2"
+            | "t2MRRC" | "t2MRRC2" => {
+                let index = match record {
+                    "t2MRRC" | "t2MRRC2" => 2,
+                    "t2MRC" | "t2MRC2" => 1,
+                    _ => 0,
+                };
+                if self.arm32_is_coprocessor_data_engine(immediate(index)) {
+                    return self.error(spot(2), "coprocessor must be configured as GCP");
+                }
+            }
+            name if (name.starts_with("t2LDC") || name.starts_with("t2STC"))
+                && self.arm32_is_coprocessor_data_engine(immediate(0)) =>
+            {
+                return self.error(spot(2), "coprocessor must be configured as GCP");
+            }
+            _ => {}
+        }
+        false
+    }
+
+    fn arm32_general_pair(&self, low: RegisterId, high: RegisterId) -> Option<RegisterId> {
+        self.target
+            .registers
+            .iter()
+            .position(|held| held.sub_registers == [low, high] && !held.assembly_name.is_empty())
+            .or_else(|| {
+                self.target
+                    .registers
+                    .iter()
+                    .position(|held| held.sub_registers == [low, high])
+            })
+            .map(|index| index as RegisterId)
+    }
+
+    fn arm32_fix_pair_operands(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        location: SourceLocation,
+    ) -> bool {
+        let Some(mnemonic) = operands.first().map(|held| held.token_text().to_string()) else {
+            return false;
+        };
+        if !matches!(
+            mnemonic.as_str(),
+            "ldrd" | "strd" | "ldrexd" | "strexd" | "ldaexd" | "stlexd"
+        ) {
+            return false;
+        }
+        let end = Self::arm32_mnemonic_operand_end(operands);
+        let index = if matches!(mnemonic.as_str(), "strexd" | "stlexd") {
+            end + 1
+        } else {
+            end
+        };
+        let target = self.target;
+        let version8 = self.arm_features.contains("HasV8Ops");
+        if operands.len() >= index + 2 {
+            if let (Some(Operand::Register(first)), Some(Operand::Memory(memory))) = (
+                operands.get(index).and_then(operand_of),
+                operands.get(index + 1).and_then(operand_of),
+            ) {
+                let first = *first;
+                let general = in_class(target, "GPR", first)
+                    && (memory.base == NO_REGISTER || in_class(target, "GPR", memory.base))
+                    && (memory.offset_register == NO_REGISTER
+                        || in_class(target, "GPR", memory.offset_register));
+                if general {
+                    let encoding = register_encoding(target, first);
+                    let stack = register_named(target, "sp").unwrap_or(NO_REGISTER);
+                    let counter = register_named(target, "pc").unwrap_or(NO_REGISTER);
+                    let next = register_named(target, &format!("r{}", encoding + 1));
+                    let allowed = (self.arm_thumb || encoding & 1 == 0)
+                        && first != counter
+                        && next.is_some_and(|held| held != counter && (held != stack || version8));
+                    if allowed {
+                        let (start, finish) = (operands[index].start, operands[index].end);
+                        operands.insert(
+                            index + 1,
+                            parsed(
+                                Operand::Register(next.unwrap_or(NO_REGISTER)),
+                                start,
+                                finish,
+                            ),
+                        );
+                    }
+                }
+            }
+        }
+        let load = matches!(mnemonic.as_str(), "ldrexd" | "ldaexd");
+        if !self.arm_thumb
+            && operands.len() > end + 1 + usize::from(!load)
+            && matches!(mnemonic.as_str(), "ldrexd" | "strexd" | "ldaexd" | "stlexd")
+        {
+            let slot = if load { end } else { end + 1 };
+            if let (Some(Operand::Register(first)), Some(Operand::Register(second))) = (
+                operands.get(slot).and_then(operand_of),
+                operands.get(slot + 1).and_then(operand_of),
+            ) {
+                let (first, second) = (*first, *second);
+                if in_class(target, "GPR", first) {
+                    let low = register_encoding(target, first);
+                    let high = register_encoding(target, second);
+                    if low + 1 != high {
+                        let at = self.statement_location(operands[slot + 1].start);
+                        return self.error(
+                            at,
+                            if load {
+                                "destination operands must be sequential"
+                            } else {
+                                "source operands must be sequential"
+                            },
+                        );
+                    }
+                    if low & 1 == 1 {
+                        let at = self.statement_location(operands[slot].start);
+                        return self.error(
+                            at,
+                            if load {
+                                "destination operands must start start at an even register"
+                            } else {
+                                "source operands must start start at an even register"
+                            },
+                        );
+                    }
+                    if let Some(pair) = self.arm32_general_pair(first, second) {
+                        let (start, finish) = (operands[slot].start, operands[slot + 1].end);
+                        operands[slot] = parsed(Operand::Register(pair), start, finish);
+                        operands.remove(slot + 1);
+                    }
+                }
+            }
+        }
+        let _ = location;
+        false
     }
 
     fn arm32_near_miss_messages(
@@ -9272,7 +10253,7 @@ impl<'a> Assembler<'a> {
             parser
                 .streamer
                 .emit_arm32_inst(&mut parser.context, value, current, location);
-            parser.arm_it_remaining = parser.arm_it_remaining.saturating_sub(1);
+            parser.arm_it.forward();
             false
         })
     }
