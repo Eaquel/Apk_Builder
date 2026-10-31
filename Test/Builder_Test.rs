@@ -72566,6 +72566,1244 @@ mod x86_assembly {
     }
 }
 
+mod arm_emulator {
+    use crate::compilers::x86_64::armv8;
+    use crate::compilers::x86_64::{MachineInstruction, MachineOperand, Target};
+    use std::collections::BTreeMap;
+
+    pub(super) struct Outcome {
+        pub(super) exit: Option<i32>,
+        pub(super) stdout: Vec<u8>,
+    }
+
+    struct Memory {
+        pages: BTreeMap<u64, Box<[u8; 4096]>>,
+    }
+
+    impl Memory {
+        fn page(&mut self, address: u64) -> &mut [u8; 4096] {
+            self.pages
+                .entry(address >> 12)
+                .or_insert_with(|| Box::new([0u8; 4096]))
+        }
+
+        fn read(&mut self, address: u64, size: usize) -> u64 {
+            let mut value = 0u64;
+            for index in 0..size {
+                let at = address.wrapping_add(index as u64);
+                let byte = self.page(at)[(at & 0xfff) as usize];
+                value |= u64::from(byte) << (8 * index);
+            }
+            value
+        }
+
+        fn write(&mut self, address: u64, size: usize, value: u64) {
+            for index in 0..size {
+                let at = address.wrapping_add(index as u64);
+                self.page(at)[(at & 0xfff) as usize] = (value >> (8 * index)) as u8;
+            }
+        }
+
+        fn bytes(&mut self, address: u64, count: usize) -> Vec<u8> {
+            (0..count)
+                .map(|index| self.read(address.wrapping_add(index as u64), 1) as u8)
+                .collect()
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Register {
+        General { number: usize, wide: bool },
+        Zero { wide: bool },
+        Stack { wide: bool },
+        Vector { number: usize, bits: u32 },
+    }
+
+    struct Machine<'t> {
+        target: &'t Target,
+        memory: Memory,
+        x: [u64; 32],
+        sp: u64,
+        v: [[u64; 2]; 32],
+        n: bool,
+        z: bool,
+        c: bool,
+        overflow: bool,
+        pc: u64,
+        break_address: u64,
+        map_address: u64,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit: Option<i32>,
+    }
+
+    fn register_of(target: &Target, operand: &MachineOperand) -> Register {
+        let record = target.registers[operand.register() as usize]
+            .record
+            .as_str();
+        match record {
+            "XZR" => Register::Zero { wide: true },
+            "WZR" => Register::Zero { wide: false },
+            "SP" => Register::Stack { wide: true },
+            "WSP" => Register::Stack { wide: false },
+            "FP" => Register::General {
+                number: 29,
+                wide: true,
+            },
+            "LR" => Register::General {
+                number: 30,
+                wide: true,
+            },
+            _ => {
+                let (letter, digits) = record.split_at(1);
+                let number: usize = digits
+                    .parse()
+                    .unwrap_or_else(|_| panic!("a register the emulator knows: {record}"));
+                match letter {
+                    "X" => Register::General { number, wide: true },
+                    "W" => Register::General {
+                        number,
+                        wide: false,
+                    },
+                    "B" => Register::Vector { number, bits: 8 },
+                    "H" => Register::Vector { number, bits: 16 },
+                    "S" => Register::Vector { number, bits: 32 },
+                    "D" => Register::Vector { number, bits: 64 },
+                    "Q" => Register::Vector { number, bits: 128 },
+                    _ => panic!("a register the emulator knows: {record}"),
+                }
+            }
+        }
+    }
+
+    fn mask(wide: bool) -> u64 {
+        if wide {
+            u64::MAX
+        } else {
+            0xffff_ffff
+        }
+    }
+
+    fn sign_extend(value: u64, bits: u32) -> i64 {
+        let shift = 64 - bits;
+        ((value << shift) as i64) >> shift
+    }
+
+    fn add_with_carry(
+        left: u64,
+        right: u64,
+        carry: bool,
+        wide: bool,
+    ) -> (u64, bool, bool, bool, bool) {
+        let bits = if wide { 64 } else { 32 };
+        let left = left & mask(wide);
+        let right = right & mask(wide);
+        let total = u128::from(left) + u128::from(right) + u128::from(carry);
+        let result = (total as u64) & mask(wide);
+        let carry_out = (total >> bits) & 1 == 1;
+        let signed =
+            sign_extend(left, bits) as i128 + sign_extend(right, bits) as i128 + i128::from(carry);
+        let overflow = signed != sign_extend(result, bits) as i128;
+        let negative = (result >> (bits - 1)) & 1 == 1;
+        (result, negative, result == 0, carry_out, overflow)
+    }
+
+    fn decode_shift(kind: u64, value: u64, amount: u32, wide: bool) -> u64 {
+        let bits = if wide { 64 } else { 32 };
+        let value = value & mask(wide);
+        let amount = amount % bits;
+        let result = match kind {
+            0 => value << amount,
+            1 => value >> amount,
+            2 => (sign_extend(value, bits) >> amount) as u64,
+            _ => {
+                if amount == 0 {
+                    value
+                } else {
+                    (value >> amount) | (value << (bits - amount))
+                }
+            }
+        };
+        result & mask(wide)
+    }
+
+    fn replicate_bit_mask(value: u64, wide: bool) -> u64 {
+        armv8::decode_logical_immediate(value, if wide { 64 } else { 32 })
+    }
+
+    impl<'t> Machine<'t> {
+        fn read(&self, register: Register) -> u64 {
+            match register {
+                Register::General { number, wide } => self.x[number] & mask(wide),
+                Register::Zero { .. } => 0,
+                Register::Stack { wide } => self.sp & mask(wide),
+                Register::Vector { number, bits } => {
+                    if bits >= 64 {
+                        self.v[number][0]
+                    } else {
+                        self.v[number][0] & ((1u64 << bits) - 1)
+                    }
+                }
+            }
+        }
+
+        fn write(&mut self, register: Register, value: u64) {
+            match register {
+                Register::General { number, wide } => self.x[number] = value & mask(wide),
+                Register::Zero { .. } => {}
+                Register::Stack { wide } => self.sp = value & mask(wide),
+                Register::Vector { number, bits } => {
+                    self.v[number][0] = if bits >= 64 {
+                        value
+                    } else {
+                        value & ((1u64 << bits) - 1)
+                    };
+                    self.v[number][1] = 0;
+                }
+            }
+        }
+
+        fn condition(&self, code: i64) -> bool {
+            let base = match code >> 1 {
+                0 => self.z,
+                1 => self.c,
+                2 => self.n,
+                3 => self.overflow,
+                4 => self.c && !self.z,
+                5 => self.n == self.overflow,
+                6 => self.n == self.overflow && !self.z,
+                _ => true,
+            };
+            if code & 1 == 1 && code != 15 {
+                !base
+            } else {
+                base
+            }
+        }
+
+        fn set_flags(&mut self, flags: (u64, bool, bool, bool, bool)) {
+            self.n = flags.1;
+            self.z = flags.2;
+            self.c = flags.3;
+            self.overflow = flags.4;
+        }
+
+        fn syscall(&mut self) {
+            let number = self.x[8];
+            let (a0, a1, a2) = (self.x[0], self.x[1], self.x[2]);
+            match number {
+                64 => {
+                    let data = self.memory.bytes(a1, a2 as usize);
+                    match a0 {
+                        1 => self.stdout.extend_from_slice(&data),
+                        2 => self.stderr.extend_from_slice(&data),
+                        _ => {}
+                    }
+                    self.x[0] = a2;
+                }
+                93 | 94 => self.exit = Some(a0 as u32 as i32),
+                214 => {
+                    if a0 != 0 {
+                        self.break_address = a0;
+                    }
+                    self.x[0] = self.break_address;
+                }
+                222 => {
+                    let length = (a1 + 0xfff) & !0xfff;
+                    self.x[0] = self.map_address;
+                    self.map_address += length;
+                }
+                215 => self.x[0] = 0,
+                113 => {
+                    self.memory.write(a1, 8, 0);
+                    self.memory.write(a1 + 8, 8, 0);
+                    self.x[0] = 0;
+                }
+                _ => panic!("the emulator knows system call {number}"),
+            }
+        }
+
+        fn step(&mut self, instruction: &MachineInstruction) {
+            let target = self.target;
+            let record = target.instructions[instruction.opcode].record.clone();
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            let next = self.pc.wrapping_add(4);
+            let mut jump: Option<u64> = None;
+            let name = record.as_str();
+            let wide_of = |register: Register| match register {
+                Register::General { wide, .. }
+                | Register::Zero { wide }
+                | Register::Stack { wide } => wide,
+                Register::Vector { bits, .. } => bits == 64,
+            };
+            match name {
+                "NOP" | "HINT" | "DMB" | "DSB" | "ISB" | "CLREX" => {}
+                "SVC" => self.syscall(),
+                "BRK" | "UDF" => panic!("the program executed a trap at {:#x}", self.pc),
+                "B" => jump = Some(self.pc.wrapping_add((imm(0) * 4) as u64)),
+                "BL" => {
+                    self.x[30] = next;
+                    jump = Some(self.pc.wrapping_add((imm(0) * 4) as u64));
+                }
+                "BR" => jump = Some(self.read(reg(0))),
+                "BLR" => {
+                    let destination = self.read(reg(0));
+                    self.x[30] = next;
+                    jump = Some(destination);
+                }
+                "RET" => jump = Some(self.read(reg(0))),
+                "Bcc" => {
+                    if self.condition(imm(0)) {
+                        jump = Some(self.pc.wrapping_add((imm(1) * 4) as u64));
+                    }
+                }
+                "CBZW" | "CBZX" | "CBNZW" | "CBNZX" => {
+                    let register = reg(0);
+                    let zero = self.read(register) == 0;
+                    if zero == name.starts_with("CBZ") {
+                        jump = Some(self.pc.wrapping_add((imm(1) * 4) as u64));
+                    }
+                }
+                "TBZW" | "TBZX" | "TBNZW" | "TBNZX" => {
+                    let set = (self.read(reg(0)) >> imm(1)) & 1 == 1;
+                    if set == name.starts_with("TBNZ") {
+                        jump = Some(self.pc.wrapping_add((imm(2) * 4) as u64));
+                    }
+                }
+                "ADR" => {
+                    let value = self.pc.wrapping_add(imm(1) as u64);
+                    self.write(reg(0), value);
+                }
+                "ADRP" => {
+                    let value = (self.pc & !0xfff).wrapping_add((imm(1) << 12) as u64);
+                    self.write(reg(0), value);
+                }
+                _ => self.execute(name, instruction, &mut jump, &wide_of),
+            }
+            self.pc = jump.unwrap_or(next);
+        }
+
+        #[allow(clippy::cognitive_complexity)]
+        fn execute(
+            &mut self,
+            name: &str,
+            instruction: &MachineInstruction,
+            jump: &mut Option<u64>,
+            wide_of: &dyn Fn(Register) -> bool,
+        ) {
+            let _ = jump;
+            let target = self.target;
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            let family = |prefixes: &[&str], suffixes: &[&str]| -> Option<(String, String)> {
+                for prefix in prefixes {
+                    if let Some(rest) = name.strip_prefix(prefix) {
+                        for suffix in suffixes {
+                            if rest == *suffix {
+                                return Some((prefix.to_string(), suffix.to_string()));
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            let arithmetic = family(
+                &["ADDS", "SUBS", "ADD", "SUB"],
+                &["Wri", "Xri", "Wrs", "Xrs", "Wrx", "Xrx", "Xrx64"],
+            );
+            if let Some((operation, form)) = arithmetic {
+                let wide = form.starts_with('X');
+                let rd = reg(0);
+                let left = self.read(reg(1));
+                let right = match form.as_str() {
+                    "Wri" | "Xri" => (imm(2) as u64) << imm(3),
+                    "Wrs" | "Xrs" => {
+                        let amount = (imm(3) & 0x3f) as u32;
+                        decode_shift(((imm(3) >> 6) & 3) as u64, self.read(reg(2)), amount, wide)
+                    }
+                    _ => {
+                        let extend = imm(3) as u64;
+                        let option = (extend >> 3) & 7;
+                        let amount = (extend & 7) as u32;
+                        let value = self.read(reg(2));
+                        let extended = match option {
+                            0 => value & 0xff,
+                            1 => value & 0xffff,
+                            2 => value & 0xffff_ffff,
+                            3 => value,
+                            4 => sign_extend(value & 0xff, 8) as u64,
+                            5 => sign_extend(value & 0xffff, 16) as u64,
+                            6 => sign_extend(value & 0xffff_ffff, 32) as u64,
+                            _ => value,
+                        };
+                        extended << amount
+                    }
+                };
+                let subtract = operation.starts_with("SUB");
+                let flags = if subtract {
+                    add_with_carry(left, !right, true, wide)
+                } else {
+                    add_with_carry(left, right, false, wide)
+                };
+                if operation.ends_with('S') {
+                    self.set_flags(flags);
+                }
+                self.write(rd, flags.0);
+                return;
+            }
+            let logical = family(
+                &["ANDS", "AND", "ORR", "EOR", "BICS", "BIC", "ORN", "EON"],
+                &["Wri", "Xri", "Wrs", "Xrs"],
+            );
+            if let Some((operation, form)) = logical {
+                let wide = form.starts_with('X');
+                let left = self.read(reg(1));
+                let mut right = if form.ends_with("ri") {
+                    replicate_bit_mask(imm(2) as u64, wide)
+                } else {
+                    let amount = (imm(3) & 0x3f) as u32;
+                    decode_shift(((imm(3) >> 6) & 3) as u64, self.read(reg(2)), amount, wide)
+                };
+                if matches!(operation.as_str(), "BIC" | "BICS" | "ORN" | "EON") {
+                    right = !right & mask(wide);
+                }
+                let result = match operation.as_str() {
+                    "AND" | "ANDS" | "BIC" | "BICS" => left & right,
+                    "ORR" | "ORN" => left | right,
+                    _ => left ^ right,
+                } & mask(wide);
+                if operation.ends_with('S') {
+                    let bits = if wide { 64 } else { 32 };
+                    self.set_flags((
+                        result,
+                        (result >> (bits - 1)) & 1 == 1,
+                        result == 0,
+                        false,
+                        false,
+                    ));
+                }
+                self.write(reg(0), result);
+                return;
+            }
+            if let Some((operation, form)) = family(&["MOVZ", "MOVN", "MOVK"], &["Wi", "Xi"]) {
+                let wide = form.starts_with('X');
+                let rd = reg(0);
+                if operation == "MOVK" {
+                    let shift = imm(3) as u32;
+                    let held = self.read(rd);
+                    let cleared = held & !(0xffffu64 << shift);
+                    self.write(rd, cleared | ((imm(2) as u64 & 0xffff) << shift));
+                } else {
+                    let value = (imm(1) as u64 & 0xffff) << imm(2);
+                    let value = if operation == "MOVN" { !value } else { value };
+                    self.write(rd, value & mask(wide));
+                }
+                return;
+            }
+            if let Some((operation, form)) = family(&["SBFM", "UBFM", "BFM"], &["Wri", "Xri"]) {
+                let wide = form.starts_with('X');
+                let bits = if wide { 64u32 } else { 32 };
+                let rd = reg(0);
+                let (source, immr, imms) = if operation == "BFM" {
+                    (self.read(reg(2)), imm(3) as u32, imm(4) as u32)
+                } else {
+                    (self.read(reg(1)), imm(2) as u32, imm(3) as u32)
+                };
+                let source = source & mask(wide);
+                let result = if imms >= immr {
+                    let width = imms - immr + 1;
+                    let field = (source >> immr)
+                        & (if width >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << width) - 1
+                        });
+                    match operation.as_str() {
+                        "SBFM" => sign_extend(field, width) as u64 & mask(wide),
+                        "UBFM" => field,
+                        _ => {
+                            let held = self.read(rd);
+                            let field_mask = if width >= 64 {
+                                u64::MAX
+                            } else {
+                                (1u64 << width) - 1
+                            };
+                            (held & !field_mask) | field
+                        }
+                    }
+                } else {
+                    let width = imms + 1;
+                    let position = bits - immr;
+                    let field = source & ((1u64 << width) - 1);
+                    match operation.as_str() {
+                        "SBFM" => (sign_extend(field, width) as u64) << position & mask(wide),
+                        "UBFM" => field << position,
+                        _ => {
+                            let held = self.read(rd);
+                            let field_mask = ((1u64 << width) - 1) << position;
+                            (held & !field_mask) | (field << position)
+                        }
+                    }
+                };
+                self.write(rd, result & mask(wide));
+                return;
+            }
+            if let Some((operation, form)) =
+                family(&["LSLV", "LSRV", "ASRV", "RORV"], &["Wr", "Xr"])
+            {
+                let wide = form.starts_with('X');
+                let kind = match operation.as_str() {
+                    "LSLV" => 0,
+                    "LSRV" => 1,
+                    "ASRV" => 2,
+                    _ => 3,
+                };
+                let amount = (self.read(reg(2)) % if wide { 64 } else { 32 }) as u32;
+                let value = decode_shift(kind, self.read(reg(1)), amount, wide);
+                self.write(reg(0), value);
+                return;
+            }
+            if let Some((operation, form)) = family(&["SDIV", "UDIV"], &["Wr", "Xr"]) {
+                let wide = form.starts_with('X');
+                let bits = if wide { 64 } else { 32 };
+                let left = self.read(reg(1));
+                let right = self.read(reg(2));
+                let result = if right == 0 {
+                    0
+                } else if operation == "SDIV" {
+                    let (a, b) = (sign_extend(left, bits), sign_extend(right, bits));
+                    a.wrapping_div(b) as u64
+                } else {
+                    left / right
+                };
+                self.write(reg(0), result & mask(wide));
+                return;
+            }
+            if let Some((operation, form)) = family(&["MADD", "MSUB"], &["Wrrr", "Xrrr"]) {
+                let wide = form.starts_with('X');
+                let product = self.read(reg(1)).wrapping_mul(self.read(reg(2)));
+                let accumulator = self.read(reg(3));
+                let result = if operation == "MADD" {
+                    accumulator.wrapping_add(product)
+                } else {
+                    accumulator.wrapping_sub(product)
+                };
+                self.write(reg(0), result & mask(wide));
+                return;
+            }
+            match name {
+                "SMADDLrrr" | "SMSUBLrrr" | "UMADDLrrr" | "UMSUBLrrr" => {
+                    let signed = name.starts_with('S');
+                    let (a, b) = (
+                        self.read(reg(1)) & 0xffff_ffff,
+                        self.read(reg(2)) & 0xffff_ffff,
+                    );
+                    let product = if signed {
+                        (sign_extend(a, 32).wrapping_mul(sign_extend(b, 32))) as u64
+                    } else {
+                        a.wrapping_mul(b)
+                    };
+                    let accumulator = self.read(reg(3));
+                    let result = if name.contains("ADD") {
+                        accumulator.wrapping_add(product)
+                    } else {
+                        accumulator.wrapping_sub(product)
+                    };
+                    self.write(reg(0), result);
+                }
+                "SMULHrr" | "UMULHrr" => {
+                    let (a, b) = (self.read(reg(1)), self.read(reg(2)));
+                    let high = if name.starts_with('S') {
+                        ((i128::from(a as i64) * i128::from(b as i64)) >> 64) as u64
+                    } else {
+                        ((u128::from(a) * u128::from(b)) >> 64) as u64
+                    };
+                    self.write(reg(0), high);
+                }
+                "CSELWr" | "CSELXr" | "CSINCWr" | "CSINCXr" | "CSINVWr" | "CSINVXr" | "CSNEGWr"
+                | "CSNEGXr" => {
+                    let wide = name.ends_with("Xr");
+                    let taken = self.condition(imm(3));
+                    let value = if taken {
+                        self.read(reg(1))
+                    } else {
+                        let other = self.read(reg(2));
+                        if name.starts_with("CSINC") {
+                            other.wrapping_add(1)
+                        } else if name.starts_with("CSINV") {
+                            !other
+                        } else if name.starts_with("CSNEG") {
+                            other.wrapping_neg()
+                        } else {
+                            other
+                        }
+                    };
+                    self.write(reg(0), value & mask(wide));
+                }
+                "CLZWr" | "CLZXr" => {
+                    let wide = name.ends_with("Xr");
+                    let value = self.read(reg(1));
+                    let count = if wide {
+                        value.leading_zeros()
+                    } else {
+                        (value as u32).leading_zeros()
+                    };
+                    self.write(reg(0), u64::from(count));
+                }
+                "RBITWr" | "RBITXr" => {
+                    let wide = name.ends_with("Xr");
+                    let value = self.read(reg(1));
+                    let result = if wide {
+                        value.reverse_bits()
+                    } else {
+                        u64::from((value as u32).reverse_bits())
+                    };
+                    self.write(reg(0), result);
+                }
+                "REVWr" | "REVXr" => {
+                    let wide = name.ends_with("Xr");
+                    let value = self.read(reg(1));
+                    let result = if wide {
+                        value.swap_bytes()
+                    } else {
+                        u64::from((value as u32).swap_bytes())
+                    };
+                    self.write(reg(0), result);
+                }
+                _ => self.memory_and_float(name, instruction, wide_of),
+            }
+        }
+
+        fn memory_and_float(
+            &mut self,
+            name: &str,
+            instruction: &MachineInstruction,
+            wide_of: &dyn Fn(Register) -> bool,
+        ) {
+            let _ = wide_of;
+            let target = self.target;
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            if let Some(access) = memory_access(name) {
+                let rt_index = if access.writeback { 1 } else { 0 };
+                let register = reg(rt_index);
+                let base = reg(rt_index + 1);
+                let base_value = self.read(base);
+                let (address, update) = match access.mode {
+                    Mode::Unsigned => (
+                        base_value.wrapping_add((imm(rt_index + 2) as u64) * access.size as u64),
+                        None,
+                    ),
+                    Mode::Unscaled => (base_value.wrapping_add(imm(rt_index + 2) as u64), None),
+                    Mode::Pre => {
+                        let address = base_value.wrapping_add(imm(rt_index + 2) as u64);
+                        (address, Some(address))
+                    }
+                    Mode::Post => {
+                        let address = base_value;
+                        (
+                            address,
+                            Some(base_value.wrapping_add(imm(rt_index + 2) as u64)),
+                        )
+                    }
+                    Mode::Register => {
+                        let index_register = reg(rt_index + 2);
+                        let index_value = self.read(index_register);
+                        let signed = imm(rt_index + 3) == 1;
+                        let scaled = imm(rt_index + 4) == 1;
+                        let offset = if wide_of_register(index_register) {
+                            index_value
+                        } else if signed {
+                            sign_extend(index_value, 32) as u64
+                        } else {
+                            index_value & 0xffff_ffff
+                        };
+                        let offset = if scaled {
+                            offset << access.size.trailing_zeros()
+                        } else {
+                            offset
+                        };
+                        (base_value.wrapping_add(offset), None)
+                    }
+                    Mode::Literal => (self.pc.wrapping_add((imm(rt_index + 1) * 4) as u64), None),
+                };
+                if access.load {
+                    let raw = self.memory.read(address, access.size);
+                    let value = if access.sign_bits > 0 {
+                        sign_extend(raw, access.sign_bits) as u64
+                    } else {
+                        raw
+                    };
+                    let value = match register {
+                        Register::General { wide, .. } | Register::Zero { wide } => {
+                            value & mask(wide)
+                        }
+                        _ => value,
+                    };
+                    if access.size == 16 {
+                        let high = self.memory.read(address + 8, 8);
+                        if let Register::Vector { number, .. } = register {
+                            self.v[number] = [self.memory.read(address, 8), high];
+                        }
+                    } else {
+                        self.write(register, value);
+                    }
+                } else if access.size == 16 {
+                    if let Register::Vector { number, .. } = register {
+                        let held = self.v[number];
+                        self.memory.write(address, 8, held[0]);
+                        self.memory.write(address + 8, 8, held[1]);
+                    }
+                } else {
+                    let value = self.read(register);
+                    self.memory.write(address, access.size, value);
+                }
+                if let Some(new_base) = update {
+                    self.write(base, new_base);
+                }
+                return;
+            }
+            if let Some(pair) = pair_access(name) {
+                let (first, second, base_index, offset_index) = if pair.writeback {
+                    (1, 2, 3, 4)
+                } else {
+                    (0, 1, 2, 3)
+                };
+                let base = reg(base_index);
+                let base_value = self.read(base);
+                let offset = (imm(offset_index) as u64).wrapping_mul(pair.size as u64);
+                let (address, update) = match pair.mode {
+                    Mode::Pre => (
+                        base_value.wrapping_add(offset),
+                        Some(base_value.wrapping_add(offset)),
+                    ),
+                    Mode::Post => (base_value, Some(base_value.wrapping_add(offset))),
+                    _ => (base_value.wrapping_add(offset), None),
+                };
+                let registers = [reg(first), reg(second)];
+                for (slot, register) in registers.iter().enumerate() {
+                    let at = address + (slot * pair.size) as u64;
+                    if pair.load {
+                        if pair.size == 16 {
+                            if let Register::Vector { number, .. } = register {
+                                self.v[*number] =
+                                    [self.memory.read(at, 8), self.memory.read(at + 8, 8)];
+                            }
+                        } else {
+                            let raw = self.memory.read(at, pair.size);
+                            let value = if pair.signed_word {
+                                sign_extend(raw, 32) as u64
+                            } else {
+                                raw
+                            };
+                            self.write(*register, value);
+                        }
+                    } else if pair.size == 16 {
+                        if let Register::Vector { number, .. } = register {
+                            let held = self.v[*number];
+                            self.memory.write(at, 8, held[0]);
+                            self.memory.write(at + 8, 8, held[1]);
+                        }
+                    } else {
+                        let value = self.read(*register);
+                        self.memory.write(at, pair.size, value);
+                    }
+                }
+                if let Some(new_base) = update {
+                    self.write(base, new_base);
+                }
+                return;
+            }
+            self.floating(name, instruction);
+        }
+
+        fn floating(&mut self, name: &str, instruction: &MachineInstruction) {
+            let target = self.target;
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            let single = |value: u64| f32::from_bits(value as u32);
+            let double = f64::from_bits;
+            match name {
+                "FADDSrr" | "FSUBSrr" | "FMULSrr" | "FDIVSrr" | "FNMULSrr" => {
+                    let (a, b) = (single(self.read(reg(1))), single(self.read(reg(2))));
+                    let result = match &name[..4] {
+                        "FADD" => a + b,
+                        "FSUB" => a - b,
+                        "FMUL" => a * b,
+                        "FDIV" => a / b,
+                        _ => -(a * b),
+                    };
+                    self.write(reg(0), u64::from(result.to_bits()));
+                }
+                "FADDDrr" | "FSUBDrr" | "FMULDrr" | "FDIVDrr" | "FNMULDrr" => {
+                    let (a, b) = (double(self.read(reg(1))), double(self.read(reg(2))));
+                    let result = match &name[..4] {
+                        "FADD" => a + b,
+                        "FSUB" => a - b,
+                        "FMUL" => a * b,
+                        "FDIV" => a / b,
+                        _ => -(a * b),
+                    };
+                    self.write(reg(0), result.to_bits());
+                }
+                "FNEGSr" => {
+                    let value = self.read(reg(1)) ^ 0x8000_0000;
+                    self.write(reg(0), value);
+                }
+                "FNEGDr" => {
+                    let value = self.read(reg(1)) ^ 0x8000_0000_0000_0000;
+                    self.write(reg(0), value);
+                }
+                "FABSSr" => {
+                    let value = self.read(reg(1)) & 0x7fff_ffff;
+                    self.write(reg(0), value);
+                }
+                "FABSDr" => {
+                    let value = self.read(reg(1)) & 0x7fff_ffff_ffff_ffff;
+                    self.write(reg(0), value);
+                }
+                "FSQRTSr" => {
+                    let value = single(self.read(reg(1))).sqrt();
+                    self.write(reg(0), u64::from(value.to_bits()));
+                }
+                "FSQRTDr" => {
+                    let value = double(self.read(reg(1))).sqrt();
+                    self.write(reg(0), value.to_bits());
+                }
+                "FMOVSr" | "FMOVDr" => {
+                    let value = self.read(reg(1));
+                    self.write(reg(0), value);
+                }
+                "FMOVWSr" | "FMOVSWr" | "FMOVXDr" | "FMOVDXr" => {
+                    let value = self.read(reg(1));
+                    self.write(reg(0), value);
+                }
+                "FMOVSi" | "FMOVDi" => {
+                    let encoded = imm(1) as u32;
+                    let value = armv8::float_from_immediate(encoded);
+                    if name == "FMOVSi" {
+                        self.write(reg(0), u64::from((value as f32).to_bits()));
+                    } else {
+                        self.write(reg(0), value.to_bits());
+                    }
+                }
+                "FCMPSrr" | "FCMPESrr" | "FCMPDrr" | "FCMPEDrr" | "FCMPSri" | "FCMPESri"
+                | "FCMPDri" | "FCMPEDri" => {
+                    let is_single = name.contains('S');
+                    let zero_form = name.ends_with("ri");
+                    let (a, b) = if is_single {
+                        let a = f64::from(single(self.read(reg(0))));
+                        let b = if zero_form {
+                            0.0
+                        } else {
+                            f64::from(single(self.read(reg(1))))
+                        };
+                        (a, b)
+                    } else {
+                        let a = double(self.read(reg(0)));
+                        let b = if zero_form {
+                            0.0
+                        } else {
+                            double(self.read(reg(1)))
+                        };
+                        (a, b)
+                    };
+                    if a.is_nan() || b.is_nan() {
+                        self.n = false;
+                        self.z = false;
+                        self.c = true;
+                        self.overflow = true;
+                    } else if a == b {
+                        self.n = false;
+                        self.z = true;
+                        self.c = true;
+                        self.overflow = false;
+                    } else if a < b {
+                        self.n = true;
+                        self.z = false;
+                        self.c = false;
+                        self.overflow = false;
+                    } else {
+                        self.n = false;
+                        self.z = false;
+                        self.c = true;
+                        self.overflow = false;
+                    }
+                }
+                "FCVTDSr" => {
+                    let value = f64::from(single(self.read(reg(1))));
+                    self.write(reg(0), value.to_bits());
+                }
+                "FCVTSDr" => {
+                    let value = double(self.read(reg(1))) as f32;
+                    self.write(reg(0), u64::from(value.to_bits()));
+                }
+                _ if name.starts_with("SCVTFU") || name.starts_with("UCVTFU") => {
+                    let source_wide = name.as_bytes()[6] == b'X';
+                    let to_single = name.as_bytes()[7] == b'S';
+                    let raw = self.read(reg(1));
+                    let signed = name.starts_with('S');
+                    if to_single {
+                        let converted = if signed {
+                            if source_wide {
+                                raw as i64 as f32
+                            } else {
+                                raw as u32 as i32 as f32
+                            }
+                        } else if source_wide {
+                            raw as f32
+                        } else {
+                            raw as u32 as f32
+                        };
+                        self.write(reg(0), u64::from(converted.to_bits()));
+                    } else {
+                        let converted = if signed {
+                            if source_wide {
+                                raw as i64 as f64
+                            } else {
+                                raw as u32 as i32 as f64
+                            }
+                        } else if source_wide {
+                            raw as f64
+                        } else {
+                            raw as u32 as f64
+                        };
+                        self.write(reg(0), converted.to_bits());
+                    }
+                }
+                _ if name.starts_with("FCVTZSU") || name.starts_with("FCVTZUU") => {
+                    let wide = name.as_bytes()[7] == b'X';
+                    let from_single = name.as_bytes()[8] == b'S';
+                    let value = if from_single {
+                        f64::from(single(self.read(reg(1))))
+                    } else {
+                        double(self.read(reg(1)))
+                    };
+                    let signed = name.starts_with("FCVTZS");
+                    let result = if signed {
+                        if wide {
+                            (value as i64) as u64
+                        } else {
+                            (value as i32) as u32 as u64
+                        }
+                    } else if wide {
+                        value as u64
+                    } else {
+                        (value as u32) as u64
+                    };
+                    self.write(reg(0), result);
+                }
+                "FRINTZSr" | "FRINTMSr" | "FRINTPSr" | "FRINTNSr" | "FRINTASr" => {
+                    let value = single(self.read(reg(1)));
+                    let rounded = match &name[..6] {
+                        "FRINTZ" => value.trunc(),
+                        "FRINTM" => value.floor(),
+                        "FRINTP" => value.ceil(),
+                        "FRINTA" => value.round(),
+                        _ => value.round_ties_even(),
+                    };
+                    self.write(reg(0), u64::from(rounded.to_bits()));
+                }
+                "FRINTZDr" | "FRINTMDr" | "FRINTPDr" | "FRINTNDr" | "FRINTADr" => {
+                    let value = double(self.read(reg(1)));
+                    let rounded = match &name[..6] {
+                        "FRINTZ" => value.trunc(),
+                        "FRINTM" => value.floor(),
+                        "FRINTP" => value.ceil(),
+                        "FRINTA" => value.round(),
+                        _ => value.round_ties_even(),
+                    };
+                    self.write(reg(0), rounded.to_bits());
+                }
+                "FMINSrr" | "FMAXSrr" | "FMINNMSrr" | "FMAXNMSrr" | "FMINDrr" | "FMAXDrr"
+                | "FMINNMDrr" | "FMAXNMDrr" => {
+                    let is_single = name.ends_with("Srr");
+                    let (a, b) = if is_single {
+                        (
+                            f64::from(single(self.read(reg(1)))),
+                            f64::from(single(self.read(reg(2)))),
+                        )
+                    } else {
+                        (double(self.read(reg(1))), double(self.read(reg(2))))
+                    };
+                    let numeric = name.contains("NM");
+                    let maximum = name.starts_with("FMAX");
+                    let result = if a.is_nan() || b.is_nan() {
+                        if numeric && !(a.is_nan() && b.is_nan()) {
+                            if a.is_nan() {
+                                b
+                            } else {
+                                a
+                            }
+                        } else {
+                            f64::NAN
+                        }
+                    } else if a == b {
+                        if maximum {
+                            if a.is_sign_negative() {
+                                b
+                            } else {
+                                a
+                            }
+                        } else if a.is_sign_negative() {
+                            a
+                        } else {
+                            b
+                        }
+                    } else if (a < b) == maximum {
+                        b
+                    } else {
+                        a
+                    };
+                    if is_single {
+                        self.write(reg(0), u64::from((result as f32).to_bits()));
+                    } else {
+                        self.write(reg(0), result.to_bits());
+                    }
+                }
+                "FMADDSrrr" | "FMSUBSrrr" | "FNMADDSrrr" | "FNMSUBSrrr" => {
+                    let (a, b, c) = (
+                        single(self.read(reg(1))),
+                        single(self.read(reg(2))),
+                        single(self.read(reg(3))),
+                    );
+                    let result = match &name[..5] {
+                        "FMADD" => a.mul_add(b, c),
+                        "FMSUB" => (-a).mul_add(b, c),
+                        "FNMAD" => (-a).mul_add(b, -c),
+                        _ => a.mul_add(b, -c),
+                    };
+                    self.write(reg(0), u64::from(result.to_bits()));
+                }
+                "FMADDDrrr" | "FMSUBDrrr" | "FNMADDDrrr" | "FNMSUBDrrr" => {
+                    let (a, b, c) = (
+                        double(self.read(reg(1))),
+                        double(self.read(reg(2))),
+                        double(self.read(reg(3))),
+                    );
+                    let result = match &name[..5] {
+                        "FMADD" => a.mul_add(b, c),
+                        "FMSUB" => (-a).mul_add(b, c),
+                        "FNMAD" => (-a).mul_add(b, -c),
+                        _ => a.mul_add(b, -c),
+                    };
+                    self.write(reg(0), result.to_bits());
+                }
+                "CNTv8i8" => {
+                    let value = self.read(reg(1));
+                    let mut result = 0u64;
+                    for byte in 0..8 {
+                        let count = ((value >> (8 * byte)) & 0xff).count_ones() as u64;
+                        result |= count << (8 * byte);
+                    }
+                    self.write(reg(0), result);
+                }
+                "ADDVv8i8v" => {
+                    let value = self.read(reg(1));
+                    let total: u64 = (0..8).map(|byte| (value >> (8 * byte)) & 0xff).sum();
+                    self.write(reg(0), total & 0xff);
+                }
+                _ => panic!(
+                    "the emulator knows the instruction {name} at {:#x}",
+                    self.pc
+                ),
+            }
+        }
+    }
+
+    fn wide_of_register(register: Register) -> bool {
+        match register {
+            Register::General { wide, .. } | Register::Zero { wide } | Register::Stack { wide } => {
+                wide
+            }
+            Register::Vector { bits, .. } => bits == 64,
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Unsigned,
+        Unscaled,
+        Pre,
+        Post,
+        Register,
+        Literal,
+    }
+
+    struct Access {
+        load: bool,
+        size: usize,
+        sign_bits: u32,
+        mode: Mode,
+        writeback: bool,
+    }
+
+    struct Pair {
+        load: bool,
+        size: usize,
+        mode: Mode,
+        writeback: bool,
+        signed_word: bool,
+    }
+
+    fn memory_access(name: &str) -> Option<Access> {
+        let (load, rest) = if let Some(rest) = name.strip_prefix("LDUR") {
+            (true, format!("U{rest}"))
+        } else if let Some(rest) = name.strip_prefix("STUR") {
+            (false, format!("U{rest}"))
+        } else if let Some(rest) = name.strip_prefix("LDR") {
+            (true, rest.to_string())
+        } else {
+            (false, name.strip_prefix("STR")?.to_string())
+        };
+        let (mode, stem) = if let Some(stem) = rest.strip_prefix('U') {
+            (Mode::Unscaled, stem.strip_suffix('i')?.to_string())
+        } else if let Some(stem) = rest.strip_suffix("ui") {
+            (Mode::Unsigned, stem.to_string())
+        } else if let Some(stem) = rest.strip_suffix("pre") {
+            (Mode::Pre, stem.to_string())
+        } else if let Some(stem) = rest.strip_suffix("post") {
+            (Mode::Post, stem.to_string())
+        } else if let Some(stem) = rest
+            .strip_suffix("roX")
+            .or_else(|| rest.strip_suffix("roW"))
+        {
+            (Mode::Register, stem.to_string())
+        } else {
+            (Mode::Literal, rest.strip_suffix('l')?.to_string())
+        };
+        let (size, sign_bits) = match stem.as_str() {
+            "BB" | "B" => (1, 0),
+            "HH" | "H" => (2, 0),
+            "W" | "S" => (4, 0),
+            "X" | "D" => (8, 0),
+            "Q" => (16, 0),
+            "SBW" | "SBX" => (1, 8),
+            "SHW" | "SHX" => (2, 16),
+            "SW" => (4, 32),
+            _ => return None,
+        };
+        Some(Access {
+            load,
+            size,
+            sign_bits,
+            mode,
+            writeback: matches!(mode, Mode::Pre | Mode::Post),
+        })
+    }
+
+    fn pair_access(name: &str) -> Option<Pair> {
+        let (load, rest) = if let Some(rest) = name.strip_prefix("LDP") {
+            (true, rest)
+        } else {
+            (false, name.strip_prefix("STP")?)
+        };
+        let (kind, tail) = if let Some(tail) = rest.strip_prefix("SW") {
+            ("SW", tail)
+        } else {
+            rest.split_at(1)
+        };
+        let size = match kind {
+            "W" | "S" | "SW" => 4,
+            "X" | "D" => 8,
+            "Q" => 16,
+            _ => return None,
+        };
+        let mode = match tail {
+            "i" => Mode::Unsigned,
+            "pre" => Mode::Pre,
+            "post" => Mode::Post,
+            _ => return None,
+        };
+        Some(Pair {
+            load,
+            size,
+            mode,
+            writeback: matches!(mode, Mode::Pre | Mode::Post),
+            signed_word: kind == "SW",
+        })
+    }
+
+    pub(super) fn run(program: &[u8]) -> Outcome {
+        let target = armv8::target().expect("the ARMv8 tables load");
+        let features = armv8::feature_set(target, "", &["+all".to_string()]);
+        let mut machine = Machine {
+            target,
+            memory: Memory {
+                pages: BTreeMap::new(),
+            },
+            x: [0; 32],
+            sp: 0x7fff_0000_0000,
+            v: [[0; 2]; 32],
+            n: false,
+            z: false,
+            c: false,
+            overflow: false,
+            pc: 0,
+            break_address: 0x4000_0000_0000,
+            map_address: 0x3000_0000_0000,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit: None,
+        };
+        let entry = u64::from_le_bytes(program[24..32].try_into().expect("an entry"));
+        let header_offset = u64::from_le_bytes(program[32..40].try_into().expect("headers"));
+        let header_size = u16::from_le_bytes(program[54..56].try_into().expect("size")) as u64;
+        let header_count = u16::from_le_bytes(program[56..58].try_into().expect("count")) as u64;
+        for index in 0..header_count {
+            let at = (header_offset + index * header_size) as usize;
+            let kind = u32::from_le_bytes(program[at..at + 4].try_into().expect("kind"));
+            if kind != 1 {
+                continue;
+            }
+            let offset = u64::from_le_bytes(program[at + 8..at + 16].try_into().expect("offset"));
+            let address =
+                u64::from_le_bytes(program[at + 16..at + 24].try_into().expect("address"));
+            let file_size = u64::from_le_bytes(program[at + 32..at + 40].try_into().expect("size"));
+            let memory_size =
+                u64::from_le_bytes(program[at + 40..at + 48].try_into().expect("size"));
+            for byte in 0..memory_size {
+                let value = if byte < file_size {
+                    program[(offset + byte) as usize]
+                } else {
+                    0
+                };
+                machine.memory.write(address + byte, 1, u64::from(value));
+            }
+            machine.break_address = machine.break_address.max(address + memory_size);
+        }
+        machine.pc = entry;
+        let mut cache: BTreeMap<u64, MachineInstruction> = BTreeMap::new();
+        let mut steps = 0u64;
+        while machine.exit.is_none() {
+            steps += 1;
+            assert!(steps < 200_000_000, "the program runs to its end");
+            let instruction = match cache.get(&machine.pc) {
+                Some(found) => found.clone(),
+                None => {
+                    let word = machine.memory.read(machine.pc, 4) as u32;
+                    let decoded = armv8::disassembler::decode(target, &features, word)
+                        .unwrap_or_else(|| {
+                            panic!("a decodable instruction {word:#010x} at {:#x}", machine.pc)
+                        });
+                    cache.insert(machine.pc, decoded.instruction.clone());
+                    decoded.instruction
+                }
+            };
+            machine.step(&instruction);
+        }
+        Outcome {
+            exit: machine.exit,
+            stdout: machine.stdout,
+        }
+    }
+}
+
 mod native_x86_64 {
     use crate::compilers::compiler_infrastructure::{
         Datum, Finish, Interpreter, Limits, Module, StandardHost,
@@ -72699,6 +73937,18 @@ mod native_x86_64 {
         module.verify().expect("the program keeps every rule");
         arm_program_decodes(&module, entry, name);
         let expected = interpreted(&module, entry);
+        let arm = crate::compilers::x86_64::armv8::native::build_executable(&module, entry)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        let emulated = super::arm_emulator::run(&arm);
+        assert_eq!(
+            String::from_utf8_lossy(&emulated.stdout),
+            String::from_utf8_lossy(&expected.1),
+            "the emulated arm64 program prints what the interpreter prints"
+        );
+        assert_eq!(
+            emulated.exit, expected.0,
+            "the emulated arm64 program exits as the interpreter does"
+        );
         let program = codegen::build_executable(&module, entry)
             .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
         let Some(native) = run_native(&program, name) else {
@@ -73204,8 +74454,8 @@ block3(%unexpected: i64):
 
 mod armv8_assembly {
     use crate::compilers::table_gen::TableValue;
-    use crate::compilers::x86_64::armv8;
     use crate::compilers::x86_64::armv7;
+    use crate::compilers::x86_64::armv8;
 
     fn value_text(value: &TableValue) -> String {
         match value {
