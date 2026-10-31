@@ -74836,6 +74836,54 @@ mod armv8_assembly {
 
     #[test]
     #[ignore]
+    fn armv7_matchables_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        let matcher = armv7::matcher();
+        let wanted = std::env::var("MNEMONIC").unwrap_or_else(|_| "add".to_string());
+        for entry in &matcher.matchables {
+            if entry.mnemonic != wanted {
+                continue;
+            }
+            let operands: Vec<String> = entry
+                .operands
+                .iter()
+                .map(|operand| format!("{}:{}", operand.token, matcher.classes[operand.class].name))
+                .collect();
+            eprintln!(
+                "E v{} {} [{}] {:?} alias={:?} pred={:?}",
+                entry.variant,
+                entry.record,
+                operands.join(" "),
+                entry.conversions,
+                entry.alias,
+                target.instructions[entry.result].predicates
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_registers_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        let names: Vec<String> = target
+            .registers
+            .iter()
+            .enumerate()
+            .map(|(index, register)| {
+                format!(
+                    "{index}:{}:{}:{}",
+                    register.record, register.assembly_name, register.encoding
+                )
+            })
+            .collect();
+        eprintln!("R {}", names.join(" "));
+        for class in &target.register_classes {
+            eprintln!("K {} {}", class.0, class.1.members.len());
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn armv7_classes_debug() {
         let target = armv7::target().expect("the ARMv7 target loads");
         for class in &target.assembly_operand_classes {
