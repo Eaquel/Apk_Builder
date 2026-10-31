@@ -9775,11 +9775,8 @@ pub const ARCHITECTURES: &[Architecture] = &[
     Architecture {
         name: "Armv7",
         target: "ARM",
-        selection: Selection::FeatureSets {
-            processor: Some("cortex-a15"),
-            alternatives: &[&[], &["ModeThumb"]],
-        },
-        description: "ARM records whose assembler predicates hold for ARMv7-A with every v7 extension (the cortex-a15 feature closure) in A32 or Thumb-2 state",
+        selection: Selection::Everything,
+        description: "every ARM record, each with the predicates that gate it",
     },
     Architecture {
         name: "Armv8",

@@ -4640,9 +4640,26 @@ impl<'s> Assembler<'s> {
             Outcome::MnemonicFail => self.error(location, "unrecognized instruction mnemonic"),
             Outcome::MissingFeature(features) => {
                 let mut text = "instruction requires:".to_string();
+                let mut seen: Vec<String> = Vec::new();
                 for feature in features {
+                    if !seen.contains(&feature) {
+                        seen.push(feature);
+                    }
+                }
+                seen.sort();
+                for feature in &seen {
+                    let name = match self.target.records.get(feature) {
+                        Some(record) if !table_text(record, "PredicateName").is_empty() => {
+                            table_text(record, "PredicateName")
+                        }
+                        Some(record) => match record.field("AssemblerCondDag") {
+                            Some(condition) => armv8::requirement_text(self.target, condition).0,
+                            None => feature.clone(),
+                        },
+                        None => feature.clone(),
+                    };
                     text.push(' ');
-                    text.push_str(&feature);
+                    text.push_str(&name);
                 }
                 self.error(location, &text)
             }
