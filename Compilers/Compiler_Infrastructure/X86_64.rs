@@ -10838,6 +10838,7 @@ pub trait Streamer {
     fn emit_arm_directive(&mut self, _text: &str) {}
     fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
+    fn emit_arm32_attributes(&mut self, _contents: &[u8]) {}
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
     fn emit_mode_change(&mut self, context: &mut AssemblyContext, mode: Mode);
     fn emit_coff_directive(
@@ -10887,6 +10888,7 @@ pub struct Assembler<'s> {
     pub arm_operand_count: usize,
     pub arm_writeback: bool,
     pub arm_attributes: armv8::AttributeSet,
+    pub arm_attribute_state: armv7::AttributeState,
     pub arm_pools: Vec<(usize, Vec<armv8::PoolEntry>)>,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
@@ -11060,6 +11062,7 @@ impl<'s> Assembler<'s> {
             arm_operand_count: 0,
             arm_writeback: false,
             arm_attributes: armv8::AttributeSet::default(),
+            arm_attribute_state: armv7::AttributeState::default(),
             arm_pools: Vec::new(),
             pending_errors: Vec::new(),
             condition: ConditionState {
@@ -11801,6 +11804,9 @@ impl<'s> Assembler<'s> {
         if !self.context.had_error {
             if self.target.isa == Isa::Armv8 {
                 self.arm_pool_finish();
+            }
+            if self.target.isa == Isa::Armv7 {
+                self.arm32_finish_attributes();
             }
             self.streamer.finish(&mut self.context);
         }
@@ -25791,6 +25797,7 @@ pub mod object {
         arm_mapping_state: BTreeMap<usize, bool>,
         implicit_mapping_symbols: bool,
         arm_attributes: armv8::AttributeSet,
+        arm32_attributes: Vec<u8>,
         thumb_two_features: bool,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
@@ -25980,6 +25987,7 @@ pub mod object {
                 arm_mapping_state: BTreeMap::new(),
                 implicit_mapping_symbols: options.implicit_mapping_symbols,
                 arm_attributes: armv8::AttributeSet::default(),
+                arm32_attributes: Vec::new(),
                 thumb_two_features: triple.isa == Isa::Armv7
                     && armv7::initial_features(target, &triple, &options.cpu, &options.features)
                         .contains("FeatureThumb2"),
@@ -30177,7 +30185,11 @@ pub mod object {
             if self.emit_debug_frame {
                 self.emit_frames(context, false);
             }
-            let attributes = self.arm_attributes.encode();
+            let attributes = if self.arm32_attributes.is_empty() {
+                self.arm_attributes.encode()
+            } else {
+                std::mem::take(&mut self.arm32_attributes)
+            };
             if !attributes.is_empty() {
                 let section = context.elf_section(".ARM.attributes", 0x7000_0003, 0, 0, "", None);
                 self.switch_section(context, section, 0);
@@ -30203,6 +30215,10 @@ pub mod object {
 
         fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
             self.arm_attributes.subsection(name, optional, kind);
+        }
+
+        fn emit_arm32_attributes(&mut self, contents: &[u8]) {
+            self.arm32_attributes = contents.to_vec();
         }
 
         fn emit_arm_attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {

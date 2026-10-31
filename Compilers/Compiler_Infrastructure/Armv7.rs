@@ -4013,8 +4013,15 @@ impl<'s> Assembler<'s> {
             }
             ".thumb_func" | ".thumb_set" | ".fnstart" | ".fnend" | ".cantunwind"
             | ".handlerdata" | ".personality" | ".personalityindex" | ".save" | ".vsave"
-            | ".setfp" | ".pad" | ".movsp" | ".unwind_raw" | ".eabi_attribute" | ".object_arch"
-            | ".tlsdescseq" | ".even" => self.arm32_text_directive(identifier),
+            | ".setfp" | ".pad" | ".movsp" | ".unwind_raw" | ".tlsdescseq" | ".even" => {
+                self.arm32_text_directive(identifier)
+            }
+            ".eabi_attribute" => Some(self.arm32_directive_eabi_attribute()),
+            ".object_arch" => Some(self.arm32_directive_object_arch()),
+            ".arch_extension" => Some(self.arm32_directive_arch_extension()),
+            ".arch" => Some(self.arm32_directive_arch(location)),
+            ".cpu" => Some(self.arm32_directive_cpu(location)),
+            ".fpu" => Some(self.arm32_directive_fpu()),
             ".hword" => Some(self.parse_directive_value(2)),
             ".word" => Some(self.parse_directive_value(4)),
             ".align" => Some(self.parse_directive_align(true, 1)),
@@ -4024,48 +4031,6 @@ impl<'s> Assembler<'s> {
                 }
                 Some(false)
             }
-            ".fpu" => {
-                let at = self.location();
-                let name = self.parse_string_to_end_of_statement().trim().to_string();
-                let (enable, disable): (&[&str], &[&str]) = match name.as_str() {
-                    "none" | "softvfp" => (
-                        &[],
-                        &["vfp2", "vfp3", "vfp4", "fp-armv8", "neon", "d32", "crypto"],
-                    ),
-                    "vfp" | "vfpv2" => (&["vfp2"], &["vfp3", "neon"]),
-                    "vfpv3" | "vfpv3-fp16" => (&["vfp3", "d32"], &[]),
-                    "vfpv3-d16" | "vfpv3-d16-fp16" => (&["vfp3"], &["d32"]),
-                    "vfpv4" => (&["vfp4", "d32"], &[]),
-                    "vfpv4-d16" => (&["vfp4"], &["d32"]),
-                    "fpv4-sp-d16" | "fpv5-sp-d16" => (&["vfp4"], &["d32", "fp64"]),
-                    "fpv5-d16" => (&["fp-armv8"], &["d32"]),
-                    "fp-armv8" => (&["fp-armv8", "d32"], &[]),
-                    "neon" | "neon-vfpv3" | "neon-fp16" => (&["neon", "vfp3", "d32"], &[]),
-                    "neon-vfpv4" => (&["neon", "vfp4", "d32"], &[]),
-                    "neon-fp-armv8" => (&["neon", "fp-armv8", "d32"], &[]),
-                    "crypto-neon-fp-armv8" => (&["neon", "fp-armv8", "d32", "crypto"], &[]),
-                    _ => return Some(self.error(at, "Unknown FPU name")),
-                };
-                self.arm32_set_features(enable, disable);
-                self.streamer.emit_arm_directive(&format!("\t.fpu\t{name}"));
-                Some(false)
-            }
-            ".cpu" => {
-                let at = self.location();
-                let name = self.parse_string_to_end_of_statement().trim().to_string();
-                let target = self.target;
-                let known = target.records.values().any(|record| {
-                    record.is_a("ProcessorModel") && table_text(record, "Name") == name
-                });
-                if !known {
-                    return Some(self.error(at, "unknown CPU name"));
-                }
-                self.arm_features = armv8::feature_set(target, &name, &[]);
-                self.streamer.set_arm_features(&self.arm_features);
-                self.streamer.emit_arm_directive(&format!("\t.cpu\t{name}"));
-                Some(false)
-            }
-            ".arch" | ".arch_extension" => self.arm32_text_directive(identifier),
             _ => {
                 let _ = location;
                 None
@@ -6596,5 +6561,2286 @@ impl<'t> Printer<'t> {
         (0..count as u32)
             .map(|at| format!("d{}", encoding + at * step))
             .collect()
+    }
+}
+
+pub struct FpuEntry {
+    pub name: &'static str,
+    pub version: u8,
+    pub neon: u8,
+    pub restriction: u8,
+}
+
+pub const FPUS: &[FpuEntry] = &[
+    FpuEntry {
+        name: "invalid",
+        version: 0,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "none",
+        version: 0,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "vfp",
+        version: 1,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "vfpv2",
+        version: 1,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "vfpv3",
+        version: 2,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "vfpv3-fp16",
+        version: 3,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "vfpv3-d16",
+        version: 2,
+        neon: 0,
+        restriction: 1,
+    },
+    FpuEntry {
+        name: "vfpv3-d16-fp16",
+        version: 3,
+        neon: 0,
+        restriction: 1,
+    },
+    FpuEntry {
+        name: "vfpv3xd",
+        version: 2,
+        neon: 0,
+        restriction: 2,
+    },
+    FpuEntry {
+        name: "vfpv3xd-fp16",
+        version: 3,
+        neon: 0,
+        restriction: 2,
+    },
+    FpuEntry {
+        name: "vfpv4",
+        version: 4,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "vfpv4-d16",
+        version: 4,
+        neon: 0,
+        restriction: 1,
+    },
+    FpuEntry {
+        name: "fpv4-sp-d16",
+        version: 4,
+        neon: 0,
+        restriction: 2,
+    },
+    FpuEntry {
+        name: "fpv5-d16",
+        version: 5,
+        neon: 0,
+        restriction: 1,
+    },
+    FpuEntry {
+        name: "fpv5-sp-d16",
+        version: 5,
+        neon: 0,
+        restriction: 2,
+    },
+    FpuEntry {
+        name: "fp-armv8",
+        version: 5,
+        neon: 0,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "fp-armv8-fullfp16-d16",
+        version: 6,
+        neon: 0,
+        restriction: 1,
+    },
+    FpuEntry {
+        name: "fp-armv8-fullfp16-sp-d16",
+        version: 6,
+        neon: 0,
+        restriction: 2,
+    },
+    FpuEntry {
+        name: "neon",
+        version: 2,
+        neon: 1,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "neon-fp16",
+        version: 3,
+        neon: 1,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "neon-vfpv4",
+        version: 4,
+        neon: 1,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "neon-fp-armv8",
+        version: 5,
+        neon: 1,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "crypto-neon-fp-armv8",
+        version: 5,
+        neon: 2,
+        restriction: 0,
+    },
+    FpuEntry {
+        name: "softvfp",
+        version: 0,
+        neon: 0,
+        restriction: 0,
+    },
+];
+
+pub struct ArchEntry {
+    pub name: &'static str,
+    pub id: &'static str,
+    pub cpu_attr: &'static str,
+    pub feature: &'static str,
+    pub attribute: u32,
+    pub fpu: u32,
+    pub extensions: u64,
+}
+
+pub const ARCHES: &[ArchEntry] = &[
+    ArchEntry {
+        name: "invalid",
+        id: "INVALID",
+        cpu_attr: "",
+        feature: "+",
+        attribute: 0,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "armv4",
+        id: "ARMV4",
+        cpu_attr: "4",
+        feature: "+v4",
+        attribute: 1,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "armv4t",
+        id: "ARMV4T",
+        cpu_attr: "4T",
+        feature: "+v4t",
+        attribute: 2,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "armv5t",
+        id: "ARMV5T",
+        cpu_attr: "5T",
+        feature: "+v5",
+        attribute: 3,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "armv5te",
+        id: "ARMV5TE",
+        cpu_attr: "5TE",
+        feature: "+v5e",
+        attribute: 4,
+        fpu: 1,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv5tej",
+        id: "ARMV5TEJ",
+        cpu_attr: "5TEJ",
+        feature: "+v5e",
+        attribute: 5,
+        fpu: 1,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv6",
+        id: "ARMV6",
+        cpu_attr: "6",
+        feature: "+v6",
+        attribute: 6,
+        fpu: 3,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv6k",
+        id: "ARMV6K",
+        cpu_attr: "6K",
+        feature: "+v6k",
+        attribute: 9,
+        fpu: 3,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv6t2",
+        id: "ARMV6T2",
+        cpu_attr: "6T2",
+        feature: "+v6t2",
+        attribute: 8,
+        fpu: 1,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv6kz",
+        id: "ARMV6KZ",
+        cpu_attr: "6KZ",
+        feature: "+v6kz",
+        attribute: 7,
+        fpu: 3,
+        extensions: 1280,
+    },
+    ArchEntry {
+        name: "armv6-m",
+        id: "ARMV6M",
+        cpu_attr: "6-M",
+        feature: "+v6m",
+        attribute: 11,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "armv7-a",
+        id: "ARMV7A",
+        cpu_attr: "7-A",
+        feature: "+v7",
+        attribute: 10,
+        fpu: 18,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv7ve",
+        id: "ARMV7VE",
+        cpu_attr: "7VE",
+        feature: "+v7ve",
+        attribute: 10,
+        fpu: 18,
+        extensions: 1904,
+    },
+    ArchEntry {
+        name: "armv7-r",
+        id: "ARMV7R",
+        cpu_attr: "7-R",
+        feature: "+v7r",
+        attribute: 10,
+        fpu: 1,
+        extensions: 1040,
+    },
+    ArchEntry {
+        name: "armv7-m",
+        id: "ARMV7M",
+        cpu_attr: "7-M",
+        feature: "+v7m",
+        attribute: 10,
+        fpu: 1,
+        extensions: 16,
+    },
+    ArchEntry {
+        name: "armv7e-m",
+        id: "ARMV7EM",
+        cpu_attr: "7E-M",
+        feature: "+v7em",
+        attribute: 13,
+        fpu: 1,
+        extensions: 1040,
+    },
+    ArchEntry {
+        name: "armv8-a",
+        id: "ARMV8A",
+        cpu_attr: "8-A",
+        feature: "+v8a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 1906,
+    },
+    ArchEntry {
+        name: "armv8.1-a",
+        id: "ARMV8_1A",
+        cpu_attr: "8.1-A",
+        feature: "+v8.1a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 1906,
+    },
+    ArchEntry {
+        name: "armv8.2-a",
+        id: "ARMV8_2A",
+        cpu_attr: "8.2-A",
+        feature: "+v8.2a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 6002,
+    },
+    ArchEntry {
+        name: "armv8.3-a",
+        id: "ARMV8_3A",
+        cpu_attr: "8.3-A",
+        feature: "+v8.3a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 6002,
+    },
+    ArchEntry {
+        name: "armv8.4-a",
+        id: "ARMV8_4A",
+        cpu_attr: "8.4-A",
+        feature: "+v8.4a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 14194,
+    },
+    ArchEntry {
+        name: "armv8.5-a",
+        id: "ARMV8_5A",
+        cpu_attr: "8.5-A",
+        feature: "+v8.5a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 14194,
+    },
+    ArchEntry {
+        name: "armv8.6-a",
+        id: "ARMV8_6A",
+        cpu_attr: "8.6-A",
+        feature: "+v8.6a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv8.7-a",
+        id: "ARMV8_7A",
+        cpu_attr: "8.7-A",
+        feature: "+v8.7a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv8.8-a",
+        id: "ARMV8_8A",
+        cpu_attr: "8.8-A",
+        feature: "+v8.8a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 3209074,
+    },
+    ArchEntry {
+        name: "armv8.9-a",
+        id: "ARMV8_9A",
+        cpu_attr: "8.9-A",
+        feature: "+v8.9a",
+        attribute: 14,
+        fpu: 22,
+        extensions: 3209074,
+    },
+    ArchEntry {
+        name: "armv9-a",
+        id: "ARMV9A",
+        cpu_attr: "9-A",
+        feature: "+v9a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 14194,
+    },
+    ArchEntry {
+        name: "armv9.1-a",
+        id: "ARMV9_1A",
+        cpu_attr: "9.1-A",
+        feature: "+v9.1a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv9.2-a",
+        id: "ARMV9_2A",
+        cpu_attr: "9.2-A",
+        feature: "+v9.2a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv9.3-a",
+        id: "ARMV9_3A",
+        cpu_attr: "9.3-A",
+        feature: "+v9.3a",
+        attribute: 22,
+        fpu: 22,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv9.4-a",
+        id: "ARMV9_4A",
+        cpu_attr: "9.4-A",
+        feature: "+v9.4a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv9.5-a",
+        id: "ARMV9_5A",
+        cpu_attr: "9.5-A",
+        feature: "+v9.5a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv9.6-a",
+        id: "ARMV9_6A",
+        cpu_attr: "9.6-A",
+        feature: "+v9.6a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv9.7-a",
+        id: "ARMV9_7A",
+        cpu_attr: "9.7-A",
+        feature: "+v9.7a",
+        attribute: 22,
+        fpu: 21,
+        extensions: 3159922,
+    },
+    ArchEntry {
+        name: "armv8-r",
+        id: "ARMV8R",
+        cpu_attr: "8-R",
+        feature: "+v8r",
+        attribute: 15,
+        fpu: 14,
+        extensions: 1650,
+    },
+    ArchEntry {
+        name: "armv8-m.base",
+        id: "ARMV8MBaseline",
+        cpu_attr: "8-M.Baseline",
+        feature: "+v8m.base",
+        attribute: 16,
+        fpu: 1,
+        extensions: 16,
+    },
+    ArchEntry {
+        name: "armv8-m.main",
+        id: "ARMV8MMainline",
+        cpu_attr: "8-M.Mainline",
+        feature: "+v8m.main",
+        attribute: 17,
+        fpu: 13,
+        extensions: 16,
+    },
+    ArchEntry {
+        name: "armv8.1-m.main",
+        id: "ARMV8_1MMainline",
+        cpu_attr: "8.1-M.Mainline",
+        feature: "+v8.1m.main",
+        attribute: 21,
+        fpu: 17,
+        extensions: 528400,
+    },
+    ArchEntry {
+        name: "iwmmxt",
+        id: "IWMMXT",
+        cpu_attr: "iwmmxt",
+        feature: "+",
+        attribute: 4,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "iwmmxt2",
+        id: "IWMMXT2",
+        cpu_attr: "iwmmxt2",
+        feature: "+",
+        attribute: 4,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "xscale",
+        id: "XSCALE",
+        cpu_attr: "xscale",
+        feature: "+v5e",
+        attribute: 4,
+        fpu: 1,
+        extensions: 1,
+    },
+    ArchEntry {
+        name: "armv7s",
+        id: "ARMV7S",
+        cpu_attr: "7-S",
+        feature: "+v7s",
+        attribute: 10,
+        fpu: 20,
+        extensions: 1024,
+    },
+    ArchEntry {
+        name: "armv7k",
+        id: "ARMV7K",
+        cpu_attr: "7-K",
+        feature: "+v7k",
+        attribute: 10,
+        fpu: 1,
+        extensions: 1024,
+    },
+];
+
+pub struct ExtensionEntry {
+    pub name: &'static str,
+    pub id: u64,
+    pub feature: &'static str,
+    pub negative: &'static str,
+}
+
+pub const EXTENSIONS: &[ExtensionEntry] = &[
+    ExtensionEntry {
+        name: "invalid",
+        id: 0,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "none",
+        id: 1,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "crc",
+        id: 2,
+        feature: "+crc",
+        negative: "-crc",
+    },
+    ExtensionEntry {
+        name: "crypto",
+        id: 4,
+        feature: "+crypto",
+        negative: "-crypto",
+    },
+    ExtensionEntry {
+        name: "sha2",
+        id: 16384,
+        feature: "+sha2",
+        negative: "-sha2",
+    },
+    ExtensionEntry {
+        name: "aes",
+        id: 32768,
+        feature: "+aes",
+        negative: "-aes",
+    },
+    ExtensionEntry {
+        name: "dotprod",
+        id: 8192,
+        feature: "+dotprod",
+        negative: "-dotprod",
+    },
+    ExtensionEntry {
+        name: "dsp",
+        id: 1024,
+        feature: "+dsp",
+        negative: "-dsp",
+    },
+    ExtensionEntry {
+        name: "fp",
+        id: 8,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "fp.dp",
+        id: 262144,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "mve",
+        id: 2147484672,
+        feature: "+mve",
+        negative: "-mve",
+    },
+    ExtensionEntry {
+        name: "mve.fp",
+        id: 2147484680,
+        feature: "+mve.fp",
+        negative: "-mve.fp",
+    },
+    ExtensionEntry {
+        name: "idiv",
+        id: 48,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "mp",
+        id: 64,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "simd",
+        id: 128,
+        feature: "+neon",
+        negative: "-neon",
+    },
+    ExtensionEntry {
+        name: "sec",
+        id: 256,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "virt",
+        id: 512,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "fp16",
+        id: 2048,
+        feature: "+fullfp16",
+        negative: "-fullfp16",
+    },
+    ExtensionEntry {
+        name: "ras",
+        id: 4096,
+        feature: "+ras",
+        negative: "-ras",
+    },
+    ExtensionEntry {
+        name: "os",
+        id: 576460752303423488,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "iwmmxt",
+        id: 1152921504606846976,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "iwmmxt2",
+        id: 2305843009213693952,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "maverick",
+        id: 4611686018427387904,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "xscale",
+        id: 9223372036854775808,
+        feature: "",
+        negative: "",
+    },
+    ExtensionEntry {
+        name: "fp16fml",
+        id: 65536,
+        feature: "+fp16fml",
+        negative: "-fp16fml",
+    },
+    ExtensionEntry {
+        name: "bf16",
+        id: 1048576,
+        feature: "+bf16",
+        negative: "-bf16",
+    },
+    ExtensionEntry {
+        name: "sb",
+        id: 131072,
+        feature: "+sb",
+        negative: "-sb",
+    },
+    ExtensionEntry {
+        name: "i8mm",
+        id: 2097152,
+        feature: "+i8mm",
+        negative: "-i8mm",
+    },
+    ExtensionEntry {
+        name: "lob",
+        id: 524288,
+        feature: "+lob",
+        negative: "-lob",
+    },
+    ExtensionEntry {
+        name: "cdecp0",
+        id: 4194304,
+        feature: "+cdecp0",
+        negative: "-cdecp0",
+    },
+    ExtensionEntry {
+        name: "cdecp1",
+        id: 8388608,
+        feature: "+cdecp1",
+        negative: "-cdecp1",
+    },
+    ExtensionEntry {
+        name: "cdecp2",
+        id: 16777216,
+        feature: "+cdecp2",
+        negative: "-cdecp2",
+    },
+    ExtensionEntry {
+        name: "cdecp3",
+        id: 33554432,
+        feature: "+cdecp3",
+        negative: "-cdecp3",
+    },
+    ExtensionEntry {
+        name: "cdecp4",
+        id: 67108864,
+        feature: "+cdecp4",
+        negative: "-cdecp4",
+    },
+    ExtensionEntry {
+        name: "cdecp5",
+        id: 134217728,
+        feature: "+cdecp5",
+        negative: "-cdecp5",
+    },
+    ExtensionEntry {
+        name: "cdecp6",
+        id: 268435456,
+        feature: "+cdecp6",
+        negative: "-cdecp6",
+    },
+    ExtensionEntry {
+        name: "cdecp7",
+        id: 536870912,
+        feature: "+cdecp7",
+        negative: "-cdecp7",
+    },
+    ExtensionEntry {
+        name: "pacbti",
+        id: 1073741824,
+        feature: "+pacbti",
+        negative: "-pacbti",
+    },
+];
+
+pub struct CpuEntry {
+    pub name: &'static str,
+    pub arch: &'static str,
+    pub fpu: u32,
+    pub default: bool,
+    pub extensions: u64,
+}
+
+pub const CPUS: &[CpuEntry] = &[
+    CpuEntry {
+        name: "arm8",
+        arch: "ARMV4",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm810",
+        arch: "ARMV4",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "strongarm",
+        arch: "ARMV4",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "strongarm110",
+        arch: "ARMV4",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "strongarm1100",
+        arch: "ARMV4",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "strongarm1110",
+        arch: "ARMV4",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm7tdmi",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm7tdmi-s",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm710t",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm720t",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm9",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm9tdmi",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm920",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm920t",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm922t",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm940t",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "ep9312",
+        arch: "ARMV4T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm10tdmi",
+        arch: "ARMV5T",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1020t",
+        arch: "ARMV5T",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm9e",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm946e-s",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm966e-s",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm968e-s",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm10e",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1020e",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1022e",
+        arch: "ARMV5TE",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm926ej-s",
+        arch: "ARMV5TEJ",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1136j-s",
+        arch: "ARMV6",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1136jf-s",
+        arch: "ARMV6",
+        fpu: 3,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "mpcore",
+        arch: "ARMV6K",
+        fpu: 3,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "mpcorenovfp",
+        arch: "ARMV6K",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1176jz-s",
+        arch: "ARMV6KZ",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1176jzf-s",
+        arch: "ARMV6KZ",
+        fpu: 3,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1156t2-s",
+        arch: "ARMV6T2",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "arm1156t2f-s",
+        arch: "ARMV6T2",
+        fpu: 3,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m0",
+        arch: "ARMV6M",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m0plus",
+        arch: "ARMV6M",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m1",
+        arch: "ARMV6M",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "sc000",
+        arch: "ARMV6M",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-a5",
+        arch: "ARMV7A",
+        fpu: 20,
+        default: false,
+        extensions: 320,
+    },
+    CpuEntry {
+        name: "cortex-a7",
+        arch: "ARMV7A",
+        fpu: 20,
+        default: false,
+        extensions: 880,
+    },
+    CpuEntry {
+        name: "cortex-a8",
+        arch: "ARMV7A",
+        fpu: 18,
+        default: false,
+        extensions: 256,
+    },
+    CpuEntry {
+        name: "cortex-a9",
+        arch: "ARMV7A",
+        fpu: 19,
+        default: false,
+        extensions: 320,
+    },
+    CpuEntry {
+        name: "cortex-a12",
+        arch: "ARMV7A",
+        fpu: 20,
+        default: false,
+        extensions: 880,
+    },
+    CpuEntry {
+        name: "cortex-a15",
+        arch: "ARMV7A",
+        fpu: 20,
+        default: false,
+        extensions: 880,
+    },
+    CpuEntry {
+        name: "cortex-a17",
+        arch: "ARMV7A",
+        fpu: 20,
+        default: false,
+        extensions: 880,
+    },
+    CpuEntry {
+        name: "krait",
+        arch: "ARMV7A",
+        fpu: 20,
+        default: false,
+        extensions: 48,
+    },
+    CpuEntry {
+        name: "cortex-r4",
+        arch: "ARMV7R",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-r4f",
+        arch: "ARMV7R",
+        fpu: 6,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-r5",
+        arch: "ARMV7R",
+        fpu: 6,
+        default: false,
+        extensions: 96,
+    },
+    CpuEntry {
+        name: "cortex-r7",
+        arch: "ARMV7R",
+        fpu: 7,
+        default: false,
+        extensions: 96,
+    },
+    CpuEntry {
+        name: "cortex-r8",
+        arch: "ARMV7R",
+        fpu: 7,
+        default: false,
+        extensions: 96,
+    },
+    CpuEntry {
+        name: "cortex-r52",
+        arch: "ARMV8R",
+        fpu: 21,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-r52plus",
+        arch: "ARMV8R",
+        fpu: 21,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "sc300",
+        arch: "ARMV7M",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m3",
+        arch: "ARMV7M",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m4",
+        arch: "ARMV7EM",
+        fpu: 12,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m7",
+        arch: "ARMV7EM",
+        fpu: 13,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m23",
+        arch: "ARMV8MBaseline",
+        fpu: 1,
+        default: false,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "cortex-m33",
+        arch: "ARMV8MMainline",
+        fpu: 14,
+        default: false,
+        extensions: 1024,
+    },
+    CpuEntry {
+        name: "star-mc1",
+        arch: "ARMV8MMainline",
+        fpu: 14,
+        default: false,
+        extensions: 1024,
+    },
+    CpuEntry {
+        name: "cortex-m35p",
+        arch: "ARMV8MMainline",
+        fpu: 14,
+        default: false,
+        extensions: 1024,
+    },
+    CpuEntry {
+        name: "cortex-m55",
+        arch: "ARMV8_1MMainline",
+        fpu: 16,
+        default: false,
+        extensions: 2147486728,
+    },
+    CpuEntry {
+        name: "cortex-m85",
+        arch: "ARMV8_1MMainline",
+        fpu: 16,
+        default: false,
+        extensions: 3221232648,
+    },
+    CpuEntry {
+        name: "cortex-m52",
+        arch: "ARMV8_1MMainline",
+        fpu: 16,
+        default: false,
+        extensions: 3221232648,
+    },
+    CpuEntry {
+        name: "star-mc3",
+        arch: "ARMV8_1MMainline",
+        fpu: 16,
+        default: false,
+        extensions: 3221232648,
+    },
+    CpuEntry {
+        name: "cortex-a32",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "cortex-a35",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "cortex-a53",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "cortex-a55",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a57",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "cortex-a72",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "cortex-a73",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "cortex-a75",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a76",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a76ae",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a77",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a78",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a78ae",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 12288,
+    },
+    CpuEntry {
+        name: "cortex-a78c",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-a510",
+        arch: "ARMV9A",
+        fpu: 21,
+        default: false,
+        extensions: 3350528,
+    },
+    CpuEntry {
+        name: "cortex-a710",
+        arch: "ARMV9A",
+        fpu: 21,
+        default: false,
+        extensions: 3350528,
+    },
+    CpuEntry {
+        name: "cortex-x1",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "cortex-x1c",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "neoverse-n1",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "neoverse-n2",
+        arch: "ARMV9A",
+        fpu: 21,
+        default: false,
+        extensions: 3354624,
+    },
+    CpuEntry {
+        name: "neoverse-v1",
+        arch: "ARMV8_4A",
+        fpu: 22,
+        default: false,
+        extensions: 1062912,
+    },
+    CpuEntry {
+        name: "cyclone",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "exynos-m3",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "exynos-m4",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "exynos-m5",
+        arch: "ARMV8_2A",
+        fpu: 22,
+        default: false,
+        extensions: 10240,
+    },
+    CpuEntry {
+        name: "kryo",
+        arch: "ARMV8A",
+        fpu: 22,
+        default: false,
+        extensions: 2,
+    },
+    CpuEntry {
+        name: "iwmmxt",
+        arch: "IWMMXT",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "xscale",
+        arch: "XSCALE",
+        fpu: 1,
+        default: true,
+        extensions: 1,
+    },
+    CpuEntry {
+        name: "swift",
+        arch: "ARMV7S",
+        fpu: 20,
+        default: true,
+        extensions: 48,
+    },
+    CpuEntry {
+        name: "invalid",
+        arch: "INVALID",
+        fpu: 0,
+        default: true,
+        extensions: 0,
+    },
+];
+
+pub const ATTRIBUTE_TAGS: &[(&str, u32)] = &[
+    ("Tag_File", 1),
+    ("Tag_Section", 2),
+    ("Tag_Symbol", 3),
+    ("Tag_CPU_raw_name", 4),
+    ("Tag_CPU_name", 5),
+    ("Tag_CPU_arch", 6),
+    ("Tag_CPU_arch_profile", 7),
+    ("Tag_ARM_ISA_use", 8),
+    ("Tag_THUMB_ISA_use", 9),
+    ("Tag_FP_arch", 10),
+    ("Tag_WMMX_arch", 11),
+    ("Tag_Advanced_SIMD_arch", 12),
+    ("Tag_MVE_arch", 48),
+    ("Tag_PCS_config", 13),
+    ("Tag_ABI_PCS_R9_use", 14),
+    ("Tag_ABI_PCS_RW_data", 15),
+    ("Tag_ABI_PCS_RO_data", 16),
+    ("Tag_ABI_PCS_GOT_use", 17),
+    ("Tag_ABI_PCS_wchar_t", 18),
+    ("Tag_ABI_FP_rounding", 19),
+    ("Tag_ABI_FP_denormal", 20),
+    ("Tag_ABI_FP_exceptions", 21),
+    ("Tag_ABI_FP_user_exceptions", 22),
+    ("Tag_ABI_FP_number_model", 23),
+    ("Tag_ABI_align_needed", 24),
+    ("Tag_ABI_align_preserved", 25),
+    ("Tag_ABI_enum_size", 26),
+    ("Tag_ABI_HardFP_use", 27),
+    ("Tag_ABI_VFP_args", 28),
+    ("Tag_ABI_WMMX_args", 29),
+    ("Tag_ABI_optimization_goals", 30),
+    ("Tag_ABI_FP_optimization_goals", 31),
+    ("Tag_compatibility", 32),
+    ("Tag_CPU_unaligned_access", 34),
+    ("Tag_FP_HP_extension", 36),
+    ("Tag_ABI_FP_16bit_format", 38),
+    ("Tag_MPextension_use", 42),
+    ("Tag_DIV_use", 44),
+    ("Tag_DSP_extension", 46),
+    ("Tag_PAC_extension", 50),
+    ("Tag_BTI_extension", 52),
+    ("Tag_BTI_use", 74),
+    ("Tag_PACRET_use", 76),
+    ("Tag_nodefaults", 64),
+    ("Tag_also_compatible_with", 65),
+    ("Tag_T2EE_use", 66),
+    ("Tag_conformance", 67),
+    ("Tag_Virtualization_use", 68),
+    ("Tag_VFP_arch", 10),
+    ("Tag_VFP_HP_extension", 36),
+    ("Tag_ABI_align8_needed", 24),
+    ("Tag_ABI_align8_preserved", 25),
+];
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct AttributeItem {
+    pub tag: u32,
+    pub number: Option<u32>,
+    pub text: Option<String>,
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct AttributeState {
+    pub items: Vec<AttributeItem>,
+    pub architecture: Option<usize>,
+    pub object_architecture: Option<usize>,
+    pub fpu: Option<usize>,
+}
+
+impl AttributeState {
+    fn set(&mut self, item: AttributeItem, overwrite: bool) {
+        if let Some(held) = self.items.iter_mut().find(|held| held.tag == item.tag) {
+            if overwrite {
+                *held = item;
+            }
+            return;
+        }
+        self.items.push(item);
+    }
+
+    fn set_number(&mut self, tag: u32, value: u32, overwrite: bool) {
+        self.set(
+            AttributeItem {
+                tag,
+                number: Some(value),
+                text: None,
+            },
+            overwrite,
+        );
+    }
+
+    fn set_text(&mut self, tag: u32, value: &str, overwrite: bool) {
+        self.set(
+            AttributeItem {
+                tag,
+                number: None,
+                text: Some(value.to_string()),
+            },
+            overwrite,
+        );
+    }
+
+    fn architecture_defaults(&mut self) {
+        let Some(index) = self.architecture else {
+            return;
+        };
+        let entry = &ARCHES[index];
+        self.set_text(5, entry.cpu_attr, false);
+        let emitted = self.object_architecture.unwrap_or(index);
+        self.set_number(6, ARCHES[emitted].attribute, false);
+        let (profile, arm, thumb): (u32, Option<u32>, Option<u32>) = match entry.id {
+            "ARMV4" => (0, Some(1), None),
+            "ARMV4T" | "ARMV5T" | "XSCALE" | "ARMV5TE" | "ARMV5TEJ" | "ARMV6" => {
+                (0, Some(1), Some(1))
+            }
+            "ARMV6T2" => (0, Some(1), Some(2)),
+            "ARMV6K" | "ARMV6KZ" => (0, Some(1), Some(1)),
+            "ARMV6M" => (0, None, Some(1)),
+            "ARMV7A" => (0x41, Some(1), Some(2)),
+            "ARMV7R" => (0x52, Some(1), Some(2)),
+            "ARMV7EM" | "ARMV7M" => (0x4d, None, Some(2)),
+            "ARMV8MBaseline" | "ARMV8MMainline" | "ARMV8_1MMainline" => (0x4d, None, Some(3)),
+            "IWMMXT" | "IWMMXT2" => (0, Some(1), Some(1)),
+            id if id.starts_with("ARMV8_") || id.starts_with("ARMV9") || id == "ARMV8A" => {
+                (0x41, Some(1), Some(2))
+            }
+            _ => (0, None, None),
+        };
+        if profile != 0 {
+            self.set_number(7, profile, false);
+        }
+        if let Some(value) = arm {
+            self.set_number(8, value, false);
+        }
+        if let Some(value) = thumb {
+            self.set_number(9, value, false);
+        }
+        match entry.id {
+            "ARMV6K" | "ARMV6KZ" => self.set_number(68, 1, false),
+            "IWMMXT" => self.set_number(11, 1, false),
+            "IWMMXT2" => self.set_number(11, 2, false),
+            id if id == "ARMV8A"
+                || id.starts_with("ARMV8_") && !id.contains("MMainline")
+                || id.starts_with("ARMV9") =>
+            {
+                self.set_number(42, 1, false);
+                self.set_number(68, 3, false);
+            }
+            _ => {}
+        }
+    }
+
+    fn fpu_defaults(&mut self) {
+        let Some(index) = self.fpu else {
+            return;
+        };
+        let name = FPUS[index].name;
+        let (arch, simd, half): (Option<u32>, Option<u32>, bool) = match name {
+            "vfp" | "vfpv2" => (Some(2), None, false),
+            "vfpv3" => (Some(3), None, false),
+            "vfpv3-fp16" => (Some(3), None, true),
+            "vfpv3-d16" | "vfpv3xd" => (Some(4), None, false),
+            "vfpv3-d16-fp16" | "vfpv3xd-fp16" => (Some(4), None, true),
+            "vfpv4" => (Some(5), None, false),
+            "fpv4-sp-d16" | "vfpv4-d16" => (Some(6), None, false),
+            "fp-armv8" => (Some(7), None, false),
+            "fpv5-sp-d16" | "fpv5-d16" | "fp-armv8-fullfp16-sp-d16" | "fp-armv8-fullfp16-d16" => {
+                (Some(8), None, false)
+            }
+            "neon" => (Some(3), Some(1), false),
+            "neon-fp16" => (Some(3), Some(1), true),
+            "neon-vfpv4" => (Some(5), Some(2), false),
+            "neon-fp-armv8" | "crypto-neon-fp-armv8" => (Some(7), None, false),
+            _ => (None, None, false),
+        };
+        if let Some(value) = arch {
+            self.set_number(10, value, false);
+        }
+        if let Some(value) = simd {
+            self.set_number(12, value, false);
+        }
+        if half {
+            self.set_number(36, 1, false);
+        }
+    }
+
+    pub fn encode(&mut self) -> Vec<u8> {
+        self.fpu_defaults();
+        self.architecture_defaults();
+        if self.items.is_empty() {
+            return Vec::new();
+        }
+        let mut items = self.items.clone();
+        items.sort_by_key(|item| (item.tag != 67, item.tag));
+        let mut body: Vec<u8> = Vec::new();
+        for item in &items {
+            uleb(&mut body, u64::from(item.tag));
+            if let Some(number) = item.number {
+                uleb(&mut body, u64::from(number));
+            }
+            if let Some(text) = &item.text {
+                body.extend_from_slice(text.as_bytes());
+                body.push(0);
+            }
+        }
+        let vendor = b"aeabi\0";
+        let mut out: Vec<u8> = vec![0x41];
+        let length = (4 + vendor.len() + 5 + body.len()) as u32;
+        out.extend_from_slice(&length.to_le_bytes());
+        out.extend_from_slice(vendor);
+        out.push(1);
+        out.extend_from_slice(&((5 + body.len()) as u32).to_le_bytes());
+        out.extend_from_slice(&body);
+        out
+    }
+}
+
+fn uleb(out: &mut Vec<u8>, mut value: u64) {
+    loop {
+        let byte = (value & 0x7f) as u8;
+        value >>= 7;
+        if value == 0 {
+            out.push(byte);
+            return;
+        }
+        out.push(byte | 0x80);
+    }
+}
+
+fn canonical_architecture(text: &str) -> String {
+    let mut rest = text;
+    let mut offset = None;
+    for (prefix, length) in [
+        ("arm64_32", 8),
+        ("arm64e", 6),
+        ("arm64", 5),
+        ("aarch64_32", 10),
+        ("arm", 3),
+        ("thumb", 5),
+    ] {
+        if text.starts_with(prefix) {
+            offset = Some(length);
+            break;
+        }
+    }
+    if let Some(length) = offset {
+        rest = &text[length..];
+        if let Some(stripped) = rest.strip_prefix("eb") {
+            rest = stripped;
+        }
+    } else if let Some(stripped) = rest.strip_suffix("eb") {
+        rest = stripped;
+    }
+    if rest.is_empty() {
+        return text.to_string();
+    }
+    if offset.is_some() {
+        let bytes = rest.as_bytes();
+        if bytes.len() >= 2 && (bytes[0] != b'v' || !bytes[1].is_ascii_digit()) {
+            return String::new();
+        }
+        if rest.contains("eb") {
+            return String::new();
+        }
+    }
+    rest.to_string()
+}
+
+fn architecture_synonym(text: &str) -> &str {
+    match text {
+        "v5" => "v5t",
+        "v5e" => "v5te",
+        "v6j" => "v6",
+        "v6hl" => "v6k",
+        "v6m" | "v6sm" | "v6s-m" => "v6-m",
+        "v6z" | "v6zk" => "v6kz",
+        "v7" | "v7a" | "v7hl" | "v7l" => "v7-a",
+        "v7r" => "v7-r",
+        "v7m" => "v7-m",
+        "v7em" => "v7e-m",
+        "v8" | "v8a" | "v8l" | "aarch64" | "arm64" => "v8-a",
+        "v8.1a" => "v8.1-a",
+        "v8.2a" => "v8.2-a",
+        "v8.3a" => "v8.3-a",
+        "v8.4a" => "v8.4-a",
+        "v8.5a" => "v8.5-a",
+        "v8.6a" => "v8.6-a",
+        "v8.7a" => "v8.7-a",
+        "v8.8a" => "v8.8-a",
+        "v8.9a" => "v8.9-a",
+        "v8r" => "v8-r",
+        "v9" | "v9a" => "v9-a",
+        "v9.1a" => "v9.1-a",
+        "v9.2a" => "v9.2-a",
+        "v9.3a" => "v9.3-a",
+        "v9.4a" => "v9.4-a",
+        "v9.5a" => "v9.5-a",
+        "v9.6a" => "v9.6-a",
+        "v9.7a" => "v9.7-a",
+        "v8m.base" => "v8-m.base",
+        "v8m.main" => "v8-m.main",
+        "v8.1m.main" => "v8.1-m.main",
+        other => other,
+    }
+}
+
+pub fn parse_architecture(text: &str) -> Option<usize> {
+    let canonical = canonical_architecture(text);
+    let synonym = architecture_synonym(&canonical);
+    if synonym.is_empty() {
+        return None;
+    }
+    ARCHES
+        .iter()
+        .position(|entry| entry.name != "invalid" && entry.name.ends_with(synonym))
+}
+
+fn fpu_synonym(text: &str) -> &str {
+    match text {
+        "fpa" | "fpe2" | "fpe3" | "maverick" => "invalid",
+        "vfp2" => "vfpv2",
+        "vfp3" => "vfpv3",
+        "vfp4" => "vfpv4",
+        "vfp3-d16" => "vfpv3-d16",
+        "vfp4-d16" => "vfpv4-d16",
+        "fp4-sp-d16" | "vfpv4-sp-d16" => "fpv4-sp-d16",
+        "fp4-dp-d16" | "fpv4-dp-d16" => "vfpv4-d16",
+        "fp5-sp-d16" => "fpv5-sp-d16",
+        "fp5-dp-d16" | "fpv5-dp-d16" => "fpv5-d16",
+        "neon-vfpv3" => "neon",
+        other => other,
+    }
+}
+
+pub fn parse_fpu(text: &str) -> Option<usize> {
+    let synonym = fpu_synonym(text);
+    FPUS.iter()
+        .position(|entry| entry.name == synonym && entry.name != "invalid")
+}
+
+fn fpu_features(index: usize) -> Vec<&'static str> {
+    const FEATURES: &[(&str, &str, u8, u8)] = &[
+        ("+vfp2", "-vfp2", 1, 1),
+        ("+vfp2sp", "-vfp2sp", 1, 2),
+        ("+vfp3", "-vfp3", 2, 0),
+        ("+vfp3d16", "-vfp3d16", 2, 1),
+        ("+vfp3d16sp", "-vfp3d16sp", 2, 2),
+        ("+vfp3sp", "-vfp3sp", 2, 0),
+        ("+fp16", "-fp16", 3, 2),
+        ("+vfp4", "-vfp4", 4, 0),
+        ("+vfp4d16", "-vfp4d16", 4, 1),
+        ("+vfp4d16sp", "-vfp4d16sp", 4, 2),
+        ("+vfp4sp", "-vfp4sp", 4, 0),
+        ("+fp-armv8", "-fp-armv8", 5, 0),
+        ("+fp-armv8d16", "-fp-armv8d16", 5, 1),
+        ("+fp-armv8d16sp", "-fp-armv8d16sp", 5, 2),
+        ("+fp-armv8sp", "-fp-armv8sp", 5, 0),
+        ("+fullfp16", "-fullfp16", 6, 2),
+        ("+fp64", "-fp64", 1, 1),
+        ("+d32", "-d32", 2, 0),
+    ];
+    let entry = &FPUS[index];
+    let mut found: Vec<&'static str> = Vec::new();
+    for (plus, minus, version, restriction) in FEATURES {
+        if entry.version >= *version && entry.restriction <= *restriction {
+            found.push(plus);
+        } else {
+            found.push(minus);
+        }
+    }
+    for (plus, minus, level) in [
+        ("+neon", "-neon", 1),
+        ("+sha2", "-sha2", 2),
+        ("+aes", "-aes", 2),
+    ] {
+        if entry.neon >= level {
+            found.push(plus);
+        } else {
+            found.push(minus);
+        }
+    }
+    found
+}
+
+fn tag_name(tag: u32) -> Option<&'static str> {
+    ATTRIBUTE_TAGS
+        .iter()
+        .find(|(_, value)| *value == tag)
+        .map(|(name, _)| *name)
+}
+
+fn tag_from_name(name: &str) -> Option<u32> {
+    let wanted = name.strip_prefix("Tag_").unwrap_or(name);
+    ATTRIBUTE_TAGS
+        .iter()
+        .find(|(held, _)| held.strip_prefix("Tag_").unwrap_or(held) == wanted)
+        .map(|(_, value)| *value)
+}
+
+struct ExtensionRequirement {
+    kind: u64,
+    check: &'static [&'static str],
+    features: &'static [&'static str],
+}
+
+const EXTENSION_REQUIREMENTS: &[ExtensionRequirement] = &[
+    ExtensionRequirement {
+        kind: 1 << 1,
+        check: &["HasV8"],
+        features: &["crc"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 15,
+        check: &["HasV8"],
+        features: &["aes", "neon", "fp-armv8"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 14,
+        check: &["HasV8"],
+        features: &["sha2", "neon", "fp-armv8"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 2,
+        check: &["HasV8"],
+        features: &["crypto", "neon", "fp-armv8"],
+    },
+    ExtensionRequirement {
+        kind: (1 << 10) | (1 << 31) | (1 << 3),
+        check: &["HasV8_1MMainline"],
+        features: &["mve.fp"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 3,
+        check: &["HasV8"],
+        features: &["vfp2sp", "fp-armv8"],
+    },
+    ExtensionRequirement {
+        kind: (1 << 4) | (1 << 5),
+        check: &["HasV7", "IsNotMClass"],
+        features: &["hwdiv", "hwdiv-arm"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 6,
+        check: &["HasV7", "IsNotMClass"],
+        features: &["mp"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 7,
+        check: &["HasV8"],
+        features: &["neon", "vfp2sp", "fp-armv8"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 8,
+        check: &["HasV6K"],
+        features: &["trustzone"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 9,
+        check: &["HasV7"],
+        features: &["virtualization"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 11,
+        check: &["HasV8_2a"],
+        features: &["fp-armv8", "fullfp16"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 12,
+        check: &["HasV8"],
+        features: &["ras"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 19,
+        check: &["HasV8_1MMainline"],
+        features: &["lob"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 30,
+        check: &["HasV8_1MMainline"],
+        features: &["pacbti"],
+    },
+    ExtensionRequirement {
+        kind: 1 << 59,
+        check: &[],
+        features: &[],
+    },
+    ExtensionRequirement {
+        kind: 1 << 60,
+        check: &[],
+        features: &[],
+    },
+    ExtensionRequirement {
+        kind: 1 << 61,
+        check: &[],
+        features: &[],
+    },
+    ExtensionRequirement {
+        kind: 1 << 62,
+        check: &[],
+        features: &[],
+    },
+    ExtensionRequirement {
+        kind: 1 << 63,
+        check: &[],
+        features: &[],
+    },
+];
+
+impl<'a> Assembler<'a> {
+    fn arm32_apply_features(&mut self, features: &[&str]) {
+        for feature in features {
+            if let Some(name) = feature.strip_prefix('+') {
+                self.arm32_set_features(&[name], &[]);
+            } else if let Some(name) = feature.strip_prefix('-') {
+                self.arm32_set_features(&[], &[name]);
+            }
+        }
+    }
+
+    fn arm32_fix_mode(&mut self, was_thumb: bool, location: SourceLocation) {
+        let thumb_now = self
+            .arm32_feature("thumb-mode")
+            .is_some_and(|held| self.arm_features.contains(&held));
+        if was_thumb == thumb_now {
+            return;
+        }
+        let supports_thumb = self
+            .arm32_feature("v4t")
+            .is_some_and(|held| self.arm_features.contains(&held));
+        let supports_arm = self
+            .arm32_feature("no-arm-mode")
+            .is_none_or(|held| !self.arm_features.contains(&held));
+        if (was_thumb && supports_thumb) || (!was_thumb && supports_arm) {
+            self.arm_thumb = was_thumb;
+            self.arm32_switch_mode();
+            return;
+        }
+        self.arm_thumb = thumb_now;
+        self.streamer.emit_arm_directive(if thumb_now {
+            "\t.code\t16"
+        } else {
+            "\t.code\t32"
+        });
+        self.warning(
+            location,
+            &format!(
+                "new target does not support {} mode, switching to {} mode",
+                if was_thumb { "thumb" } else { "arm" },
+                if !was_thumb { "thumb" } else { "arm" }
+            ),
+        );
+    }
+
+    fn arm32_directive_arch(&mut self, location: SourceLocation) -> bool {
+        let text = self.parse_string_to_end_of_statement().trim().to_string();
+        let Some(index) = parse_architecture(&text) else {
+            return self.error(location, "Unknown arch name");
+        };
+        let was_thumb = self.arm_thumb;
+        let name = ARCHES[index].name;
+        self.arm_features = armv8::feature_set(self.target, "", &[format!("+{name}")]);
+        self.streamer.set_arm_features(&self.arm_features);
+        if was_thumb {
+            self.arm32_set_features(&["thumb-mode"], &[]);
+            self.arm_thumb = false;
+        }
+        self.arm32_fix_mode(was_thumb, location);
+        self.arm_attribute_state.architecture = Some(index);
+        self.streamer
+            .emit_arm_directive(&format!("\t.arch\t{name}"));
+        false
+    }
+
+    fn arm32_directive_cpu(&mut self, location: SourceLocation) -> bool {
+        let name = self.parse_string_to_end_of_statement().trim().to_string();
+        self.arm_attribute_state.set_text(5, &name, true);
+        self.streamer
+            .emit_arm_directive(&format!("\t.cpu\t{}", name.to_ascii_lowercase()));
+        let target = self.target;
+        let known = name == "generic"
+            || target
+                .records
+                .values()
+                .any(|record| record.is_a("ProcessorModel") && table_text(record, "Name") == name);
+        if !known {
+            return self.error(location, "Unknown CPU name");
+        }
+        let was_thumb = self.arm_thumb;
+        self.arm_features = armv8::feature_set(target, &name, &[]);
+        self.streamer.set_arm_features(&self.arm_features);
+        if was_thumb {
+            self.arm32_set_features(&["thumb-mode"], &[]);
+            self.arm_thumb = false;
+        }
+        self.arm32_fix_mode(was_thumb, location);
+        false
+    }
+
+    fn arm32_directive_fpu(&mut self) -> bool {
+        let at = self.location();
+        let name = self.parse_string_to_end_of_statement().trim().to_string();
+        let Some(index) = parse_fpu(&name) else {
+            return self.error(at, "Unknown FPU name");
+        };
+        self.arm32_apply_features(&fpu_features(index));
+        self.arm_attribute_state.fpu = Some(index);
+        self.streamer
+            .emit_arm_directive(&format!("\t.fpu\t{}", FPUS[index].name));
+        false
+    }
+
+    fn arm32_enable_extension(&mut self, name: &str, at: SourceLocation) -> bool {
+        let (enable, bare) = match name.get(..2) {
+            Some(prefix) if prefix.eq_ignore_ascii_case("no") => (false, &name[2..]),
+            _ => (true, name),
+        };
+        let Some(entry) = EXTENSIONS.iter().find(|held| held.name == bare) else {
+            return self.error(at, &format!("unknown architectural extension: {bare}"));
+        };
+        if entry.name == "invalid" {
+            return self.error(at, &format!("unknown architectural extension: {bare}"));
+        }
+        let kind = entry.id;
+        let Some(requirement) = EXTENSION_REQUIREMENTS.iter().find(|held| held.kind == kind) else {
+            return self.error(at, &format!("unknown architectural extension: {bare}"));
+        };
+        if requirement.features.is_empty() {
+            return self.error(at, &format!("unsupported architectural extension: {bare}"));
+        }
+        let check: Vec<String> = requirement
+            .check
+            .iter()
+            .map(|held| held.to_string())
+            .collect();
+        if !armv8::predicates_hold(self.target, &check, &self.arm_features) {
+            return self.error(
+                at,
+                &format!(
+                    "architectural extension '{bare}' is not allowed for the current base architecture"
+                ),
+            );
+        }
+        if enable {
+            self.arm32_set_features(requirement.features, &[]);
+        } else {
+            self.arm32_set_features(&[], requirement.features);
+        }
+        false
+    }
+
+    fn arm32_directive_arch_extension(&mut self) -> bool {
+        if !self.is(TokenKind::Identifier) {
+            let at = self.location();
+            return self.error(at, "expected architecture extension name");
+        }
+        let name = self.lexer.token.text.clone();
+        let at = self.location();
+        self.lex();
+        if self.parse_end_of_line() {
+            return true;
+        }
+        if name == "nocrypto" {
+            self.arm32_enable_extension("nosha2", at);
+            self.arm32_enable_extension("noaes", at);
+        }
+        self.arm32_enable_extension(&name, at)
+    }
+
+    fn arm32_directive_object_arch(&mut self) -> bool {
+        if !self.is(TokenKind::Identifier) {
+            let at = self.location();
+            return self.error(at, "unexpected token");
+        }
+        let name = self.lexer.token.text.clone();
+        let at = self.location();
+        self.lex();
+        let Some(index) = parse_architecture(&name) else {
+            return self.error(at, &format!("unknown architecture '{name}'"));
+        };
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm_attribute_state.object_architecture = Some(index);
+        self.streamer
+            .emit_arm_directive(&format!("\t.object_arch\t{}", ARCHES[index].name));
+        false
+    }
+
+    fn arm32_directive_eabi_attribute(&mut self) -> bool {
+        let tag_location = self.location();
+        let tag: i64;
+        if self.is(TokenKind::Identifier) {
+            let name = self.lexer.token.text.clone();
+            let Some(found) = tag_from_name(&name) else {
+                return self.error(
+                    tag_location,
+                    &format!("attribute name not recognised: {name}"),
+                );
+            };
+            tag = i64::from(found);
+            self.lex();
+        } else {
+            let Ok((expression, _)) = self.parse_expression() else {
+                return true;
+            };
+            let Expression::Constant(value) = expression else {
+                return self.error(tag_location, "expected numeric constant");
+            };
+            tag = value;
+        }
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let (is_text, is_number) = if tag == 4 || tag == 5 {
+            (true, false)
+        } else if tag == 32 {
+            (true, true)
+        } else if tag < 32 || tag % 2 == 0 {
+            (false, true)
+        } else {
+            (true, false)
+        };
+        let mut number = 0i64;
+        if is_number {
+            let at = self.location();
+            let Ok((expression, _)) = self.parse_expression() else {
+                return true;
+            };
+            let Expression::Constant(value) = expression else {
+                return self.error(at, "expected numeric constant");
+            };
+            number = value;
+        }
+        if tag == 32 && self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let mut text = String::new();
+        if is_text {
+            if !self.is(TokenKind::String) {
+                let at = self.location();
+                return self.error(at, "bad string constant");
+            }
+            if tag == 65 {
+                let Ok(bytes) = self.parse_escaped_string() else {
+                    return true;
+                };
+                text = bytes.iter().map(|byte| char::from(*byte)).collect();
+            } else {
+                text = string_contents(&self.lexer.token.text);
+                self.lex();
+            }
+        }
+        if self.parse_end_of_line() {
+            return true;
+        }
+        let tag = tag as u32;
+        let comment = tag_name(tag)
+            .map(|name| format!("\t@ {name}"))
+            .unwrap_or_default();
+        if is_text && is_number {
+            self.arm_attribute_state.set(
+                AttributeItem {
+                    tag,
+                    number: Some(number as u32),
+                    text: Some(text.clone()),
+                },
+                true,
+            );
+            let mut line = format!("\t.eabi_attribute\t{tag}, {}", number as u32);
+            if !text.is_empty() {
+                line.push_str(&format!(", \"{text}\""));
+            }
+            line.push_str(&comment);
+            self.streamer.emit_arm_directive(&line);
+        } else if is_number {
+            self.arm_attribute_state
+                .set_number(tag, number as u32, true);
+            self.streamer.emit_arm_directive(&format!(
+                "\t.eabi_attribute\t{tag}, {}{comment}",
+                number as u32
+            ));
+        } else {
+            self.arm_attribute_state.set_text(tag, &text, true);
+            if tag == 5 {
+                self.streamer
+                    .emit_arm_directive(&format!("\t.cpu\t{}", text.to_ascii_lowercase()));
+            } else {
+                let shown = if tag == 65 {
+                    text.escape_default().to_string()
+                } else {
+                    text.clone()
+                };
+                self.streamer
+                    .emit_arm_directive(&format!("\t.eabi_attribute\t{tag}, \"{shown}\"{comment}"));
+            }
+        }
+        false
+    }
+
+    pub(super) fn arm32_finish_attributes(&mut self) {
+        let bytes = self.arm_attribute_state.encode();
+        self.streamer.emit_arm32_attributes(&bytes);
     }
 }

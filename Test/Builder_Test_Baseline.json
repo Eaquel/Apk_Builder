@@ -49,9 +49,9 @@
       "total": 95
     },
     "mc-arm": {
-      "failed": 361,
-      "out_of_scope": 93,
-      "passed": 109,
+      "failed": 288,
+      "out_of_scope": 95,
+      "passed": 180,
       "total": 563
     },
     "mc-x86": {

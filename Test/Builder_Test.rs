@@ -75312,6 +75312,121 @@ mod armv8_assembly {
         compare_armv7(cases, "armv7a-linux-gnueabihf");
     }
 
+    fn armv7_attributes(source: &str, ours: bool) -> Option<Vec<u8>> {
+        use std::io::Write;
+        let triple = "armv7-unknown-linux-gnueabi";
+        let object = if ours {
+            use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+            let mut options = AssemblerOptions::new(triple);
+            options.output = OutputKind::Object;
+            let result = assemble_source(&options, format!("{source}\n").as_bytes(), None).ok()?;
+            if result.failed {
+                return None;
+            }
+            result.output
+        } else {
+            let folder = std::env::temp_dir().join(format!(
+                "apk_builder_armv7_attr_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&folder).ok()?;
+            let path = folder.join("expected.o");
+            let mut child = std::process::Command::new("llvm-mc-18")
+                .args([&format!("-triple={triple}"), "-filetype=obj", "-o"])
+                .arg(&path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            child
+                .stdin
+                .take()?
+                .write_all(format!("{source}\n").as_bytes())
+                .ok()?;
+            if !child.wait().ok()?.success() {
+                let _ = std::fs::remove_dir_all(&folder);
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok();
+            let _ = std::fs::remove_dir_all(&folder);
+            bytes?
+        };
+        let parsed = crate::compilers::elf::ElfFile::parse(&object).ok()?;
+        Some(
+            parsed
+                .section_named(".ARM.attributes")
+                .map(|index| parsed.sections[index].data.clone())
+                .unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn the_armv7_assembler_writes_the_same_build_attributes_as_llvm_mc() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[&str] = &[
+            ".arch armv7-a",
+            ".arch armv4t",
+            ".arch armv6",
+            ".arch armv6k",
+            ".arch armv6t2",
+            ".arch armv6-m",
+            ".arch armv7-r",
+            ".arch armv7-m",
+            ".arch armv7e-m",
+            ".arch armv8-a",
+            ".arch armv8.1-a",
+            ".arch armv8-m.base",
+            ".arch armv8-m.main",
+            ".arch iwmmxt",
+            ".arch iwmmxt2",
+            ".arch xscale",
+            ".arch armv7\n.object_arch armv4",
+            ".cpu cortex-a8",
+            ".cpu cortex-a9\n.fpu neon",
+            ".fpu neon",
+            ".fpu vfpv3",
+            ".fpu vfpv3-d16",
+            ".fpu fpv4-sp-d16",
+            ".fpu neon-vfpv4",
+            ".fpu crypto-neon-fp-armv8",
+            ".fpu vfpv4\n.arch armv7-a",
+            ".eabi_attribute Tag_CPU_arch, 10",
+            ".eabi_attribute Tag_conformance, \"2.09\"\n.eabi_attribute Tag_CPU_arch, 10",
+            ".eabi_attribute 7, 'A'\n.eabi_attribute 8, 1\n.eabi_attribute 9, 2",
+            ".eabi_attribute Tag_CPU_raw_name, \"Cortex-A9\"",
+            ".eabi_attribute 32, 1, \"x\"",
+            ".eabi_attribute Tag_also_compatible_with, \"\\006\\012\"",
+            ".eabi_attribute 70, \"abc\"",
+            ".arch armv7-a\n.eabi_attribute 6, 14",
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for source in cases {
+            let expected = armv7_attributes(source, false);
+            let actual = armv7_attributes(source, true);
+            if expected != actual {
+                failures.push(format!(
+                    "{source}: {actual:02x?} but llvm-mc gives {expected:02x?}"
+                ));
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} attribute cases differ",
+            failures.len()
+        );
+    }
+
     #[test]
     fn the_armv7_assembler_matches_llvm_mc_on_thumb_instructions() {
         let cases: &[&str] = &[
