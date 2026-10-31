@@ -71821,7 +71821,9 @@ mod x86_assembly {
             || triple == "arm64"
             || triple.starts_with("aarch64-")
             || triple.starts_with("arm64-")
-            || (triple.starts_with("arm") && !triple.starts_with("armeb"))
+            || (triple.starts_with("arm")
+                && !triple.starts_with("arm64")
+                && !triple.starts_with("armeb"))
             || (triple.starts_with("thumb") && !triple.starts_with("thumbeb")))
         {
             unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));

@@ -44,7 +44,13 @@ ORACLE_SUITES = ["regex-oracle", "tablegen-oracle"]
 SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
 KOTLIN_SUITES = ["kotlin-omni", "kotlin-omni-native"]
 LINKER_SUITES = ["lld-elf", "lld-coff"]
-ASSEMBLER_SUITES = ["mc-x86", "mc-x86-disassembler", "mc-aarch64", "mc-aarch64-disassembler"]
+ASSEMBLER_SUITES = [
+    "mc-x86",
+    "mc-x86-disassembler",
+    "mc-aarch64",
+    "mc-aarch64-disassembler",
+    "mc-arm",
+]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"

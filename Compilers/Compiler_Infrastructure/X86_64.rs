@@ -7827,7 +7827,11 @@ fn build_instruction_conversions(target: &Target, matchable: &mut Matchable) -> 
             find_named(matchable, &group.name, None)
         };
         let Some(source) = source else {
-            if let Some((left, right)) = instruction.two_operand_alias_constraint.split_once('=') {
+            if let Some((left, right)) = instruction
+                .two_operand_alias_constraint
+                .split_once('=')
+                .filter(|_| target.isa == Isa::Armv7)
+            {
                 if left.trim().trim_start_matches('$') == group.name {
                     if let Some(partner) =
                         find_named(matchable, right.trim().trim_start_matches('$'), None)
@@ -25224,8 +25228,15 @@ pub mod object {
     ];
 
     fn long_immediate_forms(target: &Target) -> &'static BTreeMap<usize, usize> {
-        static FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
-        FORMS.get_or_init(|| {
+        static X86_FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
+        static ARM_FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
+        static ARM32_FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
+        let forms = match target.isa {
+            Isa::X86 => &X86_FORMS,
+            Isa::Armv7 => &ARM32_FORMS,
+            Isa::Armv8 => &ARM_FORMS,
+        };
+        forms.get_or_init(|| {
             let mut forms = BTreeMap::new();
             for (suffixes, pairs) in LONG_IMMEDIATE_GROUPS {
                 for suffix in suffixes.iter() {
