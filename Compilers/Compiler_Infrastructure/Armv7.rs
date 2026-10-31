@@ -670,6 +670,11 @@ pub enum Operand {
         lane: VectorLane,
     },
     VectorIndex(u32),
+    CoprocessorNumber(u32),
+    CoprocessorRegister(u32),
+    CoprocessorOption(u32),
+    SystemMask(u32),
+    BankedRegister(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -686,6 +691,76 @@ impl Operand {
             _ => None,
         }
     }
+}
+
+struct SystemRegister {
+    name: String,
+    m1_encoding: u32,
+    m2m3_encoding: u32,
+    encoding: u32,
+    required: Vec<String>,
+}
+
+impl SystemRegister {
+    fn available(&self, features: &BTreeSet<String>) -> bool {
+        self.required.iter().all(|name| features.contains(name))
+    }
+}
+
+struct BankedRegister {
+    name: String,
+    encoding: u32,
+}
+
+fn system_registers() -> &'static [SystemRegister] {
+    static CELL: OnceLock<Vec<SystemRegister>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let target = target().expect("the ARMv7 tables load");
+        target
+            .records
+            .values()
+            .filter(|record| record.is_a("MClassSysReg"))
+            .map(|record| {
+                let required = match record.field("Requires") {
+                    Some(TableValue::Code(text)) => text
+                        .trim()
+                        .trim_start_matches('{')
+                        .trim_end_matches('}')
+                        .split(',')
+                        .filter_map(|item| {
+                            let item = item.trim();
+                            (!item.is_empty())
+                                .then(|| item.rsplit("::").next().unwrap_or(item).to_string())
+                        })
+                        .collect(),
+                    _ => Vec::new(),
+                };
+                SystemRegister {
+                    name: table_text(record, "Name"),
+                    m1_encoding: table_integer(record, "M1Encoding12") as u32,
+                    m2m3_encoding: table_integer(record, "M2M3Encoding8") as u32,
+                    encoding: table_integer(record, "Encoding") as u32,
+                    required,
+                }
+            })
+            .collect()
+    })
+}
+
+fn banked_registers() -> &'static [BankedRegister] {
+    static CELL: OnceLock<Vec<BankedRegister>> = OnceLock::new();
+    CELL.get_or_init(|| {
+        let target = target().expect("the ARMv7 tables load");
+        target
+            .records
+            .values()
+            .filter(|record| record.is_a("BankedReg"))
+            .map(|record| BankedRegister {
+                name: table_text(record, "Name"),
+                encoding: table_integer(record, "Encoding") as u32,
+            })
+            .collect()
+    })
 }
 
 fn in_class(target: &Target, class: &str, register: RegisterId) -> bool {
@@ -1449,6 +1524,11 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isMemBarrierOpt" => matches!(operand, Operand::MemoryBarrier(_)),
         "isInstSyncBarrierOpt" => matches!(operand, Operand::InstructionBarrier(_)),
         "isRotImm" => matches!(operand, Operand::RotateImmediate(_)),
+        "isCoprocNum" => matches!(operand, Operand::CoprocessorNumber(_)),
+        "isCoprocReg" => matches!(operand, Operand::CoprocessorRegister(_)),
+        "isCoprocOption" => matches!(operand, Operand::CoprocessorOption(_)),
+        "isMSRMask" => matches!(operand, Operand::SystemMask(_)),
+        "isBankedReg" => matches!(operand, Operand::BankedRegister(_)),
         "isConstPoolAsmImm" | "isConstantPoolImm" => matches!(operand, Operand::ConstantPool(_)),
         _ => false,
     }
@@ -1828,8 +1908,31 @@ fn operand_of(operand: &ParsedOperand) -> Option<&Operand> {
 enum Outcome {
     Success(MachineInstruction),
     MnemonicFail,
-    InvalidOperand(usize),
-    MissingFeature(Vec<String>),
+    NearMisses(Vec<NearMiss>),
+}
+
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+enum PredicateError {
+    NotITBlock,
+    ITBlock,
+    V6,
+    Thumb2,
+    V8,
+    FlagSetting,
+    TiedOperand,
+    InvalidOperand,
+}
+
+#[derive(Clone, Debug)]
+enum NearMiss {
+    Operand {
+        message: Option<String>,
+        class: Option<usize>,
+        index: usize,
+    },
+    TooFewOperands,
+    Feature(Vec<String>),
+    Predicate(PredicateError),
 }
 
 #[derive(PartialEq, Eq, Clone, Copy)]
@@ -2491,6 +2594,161 @@ impl<'s> Assembler<'s> {
         Parse::Success
     }
 
+    fn arm32_coprocessor_index(text: &str, prefix: char) -> Option<u32> {
+        let text = text.to_ascii_lowercase();
+        let rest = text.strip_prefix(prefix)?;
+        let digits = rest.strip_prefix('r').unwrap_or(rest);
+        if digits.is_empty()
+            || digits.len() > 2
+            || !digits.bytes().all(|byte| byte.is_ascii_digit())
+            || (digits.len() == 2 && !digits.starts_with('1'))
+        {
+            return None;
+        }
+        digits.parse::<u32>().ok().filter(|value| *value <= 15)
+    }
+
+    fn arm32_parse_coprocessor(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        prefix: char,
+    ) -> Parse {
+        if !self.is(TokenKind::Identifier) {
+            return Parse::NoMatch;
+        }
+        let Some(number) = Self::arm32_coprocessor_index(&self.lexer.token.text, prefix) else {
+            return Parse::NoMatch;
+        };
+        if prefix == 'p' {
+            let version8 = self.arm_features.contains("HasV8Ops");
+            let main_line = self.arm_features.contains("HasV8_1MMainlineOps");
+            if (version8 && number & 0xe != 0xe)
+                || (main_line && (number & 0xe == 0x8 || number & 0xe == 0xe))
+            {
+                return Parse::NoMatch;
+            }
+        }
+        let start = self.lexer.token.start;
+        let end = self.lexer.token.end;
+        self.lex();
+        let operand = if prefix == 'p' {
+            Operand::CoprocessorNumber(number)
+        } else {
+            Operand::CoprocessorRegister(number)
+        };
+        operands.push(parsed(operand, start, end));
+        Parse::Success
+    }
+
+    fn arm32_parse_system_mask(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        if !self.is(TokenKind::Identifier) {
+            return Parse::NoMatch;
+        }
+        let text = self.lexer.token.text.clone();
+        let start = self.lexer.token.start;
+        let end = self.lexer.token.end;
+        let m_class = self.arm_features.contains("FeatureMClass");
+        let value = if m_class {
+            let lower = text.to_ascii_lowercase();
+            let Some(register) = system_registers()
+                .iter()
+                .find(|held| held.name == lower && held.available(&self.arm_features))
+            else {
+                return Parse::NoMatch;
+            };
+            register.encoding & 0xfff
+        } else {
+            let (special, flags) = match text.split_once('_') {
+                Some((special, flags)) => (special.to_ascii_lowercase(), flags.to_string()),
+                None => (text.to_ascii_lowercase(), String::new()),
+            };
+            let mut value = 0u32;
+            if special == "apsr" {
+                value = match flags.as_str() {
+                    "nzcvq" => 8,
+                    "g" => 4,
+                    "nzcvqg" => 12,
+                    "" => 8,
+                    _ => return Parse::NoMatch,
+                };
+            } else if special == "cpsr" || special == "spsr" {
+                let flags = if flags == "all" || flags.is_empty() {
+                    "fc".to_string()
+                } else {
+                    flags
+                };
+                for letter in flags.chars() {
+                    let flag = match letter {
+                        'c' => 1,
+                        'x' => 2,
+                        's' => 4,
+                        'f' => 8,
+                        _ => return Parse::NoMatch,
+                    };
+                    if value & flag != 0 {
+                        return Parse::NoMatch;
+                    }
+                    value |= flag;
+                }
+                if special == "spsr" {
+                    value |= 16;
+                }
+            } else {
+                return Parse::NoMatch;
+            }
+            value
+        };
+        self.lex();
+        operands.push(parsed(Operand::SystemMask(value), start, end));
+        Parse::Success
+    }
+
+    fn arm32_parse_banked_register(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        if !self.is(TokenKind::Identifier) {
+            return Parse::NoMatch;
+        }
+        let lower = self.lexer.token.text.to_ascii_lowercase();
+        let Some(register) = banked_registers().iter().find(|held| held.name == lower) else {
+            return Parse::NoMatch;
+        };
+        let value = register.encoding;
+        let start = self.lexer.token.start;
+        let end = self.lexer.token.end;
+        self.lex();
+        operands.push(parsed(Operand::BankedRegister(value), start, end));
+        Parse::Success
+    }
+
+    fn arm32_parse_coprocessor_option(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        if !self.is(TokenKind::LeftBrace) {
+            return Parse::NoMatch;
+        }
+        let start = self.lexer.token.start;
+        self.lex();
+        let location = self.location();
+        let Ok((expression, _)) = self.parse_expression() else {
+            self.error(location, "illegal expression");
+            return Parse::Failure;
+        };
+        let value = match expression {
+            Expression::Constant(value) if (0..=255).contains(&value) => value as u32,
+            _ => {
+                self.error(
+                    location,
+                    "coprocessor option must be an immediate in range [0, 255]",
+                );
+                return Parse::Failure;
+            }
+        };
+        if !self.is(TokenKind::RightBrace) {
+            return Parse::Failure;
+        }
+        let end = self.lexer.token.end;
+        self.lex();
+        operands.push(parsed(Operand::CoprocessorOption(value), start, end));
+        Parse::Success
+    }
+
     fn arm32_parse_rotate_immediate(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
         if !self.is(TokenKind::Identifier) || !self.lexer.token.text.eq_ignore_ascii_case("ror") {
             return Parse::NoMatch;
@@ -2681,6 +2939,11 @@ impl<'s> Assembler<'s> {
                 "ShifterImm" => self.arm32_parse_shifter_immediate(operands),
                 "RotImm" => self.arm32_parse_rotate_immediate(operands),
                 "SetEndImm" => self.arm32_parse_set_end(operands),
+                "CoprocNum" => self.arm32_parse_coprocessor(operands, 'p'),
+                "CoprocReg" => self.arm32_parse_coprocessor(operands, 'c'),
+                "CoprocOption" => self.arm32_parse_coprocessor_option(operands),
+                "MSRMask" => self.arm32_parse_system_mask(operands),
+                "BankedReg" => self.arm32_parse_banked_register(operands),
                 "PostIdxReg" => self.arm32_parse_post_index(operands, false),
                 "PostIdxRegShifted" => self.arm32_parse_post_index(operands, true),
                 _ => Parse::NoMatch,
@@ -3514,6 +3777,18 @@ impl<'s> Assembler<'s> {
             }
             ("addConstPoolAsmImmOperands", Operand::ConstantPool(held)) => expression(into, held),
             ("addITMaskOperands", Operand::ItMask(mask)) => immediate(into, i64::from(*mask)),
+            (
+                "addCoprocNumOperands"
+                | "addCoprocRegOperands"
+                | "addCoprocOptionOperands"
+                | "addMSRMaskOperands"
+                | "addBankedRegOperands",
+                Operand::CoprocessorNumber(value)
+                | Operand::CoprocessorRegister(value)
+                | Operand::CoprocessorOption(value)
+                | Operand::SystemMask(value)
+                | Operand::BankedRegister(value),
+            ) => immediate(into, i64::from(*value)),
             ("addITCondCodeOperands", Operand::Condition(code)) => {
                 immediate(into, i64::from(*code))
             }
@@ -3773,9 +4048,70 @@ impl<'s> Assembler<'s> {
         }
     }
 
-    fn arm32_validate(&self, operand: &ParsedOperand, class: usize) -> bool {
+    fn arm32_diagnostic_type(&self, class: usize) -> Option<String> {
+        let held = &self.matcher.classes[class];
+        if !held.diagnostic.is_empty() {
+            Some(held.diagnostic.clone())
+        } else if !held.diagnostic_string.is_empty() {
+            Some(held.name.clone())
+        } else {
+            None
+        }
+    }
+
+    fn arm32_diagnostic_message(&self, diagnostic: &str) -> Option<String> {
+        let version8 = self.arm_features.contains("HasV8Ops");
+        let thirty_two = self
+            .arm32_feature("d32")
+            .is_some_and(|held| self.arm_features.contains(&held));
+        match diagnostic {
+            "rGPR" => {
+                return Some(
+                    if version8 {
+                        "operand must be a register in range [r0, r14]"
+                    } else {
+                        "operand must be a register in range [r0, r12] or r14"
+                    }
+                    .to_string(),
+                )
+            }
+            "DPR" => {
+                return Some(
+                    if thirty_two {
+                        "operand must be a register in range [d0, d31]"
+                    } else {
+                        "operand must be a register in range [d0, d15]"
+                    }
+                    .to_string(),
+                )
+            }
+            "DPR_RegList" => {
+                return Some(
+                    if thirty_two {
+                        "operand must be a list of registers in range [d0, d31]"
+                    } else {
+                        "operand must be a list of registers in range [d0, d15]"
+                    }
+                    .to_string(),
+                )
+            }
+            _ => {}
+        }
+        self.matcher
+            .classes
+            .iter()
+            .find(|held| {
+                !held.diagnostic_string.is_empty()
+                    && (held.diagnostic == diagnostic
+                        || (held.diagnostic.is_empty() && held.name == diagnostic))
+            })
+            .map(|held| held.diagnostic_string.clone())
+    }
+
+    fn arm32_validate(&self, operand: &ParsedOperand, class: usize) -> Result<(), Option<String>> {
         let matcher = self.matcher;
         let held = &matcher.classes[class];
+        let failure = || Err(self.arm32_diagnostic_type(class));
         match held.kind {
             ClassKind::Token => {
                 if let ParsedKind::Token(text) = &operand.kind {
@@ -3783,35 +4119,43 @@ impl<'s> Assembler<'s> {
                         candidate.kind == ClassKind::Token
                             && candidate.value_name.eq_ignore_ascii_case(text)
                     }) {
-                        return matcher.is_subclass(found, class);
+                        if matcher.is_subclass(found, class) {
+                            return Ok(());
+                        }
                     }
                 }
                 if let Some(literal) = held.value_name.strip_prefix('#') {
                     if let (Some(Operand::Immediate(Expression::Constant(value))), Ok(wanted)) =
                         (operand_of(operand), literal.parse::<i64>())
                     {
-                        return *value == wanted;
+                        if *value == wanted {
+                            return Ok(());
+                        }
                     }
                 }
-                false
+                Err(None)
             }
             ClassKind::Register => match operand_of(operand) {
-                Some(Operand::Register(register)) => held.registers.contains(register),
-                _ => false,
+                Some(Operand::Register(register)) if held.registers.contains(register) => Ok(()),
+                _ => failure(),
             },
             ClassKind::User => match operand_of(operand) {
                 Some(Operand::Immediate(expression))
                     if held.name == "ModImm" && !matches!(expression, Expression::Constant(_)) =>
                 {
-                    true
+                    Ok(())
                 }
-                Some(held_operand) => predicate(
-                    self.target,
-                    &self.arm32_class_predicate(class),
-                    held_operand,
-                    self.thumb_state(),
-                ),
-                None => false,
+                Some(held_operand)
+                    if predicate(
+                        self.target,
+                        &self.arm32_class_predicate(class),
+                        held_operand,
+                        self.thumb_state(),
+                    ) =>
+                {
+                    Ok(())
+                }
+                _ => failure(),
             },
         }
     }
@@ -3819,9 +4163,6 @@ impl<'s> Assembler<'s> {
     fn arm32_match(&self, operands: &[ParsedOperand]) -> Outcome {
         let matcher = self.matcher;
         let target = self.target;
-        if operands.len() > matcher.maximum_operands + 1 {
-            return Outcome::InvalidOperand(matcher.maximum_operands + 1);
-        }
         let mnemonic = operands
             .first()
             .map(|operand| operand.token_text().to_ascii_lowercase())
@@ -3829,9 +4170,8 @@ impl<'s> Assembler<'s> {
         let Some((start, end)) = matcher.ranges.get(&(0, mnemonic.clone())).copied() else {
             return Outcome::MnemonicFail;
         };
-        let mut had_feature_failure = false;
-        let mut error_index: Option<usize> = None;
-        let mut missing: Option<Vec<String>> = None;
+        let mut misses: Vec<NearMiss> = Vec::new();
+        let mut fallback: Vec<NearMiss> = Vec::new();
         for at in start..end {
             let entry = &matcher.matchables[at];
             if entry.mnemonic.to_ascii_lowercase() != mnemonic {
@@ -3847,54 +4187,93 @@ impl<'s> Assembler<'s> {
             {
                 continue;
             }
-            let has_features = armv8::predicates_hold(target, &predicates, &self.arm_features);
+            let mut required: Vec<String> = predicates
+                .iter()
+                .filter(|predicate| {
+                    !armv8::predicates_hold(
+                        target,
+                        std::slice::from_ref(predicate),
+                        &self.arm_features,
+                    )
+                })
+                .cloned()
+                .collect();
+            required.sort_by_key(|name| {
+                target
+                    .records
+                    .get(name)
+                    .map_or(u64::MAX, |record| record.definition_order)
+            });
+            required.dedup();
             let mut actual_of: Vec<Option<usize>> = Vec::new();
             let mut actual = 1;
-            let mut valid = true;
+            let mut operand_miss: Option<NearMiss> = None;
+            let mut multiple = false;
             for formal in 0..entry.operands.len() {
                 let class = entry.operands[formal].class;
-                if actual < operands.len() && self.arm32_validate(&operands[actual], class) {
-                    actual_of.push(Some(actual));
-                    actual += 1;
-                    continue;
-                }
-                if matcher.classes[class].optional {
+                if actual >= operands.len() {
                     actual_of.push(None);
+                    if matcher.classes[class].optional {
+                        continue;
+                    }
+                    match operand_miss {
+                        None => operand_miss = Some(NearMiss::TooFewOperands),
+                        Some(NearMiss::TooFewOperands) => {}
+                        Some(_) => {
+                            multiple = true;
+                            break;
+                        }
+                    }
                     continue;
                 }
-                valid = false;
-                if error_index.is_none_or(|held| held <= actual) {
-                    error_index = Some(actual);
+                match self.arm32_validate(&operands[actual], class) {
+                    Ok(()) => {
+                        actual_of.push(Some(actual));
+                        actual += 1;
+                    }
+                    Err(diagnostic) => {
+                        if diagnostic.is_none() && matcher.classes[class].optional {
+                            actual_of.push(None);
+                            continue;
+                        }
+                        if operand_miss.is_some() {
+                            multiple = true;
+                            break;
+                        }
+                        operand_miss = Some(NearMiss::Operand {
+                            message: diagnostic
+                                .and_then(|name| self.arm32_diagnostic_message(&name)),
+                            class: Some(class),
+                            index: actual,
+                        });
+                        actual_of.push(None);
+                        actual += 1;
+                    }
                 }
-                break;
             }
-            if valid && actual < operands.len() {
-                valid = false;
-                if error_index.is_none_or(|held| held <= actual) {
-                    error_index = Some(actual);
+            if !multiple {
+                while actual < operands.len() {
+                    if operand_miss.is_some() {
+                        multiple = true;
+                        break;
+                    }
+                    operand_miss = Some(NearMiss::Operand {
+                        message: None,
+                        class: None,
+                        index: actual,
+                    });
+                    actual += 1;
                 }
             }
-            if !valid {
+            if multiple {
+                if let Some(miss) = operand_miss {
+                    fallback.push(miss);
+                }
                 continue;
             }
-            if !has_features {
-                had_feature_failure = true;
-                let required: Vec<String> = predicates
-                    .iter()
-                    .filter(|predicate| {
-                        !armv8::predicates_hold(
-                            target,
-                            std::slice::from_ref(predicate),
-                            &self.arm_features,
-                        )
-                    })
-                    .cloned()
-                    .collect();
-                if missing
-                    .as_ref()
-                    .is_none_or(|held| required.len() <= held.len())
-                {
-                    missing = Some(required);
+            if let Some(miss) = operand_miss {
+                if required.is_empty() {
+                    misses.push(miss);
                 }
                 continue;
             }
@@ -3927,18 +4306,18 @@ impl<'s> Assembler<'s> {
                         .push(MachineOperand::Register(*register)),
                 }
             }
-            if !self.arm32_target_predicate(&instruction) {
-                if error_index.is_none() {
-                    error_index = Some(1);
-                }
-                continue;
+            let late = self.arm32_target_predicate(&instruction);
+            match (required.is_empty(), late) {
+                (true, None) => return Outcome::Success(instruction),
+                (false, None) => misses.push(NearMiss::Feature(required)),
+                (true, Some(error)) => misses.push(NearMiss::Predicate(error)),
+                (false, Some(_)) => {}
             }
-            return Outcome::Success(instruction);
         }
-        if had_feature_failure {
-            return Outcome::MissingFeature(missing.unwrap_or_default());
+        if misses.is_empty() {
+            misses = fallback;
         }
-        Outcome::InvalidOperand(error_index.unwrap_or(0))
+        Outcome::NearMisses(misses)
     }
 
     fn arm32_feature(&self, name: &str) -> Option<String> {
@@ -4238,7 +4617,7 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm32_has_arm(&self) -> bool {
-        self.arm32_feature("no-arm-mode")
+        self.arm32_feature("noarm")
             .is_none_or(|held| !self.arm_features.contains(&held))
     }
 
@@ -4256,7 +4635,7 @@ impl<'s> Assembler<'s> {
         self.arm_thumb && self.arm_features.contains("FeatureThumb2")
     }
 
-    fn arm32_target_predicate(&self, instruction: &MachineInstruction) -> bool {
+    fn arm32_target_predicate(&self, instruction: &MachineInstruction) -> Option<PredicateError> {
         let target = self.target;
         let description = &target.instructions[instruction.opcode];
         let record = target.records.get(&description.record);
@@ -4267,7 +4646,22 @@ impl<'s> Assembler<'s> {
             )
         });
         let thumb_two = self.arm32_thumb_two();
+        let thumb_one = self.arm_thumb && !thumb_two;
         let in_it = self.arm_it_remaining > 0;
+        let version8 = self.arm_features.contains("HasV8Ops");
+        let register = |name: &str| {
+            target
+                .register_by_name
+                .get(name)
+                .copied()
+                .unwrap_or(NO_REGISTER)
+        };
+        let (stack, counter) = (register("sp"), register("pc"));
+        let register_at = |index: usize| match instruction.operand(index) {
+            MachineOperand::Register(held) => *held,
+            _ => NO_REGISTER,
+        };
+        let low = |held: RegisterId| in_class(target, "tGPR", held);
         if flag_setting {
             let mut carry = false;
             for group in &description.groups {
@@ -4275,43 +4669,85 @@ impl<'s> Assembler<'s> {
                     carry = instruction.register_at(group.first) != NO_REGISTER;
                 }
             }
-            if self.arm_thumb && !thumb_two && !carry {
-                return false;
+            if thumb_one && !carry {
+                return Some(PredicateError::FlagSetting);
             }
             if thumb_two && !carry && !in_it {
-                return false;
+                return Some(PredicateError::ITBlock);
             }
             if thumb_two && carry && in_it {
-                return false;
+                return Some(PredicateError::NotITBlock);
             }
             if description.record == "tLSLri" && instruction.immediate_at(3) == 0 && in_it {
-                return false;
+                return Some(PredicateError::NotITBlock);
+            }
+        } else if thumb_one {
+            if description.record == "tADDhirr"
+                && !self.arm_features.contains("HasV6MOps")
+                && low(register_at(1))
+                && low(register_at(2))
+            {
+                return Some(PredicateError::Thumb2);
+            } else if description.record == "tMOVr"
+                && !self.arm_features.contains("HasV6Ops")
+                && low(register_at(0))
+                && low(register_at(1))
+            {
+                return Some(PredicateError::V6);
             }
         }
-        let version8 = self.arm_features.contains("HasV8Ops");
-        let stack = target
-            .register_by_name
-            .get("sp")
-            .copied()
-            .unwrap_or(NO_REGISTER);
-        let counter = target
-            .register_by_name
-            .get("pc")
-            .copied()
-            .unwrap_or(NO_REGISTER);
+        let cpsr = register("cpsr");
+        if description.record == "t2MOVr" && !version8 {
+            if register_at(0) == stack && register_at(1) == stack {
+                return Some(PredicateError::V8);
+            }
+            if register_at(4) == cpsr && (register_at(0) == stack || register_at(1) == stack) {
+                return Some(PredicateError::V8);
+            }
+        }
+        match description.record.as_str() {
+            "VMRS" | "VMSR" | "VMRS_FPCXTS" | "VMRS_FPCXTNS" | "VMSR_FPCXTS" | "VMSR_FPCXTNS"
+            | "VMRS_FPSCR_NZCVQC" | "VMSR_FPSCR_NZCVQC" | "FMSTAT" | "VMRS_VPR" | "VMRS_P0"
+            | "VMSR_VPR" | "VMSR_P0" => {
+                if register_at(0) == stack && self.arm_thumb && !version8 {
+                    return Some(PredicateError::InvalidOperand);
+                }
+            }
+            "t2TBB" | "t2TBH" => {
+                if !version8 && register_at(0) == stack {
+                    return Some(PredicateError::V8);
+                }
+            }
+            "tMUL" if register_at(0) != register_at(3) => {
+                return Some(PredicateError::TiedOperand);
+            }
+            _ => {}
+        }
         for group in &description.groups {
-            if group.record == "rGPR" && group.count == 1 {
-                if let MachineOperand::Register(register) = instruction.operand(group.first) {
-                    if *register == stack && !version8 {
-                        return false;
+            let parts: Vec<String> = if group.count == 1 {
+                vec![group.record.clone()]
+            } else {
+                target
+                    .operand_records
+                    .get(&group.record)
+                    .map(|held| held.sub_operands.clone())
+                    .unwrap_or_default()
+            };
+            for (offset, part) in parts.iter().enumerate() {
+                if part != "rGPR" {
+                    continue;
+                }
+                if let MachineOperand::Register(held) = instruction.operand(group.first + offset) {
+                    if *held == stack && !version8 {
+                        return Some(PredicateError::V8);
                     }
-                    if *register == counter {
-                        return false;
+                    if *held == counter {
+                        return Some(PredicateError::InvalidOperand);
                     }
                 }
             }
         }
-        true
+        None
     }
 
     fn arm32_record_index(&self, record: &str) -> Option<usize> {
@@ -4773,8 +5209,7 @@ impl<'s> Assembler<'s> {
         identifier_token: Token,
     ) -> bool {
         self.arm_suffixes.clear();
-        let Ok((mut operands, _)) =
-            self.arm32_parse_instruction(identifier, identifier_token.start)
+        let Ok((operands, _)) = self.arm32_parse_instruction(identifier, identifier_token.start)
         else {
             return true;
         };
@@ -4809,43 +5244,188 @@ impl<'s> Assembler<'s> {
                 self.emit_instruction(&instruction, location);
                 false
             }
-            Outcome::MnemonicFail => self.error(location, "unrecognized instruction mnemonic"),
-            Outcome::MissingFeature(features) => {
-                let mut text = "instruction requires:".to_string();
-                let mut seen: Vec<String> = Vec::new();
-                for feature in features {
-                    if !seen.contains(&feature) {
-                        seen.push(feature);
+            Outcome::MnemonicFail => {
+                let base = operands
+                    .first()
+                    .map(|held| held.token_text().to_ascii_lowercase())
+                    .unwrap_or_default();
+                let suggestion = self.arm_mnemonic_suggestion(&base);
+                self.error_range(
+                    location,
+                    &format!("invalid instruction{suggestion}"),
+                    (location, self.statement_location(identifier_token.end)),
+                )
+            }
+            Outcome::NearMisses(misses) => {
+                self.arm32_report_near_misses(&misses, &operands, location)
+            }
+        }
+    }
+
+    fn arm32_near_miss_messages(
+        &self,
+        misses: &[NearMiss],
+        operands: &[ParsedOperand],
+        location: SourceLocation,
+    ) -> Vec<(SourceLocation, String)> {
+        let matcher = self.matcher;
+        let thumb = self.arm_thumb;
+        let has_arm = self
+            .arm32_feature("noarm")
+            .is_none_or(|held| !self.arm_features.contains(&held));
+        let m_class = self
+            .arm32_feature("mclass")
+            .is_some_and(|held| self.arm_features.contains(&held));
+        let mut messages: Vec<(SourceLocation, String)> = Vec::new();
+        let mut operand_seen: Vec<(usize, Option<usize>)> = Vec::new();
+        let mut feature_seen: Vec<&Vec<String>> = Vec::new();
+        let mut reported_too_few = false;
+        for miss in misses.iter().rev() {
+            match miss {
+                NearMiss::Operand {
+                    message,
+                    class,
+                    index,
+                } => {
+                    let duplicate_class = message.as_ref().and(*class);
+                    let duplicate = operand_seen.iter().any(|(held_index, held_class)| {
+                        *held_index == *index
+                            && match (duplicate_class, held_class) {
+                                (Some(left), Some(right)) => matcher.is_subclass(left, *right),
+                                (None, None) => true,
+                                _ => false,
+                            }
+                    });
+                    if duplicate {
+                        continue;
+                    }
+                    operand_seen.push((*index, duplicate_class));
+                    let text = match (message, class) {
+                        (Some(text), _) => text.clone(),
+                        (None, None) => "too many operands for instruction".to_string(),
+                        (None, Some(_)) => "invalid operand for instruction".to_string(),
+                    };
+                    messages.push((self.statement_location(operands[*index].start), text));
+                }
+                NearMiss::Feature(features) => {
+                    if feature_seen.contains(&features) {
+                        continue;
+                    }
+                    feature_seen.push(features);
+                    let has = |name: &str| features.iter().any(|held| held == name);
+                    if has("IsARM") && !has_arm {
+                        continue;
+                    }
+                    if thumb && has("IsARM") && features.len() > 1 {
+                        continue;
+                    }
+                    if !thumb && has("IsThumb") && features.len() > 1 {
+                        continue;
+                    }
+                    if !thumb
+                        && has("IsThumb2")
+                        && features
+                            .iter()
+                            .any(|held| held != "IsThumb2" && held != "IsThumb")
+                    {
+                        continue;
+                    }
+                    if m_class && has("HasNEON") {
+                        continue;
+                    }
+                    let mut text = "instruction requires:".to_string();
+                    for feature in features {
+                        text.push(' ');
+                        text.push_str(&self.arm32_feature_name(feature));
+                    }
+                    messages.push((location, text));
+                }
+                NearMiss::Predicate(error) => {
+                    let (at, text) = match error {
+                        PredicateError::NotITBlock => (
+                            location,
+                            "flag setting instruction only valid outside IT block",
+                        ),
+                        PredicateError::ITBlock => {
+                            (location, "instruction only valid inside IT block")
+                        }
+                        PredicateError::V6 => {
+                            (location, "instruction variant requires ARMv6 or later")
+                        }
+                        PredicateError::Thumb2 => (location, "instruction variant requires Thumb2"),
+                        PredicateError::V8 => {
+                            (location, "instruction variant requires ARMv8 or later")
+                        }
+                        PredicateError::FlagSetting => (
+                            location,
+                            "no flag-preserving variant of this instruction available",
+                        ),
+                        PredicateError::TiedOperand => {
+                            let first = operands
+                                .iter()
+                                .enumerate()
+                                .skip(1)
+                                .find(|(_, held)| {
+                                    !matches!(
+                                        operand_of(held),
+                                        Some(Operand::Condition(_) | Operand::CarrySet(_))
+                                    )
+                                })
+                                .map_or(location, |(_, held)| self.statement_location(held.start));
+                            (first, "destination register must match a source register")
+                        }
+                        PredicateError::InvalidOperand => {
+                            (location, "invalid operand for instruction")
+                        }
+                    };
+                    messages.push((at, text.to_string()));
+                }
+                NearMiss::TooFewOperands => {
+                    if !reported_too_few {
+                        reported_too_few = true;
+                        let end = operands
+                            .last()
+                            .map_or(location, |held| self.statement_location(held.end));
+                        messages.push((end, "too few operands for instruction".to_string()));
                     }
                 }
-                seen.sort();
-                for feature in &seen {
-                    let name = match self.target.records.get(feature) {
-                        Some(record) if !table_text(record, "PredicateName").is_empty() => {
-                            table_text(record, "PredicateName")
-                        }
-                        Some(record) => match record.field("AssemblerCondDag") {
-                            Some(condition) => armv8::requirement_text(self.target, condition).0,
-                            None => feature.clone(),
-                        },
-                        None => feature.clone(),
-                    };
-                    text.push(' ');
-                    text.push_str(&name);
-                }
-                self.error(location, &text)
             }
-            Outcome::InvalidOperand(index) => {
-                if index >= operands.len() {
-                    let end = self.lexer.token.location();
-                    return self.error_range(
-                        location,
-                        "too few operands for instruction",
-                        (location, end),
-                    );
+        }
+        messages
+    }
+
+    fn arm32_feature_name(&self, feature: &str) -> String {
+        match self.target.records.get(feature) {
+            Some(record) if !table_text(record, "PredicateName").is_empty() => {
+                table_text(record, "PredicateName")
+            }
+            Some(record) => match record.field("AssemblerCondDag") {
+                Some(condition) => armv8::requirement_text(self.target, condition).0,
+                None => feature.to_string(),
+            },
+            None => feature.to_string(),
+        }
+    }
+
+    fn arm32_report_near_misses(
+        &mut self,
+        misses: &[NearMiss],
+        operands: &[ParsedOperand],
+        location: SourceLocation,
+    ) -> bool {
+        let messages = self.arm32_near_miss_messages(misses, operands, location);
+        match messages.as_slice() {
+            [] => self.error(location, "invalid instruction"),
+            [(at, text)] => self.error(*at, text),
+            _ => {
+                let result = self.error(
+                    location,
+                    "invalid instruction, any one of the following would fix this:",
+                );
+                for (at, text) in &messages {
+                    self.arm32_note(*at, text);
                 }
-                let at = self.statement_location(operands.remove(index).start);
-                self.error(at, "invalid operand for instruction")
+                result
             }
         }
     }
@@ -6487,16 +7067,47 @@ impl<'t> Printer<'t> {
                 }
             }
             "printMSRMaskOperand" => {
+                if self.features.contains("FeatureMClass") {
+                    let mut sysm = value(0) as u32;
+                    let write = self.target.instructions[instruction.opcode].record == "t2MSR_M";
+                    if write && self.features.contains("FeatureDSP") {
+                        if let Some(found) = system_registers().iter().find(|held| {
+                            held.m1_encoding == sysm && held.required == ["FeatureDSP"]
+                        }) {
+                            out.push_str(&found.name);
+                            return;
+                        }
+                    }
+                    sysm &= 0xff;
+                    if write && self.features.contains("HasV7Ops") {
+                        if let Some(found) = system_registers()
+                            .iter()
+                            .find(|held| held.m2m3_encoding == ((1 << 9) | sysm))
+                        {
+                            out.push_str(&found.name);
+                            return;
+                        }
+                    }
+                    match system_registers()
+                        .iter()
+                        .find(|held| held.m2m3_encoding == ((1 << 8) | sysm))
+                    {
+                        Some(found) => out.push_str(&found.name),
+                        None => out.push_str(&sysm.to_string()),
+                    }
+                    return;
+                }
                 let held = value(0) as u32;
                 let spsr = held >> 4;
                 let mask = held & 0xf;
                 if spsr == 0 && matches!(mask, 8 | 4 | 12) {
                     out.push_str("APSR_");
-                    out.push_str(match mask {
-                        4 => "g",
-                        8 => "nzcvq",
-                        _ => "nzcvqg",
-                    });
+                    if mask & 8 != 0 {
+                        out.push_str("nzcvq");
+                    }
+                    if mask & 4 != 0 {
+                        out.push('g');
+                    }
                     return;
                 }
                 out.push_str(if spsr != 0 { "SPSR" } else { "CPSR" });
@@ -6506,6 +7117,20 @@ impl<'t> Printer<'t> {
                         if mask & bit != 0 {
                             out.push(letter);
                         }
+                    }
+                }
+            }
+            "printBankedRegOperand" => {
+                let encoding = value(0) as u32;
+                if let Some(found) = banked_registers()
+                    .iter()
+                    .find(|held| held.encoding == encoding)
+                {
+                    if encoding & 0x20 != 0 {
+                        out.push_str("SPSR");
+                        out.push_str(&found.name[4..]);
+                    } else {
+                        out.push_str(&found.name);
                     }
                 }
             }
@@ -8877,7 +9502,7 @@ impl<'a> Assembler<'a> {
             .arm32_feature("v4t")
             .is_some_and(|held| self.arm_features.contains(&held));
         let supports_arm = self
-            .arm32_feature("no-arm-mode")
+            .arm32_feature("noarm")
             .is_none_or(|held| !self.arm_features.contains(&held));
         if (was_thumb && supports_thumb) || (!was_thumb && supports_arm) {
             self.arm_thumb = was_thumb;
@@ -8927,10 +9552,10 @@ impl<'a> Assembler<'a> {
             .emit_arm_directive(&format!("\t.cpu\t{}", name.to_ascii_lowercase()));
         let target = self.target;
         let known = name == "generic"
-            || target
-                .records
-                .values()
-                .any(|record| record.is_a("ProcessorModel") && table_text(record, "Name") == name);
+            || target.records.values().any(|record| {
+                (record.is_a("ProcessorModel") || record.is_a("Processor"))
+                    && table_text(record, "Name") == name
+            });
         if !known {
             return self.error(location, "Unknown CPU name");
         }

@@ -7349,10 +7349,12 @@ impl<'t> MatcherBuilder<'t> {
             .first()
             .and_then(|class| self.target.records.get(&class.record))
             .map(|record| {
-                (
-                    table_text(record, "DiagnosticType"),
-                    table_text(record, "DiagnosticString"),
-                )
+                let string = table_text(record, "DiagnosticString");
+                let mut kind = table_text(record, "DiagnosticType");
+                if kind.is_empty() && !string.is_empty() {
+                    kind = record.name.clone();
+                }
+                (kind, string)
             })
             .unwrap_or_default();
         let made = self.classes.len();

@@ -75160,6 +75160,19 @@ mod armv8_assembly {
     #[test]
     fn the_armv7_assembler_matches_llvm_mc_on_arm_mode_instructions() {
         let cases: &[&str] = &[
+            "mrc p14, #0, r1, c1, c2, #4",
+            "ldc p14, c1, [r0]",
+            "mcrr p7, #15, r5, r4, c1",
+            "ldc2l p6, c5, [r1, #4]!",
+            "stc p5, c1, [r0], {7}",
+            "mrc2 p14, #0, r1, c1, c2, #4",
+            "ldcl p14, c1, [r0, #-4]",
+            "cdp p7, #1, c1, c2, c3, #2",
+            "msr cpsr_fc, r0",
+            "mrs r1, r8_usr",
+            "msr SPSR_fiq, r3",
+            "msr cpsr_f, #1",
+            "msr spsr_fsxc, r2",
             "add r0, r1, r2",
             "add r0, r1, #1",
             "adds r0, r1, r2",
@@ -75251,6 +75264,124 @@ mod armv8_assembly {
             "pld [r0, #4]",
         ];
         compare_armv7(cases, "armv7a-linux-gnueabihf");
+    }
+
+    fn armv7_diagnostics_expected(source: &str, triple: &str, cpu: &str) -> Option<Vec<String>> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("llvm-mc-18")
+            .args([&format!("-triple={triple}"), &format!("-mcpu={cpu}")])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(format!("{source}\n").as_bytes())
+            .ok()?;
+        let output = child.wait_with_output().ok()?;
+        let text = String::from_utf8_lossy(&output.stderr).to_string();
+        Some(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("<stdin>:"))
+                .filter(|line| line.contains(": error: ") || line.contains(": note: "))
+                .map(str::to_string)
+                .collect(),
+        )
+    }
+
+    fn armv7_diagnostics(source: &str, triple: &str, cpu: &str) -> Vec<String> {
+        use crate::compilers::x86_64::{
+            assemble_source, render_messages, AssemblerOptions, OutputKind,
+        };
+        let mut options = AssemblerOptions::new(triple);
+        options.output = OutputKind::Assembly;
+        options.cpu = cpu.to_string();
+        let Ok(result) = assemble_source(&options, format!("{source}\n").as_bytes(), None) else {
+            return vec!["the assembler does not start".to_string()];
+        };
+        render_messages(&result)
+            .iter()
+            .filter_map(|diagnostic| {
+                let kind = match diagnostic.severity {
+                    crate::diag::Severity::Warning => return None,
+                    crate::diag::Severity::Info => "note",
+                    _ => "error",
+                };
+                let cause = diagnostic
+                    .context
+                    .iter()
+                    .find_map(|line| line.strip_prefix("Cause: "))
+                    .unwrap_or_default();
+                let location = diagnostic.location.as_ref()?;
+                Some(format!(
+                    "{}:{}: {kind}: {cause}",
+                    location.line, location.column
+                ))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_armv7_assembler_reports_the_same_diagnostics_as_llvm_mc() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[(&str, &str, &str)] = &[
+            ("armv7-linux-gnueabi", "cortex-a15", "dbg #16"),
+            ("armv7-linux-gnueabi", "cortex-a15", "dbg r0"),
+            (
+                "armv7-linux-gnueabi",
+                "cortex-a15",
+                "cdp p14, #1, c1, c1, c1, #8",
+            ),
+            ("armv7-linux-gnueabi", "cortex-a15", "mov r15x, r0"),
+            ("armv7-linux-gnueabi", "cortex-a15", "add r0, r1, r2, r3"),
+            ("armv7-linux-gnueabi", "cortex-a15", "add r0"),
+            ("armv7-linux-gnueabi", "cortex-a15", "pushh r1, r2, r3"),
+            ("armv7-linux-gnueabi", "cortex-a15", "adXd r1, r2, r3"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ldre r1, r2, r3"),
+            (
+                "armv7-linux-gnueabi",
+                "cortex-a15",
+                "aaaaaaaaaaaaaaa r1, r2, r3",
+            ),
+            ("armv7-linux-gnueabi", "cortex-a15", "mov r0, r1, r2"),
+            ("armv7-linux-gnueabi", "cortex-a15", "bkpt #65536"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ldr r0, [r1, r2, r3]"),
+            ("armv7-linux-gnueabi", "cortex-a15", "vldm r0, {d0-d3, s4}"),
+            ("armv7-linux-gnueabi", "cortex-a15", "push {r0, r1"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ssat r0, #33, r1"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "adds r0, r1, r2"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "pop {sp}"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "mul r0, r1, r2"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "cbz r8, #4"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "fadd r1, r2, r3"),
+            ("thumbv6m-linux-gnueabi", "cortex-m0", "adds r0, r8, r2"),
+            ("thumbv6m-linux-gnueabi", "cortex-m0", "ldr r0, [r8]"),
+            ("thumbv6m-linux-gnueabi", "cortex-m0", "mrs r0, sp"),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for (triple, cpu, source) in cases {
+            let Some(expected) = armv7_diagnostics_expected(source, triple, cpu) else {
+                continue;
+            };
+            let got = armv7_diagnostics(source, triple, cpu);
+            if got != expected {
+                failures.push(format!(
+                    "{triple} {source}:\n  ours: {got:?}\n  llvm: {expected:?}"
+                ));
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(failures.is_empty(), "{} diagnostics differ", failures.len());
     }
 
     #[test]
@@ -75841,6 +75972,28 @@ mod armv8_assembly {
         if let Some(class) = target.register_classes.get(&filter) {
             eprintln!("class {filter}: {:?}", class);
         }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_records() {
+        let filter = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let target = crate::compilers::x86_64::armv7::target().expect("the tables load");
+        let mut shown = 0;
+        for record in target.records.values() {
+            if record.is_a(&filter) && shown < 12 {
+                shown += 1;
+                eprintln!("{} {:?}", record.name, record.fields);
+            }
+        }
+        eprintln!(
+            "{} records of {filter}",
+            target
+                .records
+                .values()
+                .filter(|held| held.is_a(&filter))
+                .count()
+        );
     }
 
     #[test]

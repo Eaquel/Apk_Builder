@@ -1031,11 +1031,10 @@ pub fn feature_set(target: &Target, cpu: &str, attributes: &[String]) -> BTreeSe
         attributes
     };
     let wanted = if cpu.is_empty() { "generic" } else { cpu };
-    if let Some(processor) = target
-        .records
-        .values()
-        .find(|record| record.is_a("ProcessorModel") && table_text(record, "Name") == wanted)
-    {
+    if let Some(processor) = target.records.values().find(|record| {
+        (record.is_a("ProcessorModel") || record.is_a("Processor"))
+            && table_text(record, "Name") == wanted
+    }) {
         for feature in table_record_list(processor, "Features") {
             set_feature(target, &mut features, &feature);
         }
@@ -4336,7 +4335,7 @@ impl<'s> Assembler<'s> {
         long
     }
 
-    fn arm_mnemonic_suggestion(&self, base: &str) -> String {
+    pub(super) fn arm_mnemonic_suggestion(&self, base: &str) -> String {
         const MAXIMUM_DISTANCE: usize = 2;
         let matcher = self.matcher;
         let target = self.target;
