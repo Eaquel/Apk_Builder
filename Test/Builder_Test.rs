@@ -73729,9 +73729,7 @@ mod arm_emulator {
         })
     }
 
-    pub(super) fn run(program: &[u8]) -> Outcome {
-        let target = armv8::target().expect("the ARMv8 tables load");
-        let features = armv8::feature_set(target, "", &["+all".to_string()]);
+    fn load(target: &'static Target, program: &[u8]) -> (Machine<'static>, u64) {
         let mut machine = Machine {
             target,
             memory: Memory {
@@ -73777,30 +73775,88 @@ mod arm_emulator {
             }
             machine.break_address = machine.break_address.max(address + memory_size);
         }
-        machine.pc = entry;
-        let mut cache: BTreeMap<u64, MachineInstruction> = BTreeMap::new();
-        let mut steps = 0u64;
-        while machine.exit.is_none() {
-            steps += 1;
-            assert!(steps < 200_000_000, "the program runs to its end");
-            let instruction = match cache.get(&machine.pc) {
-                Some(found) => found.clone(),
-                None => {
-                    let word = machine.memory.read(machine.pc, 4) as u32;
-                    let decoded = armv8::disassembler::decode(target, &features, word)
-                        .unwrap_or_else(|| {
-                            panic!("a decodable instruction {word:#010x} at {:#x}", machine.pc)
-                        });
-                    cache.insert(machine.pc, decoded.instruction.clone());
-                    decoded.instruction
-                }
-            };
-            machine.step(&instruction);
+        (machine, entry)
+    }
+
+    impl Machine<'static> {
+        fn run_until(&mut self, features: &std::collections::BTreeSet<String>, stop: Option<u64>) {
+            let target = self.target;
+            let mut cache: BTreeMap<u64, MachineInstruction> = BTreeMap::new();
+            let mut steps = 0u64;
+            while self.exit.is_none() && Some(self.pc) != stop {
+                steps += 1;
+                assert!(steps < 200_000_000, "the program runs to its end");
+                let instruction = match cache.get(&self.pc) {
+                    Some(found) => found.clone(),
+                    None => {
+                        let word = self.memory.read(self.pc, 4) as u32;
+                        let decoded = armv8::disassembler::decode(target, features, word)
+                            .unwrap_or_else(|| {
+                                panic!("a decodable instruction {word:#010x} at {:#x}", self.pc)
+                            });
+                        cache.insert(self.pc, decoded.instruction.clone());
+                        decoded.instruction
+                    }
+                };
+                self.step(&instruction);
+            }
         }
+    }
+
+    pub(super) fn run(program: &[u8]) -> Outcome {
+        let target = armv8::target().expect("the ARMv8 tables load");
+        let features = armv8::feature_set(target, "", &["+all".to_string()]);
+        let (mut machine, entry) = load(target, program);
+        machine.pc = entry;
+        machine.run_until(&features, None);
         Outcome {
             exit: machine.exit,
             stdout: machine.stdout,
         }
+    }
+
+    fn export_address(program: &[u8], name: &str) -> Option<u64> {
+        let word = |at: usize, size: usize| {
+            let mut bytes = [0u8; 8];
+            bytes[..size].copy_from_slice(&program[at..at + size]);
+            u64::from_le_bytes(bytes)
+        };
+        let table = word(40, 8) as usize;
+        let entry_size = word(58, 2) as usize;
+        let count = word(60, 2) as usize;
+        for index in 0..count {
+            let header = table + index * entry_size;
+            if word(header + 4, 4) != 11 {
+                continue;
+            }
+            let symbols = word(header + 24, 8) as usize;
+            let size = word(header + 32, 8) as usize;
+            let strings_header = table + word(header + 40, 4) as usize * entry_size;
+            let strings = word(strings_header + 24, 8) as usize;
+            for symbol in (symbols..symbols + size).step_by(24) {
+                let start = strings + word(symbol, 4) as usize;
+                let end = start + program[start..].iter().position(|byte| *byte == 0)?;
+                if &program[start..end] == name.as_bytes() && word(symbol + 6, 2) != 0 {
+                    return Some(word(symbol + 8, 8));
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn call(program: &[u8], name: &str, arguments: &[u64]) -> u64 {
+        let target = armv8::target().expect("the ARMv8 tables load");
+        let features = armv8::feature_set(target, "", &["+all".to_string()]);
+        let (mut machine, _) = load(target, program);
+        let address = export_address(program, name).expect("the library exports the symbol");
+        let sentinel = 0x5000_0000_0000u64;
+        machine.pc = address;
+        machine.x[30] = sentinel;
+        for (index, value) in arguments.iter().enumerate() {
+            machine.x[index] = *value;
+        }
+        machine.run_until(&features, Some(sentinel));
+        machine.x[0]
     }
 }
 
@@ -73963,6 +74019,102 @@ mod native_x86_64 {
             native.0, expected.0,
             "the native program exits as the interpreter does"
         );
+    }
+
+    mod loader {
+        use std::ffi::{c_char, c_int, c_void};
+
+        unsafe extern "C" {
+            pub(super) fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
+            pub(super) fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+            pub(super) fn dlclose(handle: *mut c_void) -> c_int;
+        }
+    }
+
+    #[test]
+    fn a_shared_library_loads_and_runs_as_the_interpreter_does() {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return;
+        }
+        let text = r#"omni 1
+module "library"
+layout lp64
+global @counter size 4 align 4 mutable export zero
+function @add(i32, i32) -> i32 export {
+block0(%left: i32, %right: i32):
+    %sum: i32 = add %left, %right
+    return %sum
+}
+function @bump(i32) -> i32 export {
+block0(%step: i32):
+    %address: ptr = global_address @counter
+    %before: i32 = load align 4 %address
+    %after: i32 = add %before, %step
+    store align 4 %after, %address
+    return %after
+}
+"#;
+        let module = Module::from_text(text).expect("the library reads");
+        module.verify().expect("the library keeps every rule");
+        let library = codegen::build_shared_library(&module)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        assert_eq!(&library[..4], b"\x7fELF");
+        assert_eq!(&library[16..18], &3u16.to_le_bytes(), "a shared object");
+        let path = std::env::temp_dir().join(format!(
+            "apk_builder_library_{}_{:?}.so",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, &library).expect("the library is written");
+        let name = std::ffi::CString::new(path.to_str().expect("a text path")).expect("a path");
+        let handle = unsafe { loader::dlopen(name.as_ptr(), 2) };
+        assert!(!handle.is_null(), "the system loader accepts the library");
+        let add = unsafe { loader::dlsym(handle, c"add".as_ptr()) };
+        let bump = unsafe { loader::dlsym(handle, c"bump".as_ptr()) };
+        assert!(!add.is_null() && !bump.is_null(), "the exports are found");
+        let add: extern "C" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(add) };
+        let bump: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(bump) };
+        assert_eq!(add(40, 2), 42);
+        assert_eq!(add(-7, 3), -4);
+        assert_eq!(bump(5), 5);
+        assert_eq!(bump(6), 11);
+        unsafe { loader::dlclose(handle) };
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_arm64_shared_library_exports_and_runs_as_the_interpreter_does() {
+        let text = r#"omni 1
+module "library"
+layout lp64
+global @counter size 4 align 4 mutable export zero
+function @add(i32, i32) -> i32 export {
+block0(%left: i32, %right: i32):
+    %sum: i32 = add %left, %right
+    return %sum
+}
+function @bump(i32) -> i32 export {
+block0(%step: i32):
+    %address: ptr = global_address @counter
+    %before: i32 = load align 4 %address
+    %after: i32 = add %before, %step
+    store align 4 %after, %address
+    return %after
+}
+"#;
+        let module = Module::from_text(text).expect("the library reads");
+        module.verify().expect("the library keeps every rule");
+        let library = crate::compilers::x86_64::armv8::native::build_shared_library(&module)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        assert_eq!(&library[..4], b"\x7fELF");
+        assert_eq!(&library[16..18], &3u16.to_le_bytes(), "a shared object");
+        assert_eq!(&library[18..20], &183u16.to_le_bytes(), "an AArch64 object");
+        let result = |name: &str, arguments: &[u64]| {
+            super::arm_emulator::call(&library, name, arguments) as u32 as i32
+        };
+        assert_eq!(result("add", &[40, 2]), 42);
+        assert_eq!(result("add", &[(-7i64) as u64, 3]), -4);
+        assert_eq!(result("bump", &[5]), 5);
     }
 
     #[test]

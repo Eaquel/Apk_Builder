@@ -9758,7 +9758,7 @@ pub mod native {
         Module::from_text(&runtime_text())
     }
 
-    pub fn build_executable(module: &Module, entry: &str) -> Result<Vec<u8>, Diagnostic> {
+    fn missing_stubs(module: &Module) -> String {
         let provided = shared::runtime_names();
         let defined: BTreeSet<&str> = module
             .functions
@@ -9783,11 +9783,25 @@ pub mod native {
                 }
             }
         }
+        stubs
+    }
+
+    pub fn build_executable(module: &Module, entry: &str) -> Result<Vec<u8>, Diagnostic> {
+        let stubs = missing_stubs(module);
         let runtime = runtime_module()?;
         let user = assemble(&emit_assembly(module)?)?;
         let support = assemble(&emit_assembly(&runtime)?)?;
         let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
         shared::link_program(user, support, start)
+    }
+
+    pub fn build_shared_library(module: &Module) -> Result<Vec<u8>, Diagnostic> {
+        let stubs = missing_stubs(module);
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let extra = assemble(&stubs)?;
+        shared::link_library(user, support, extra)
     }
 }
 

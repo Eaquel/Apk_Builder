@@ -33304,6 +33304,24 @@ pub mod codegen {
     }
 
     pub fn build_executable(module: &Module, entry: &str) -> Result<Vec<u8>, Diagnostic> {
+        let stubs = missing_stubs(module);
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
+        link_program(user, support, start)
+    }
+
+    pub fn build_shared_library(module: &Module) -> Result<Vec<u8>, Diagnostic> {
+        let stubs = missing_stubs(module);
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let extra = assemble(&stubs)?;
+        link_library(user, support, extra)
+    }
+
+    fn missing_stubs(module: &Module) -> String {
         let provided = runtime_names();
         let defined: BTreeSet<&str> = module
             .functions
@@ -33328,14 +33346,46 @@ pub mod codegen {
                 }
             }
         }
-        let runtime = runtime_module()?;
-        let user = assemble(&emit_assembly(module)?)?;
-        let support = assemble(&emit_assembly(&runtime)?)?;
-        let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
-        link_program(user, support, start)
+        stubs
     }
 
     pub(super) fn link_program(
+        user: Vec<u8>,
+        support: Vec<u8>,
+        start: Vec<u8>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        link_objects(
+            &["-o", "program", "program.o", "runtime.o", "start.o"],
+            user,
+            support,
+            start,
+        )
+    }
+
+    pub(super) fn link_library(
+        user: Vec<u8>,
+        support: Vec<u8>,
+        extra: Vec<u8>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        link_objects(
+            &[
+                "-shared",
+                "-Bsymbolic",
+                "-soname=libomni.so",
+                "-o",
+                "program",
+                "program.o",
+                "runtime.o",
+                "start.o",
+            ],
+            user,
+            support,
+            extra,
+        )
+    }
+
+    fn link_objects(
+        words: &[&str],
         user: Vec<u8>,
         support: Vec<u8>,
         start: Vec<u8>,
@@ -33345,10 +33395,7 @@ pub mod codegen {
             ("runtime.o", support),
             ("start.o", start),
         ];
-        let arguments: Vec<String> = ["-o", "program", "program.o", "runtime.o", "start.o"]
-            .iter()
-            .map(|word| word.to_string())
-            .collect();
+        let arguments: Vec<String> = words.iter().map(|word| word.to_string()).collect();
         let reader = |path: &str| {
             objects
                 .iter()
