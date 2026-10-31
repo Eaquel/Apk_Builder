@@ -500,7 +500,8 @@ pub fn elf_relocation(
         None => match (size, spec) {
             (1, "") => 8,
             (2, "") => 5,
-            (4, "") => 2,
+            (4, "") | (4, "plt") => 2,
+            (4, "none") => 0,
             (4, "got") => 26,
             (4, "tlsgd") => 104,
             (4, "tpoff") => 108,
@@ -2285,6 +2286,13 @@ impl<'s> Assembler<'s> {
             return Parse::Failure;
         };
         let end = self.lexer.token.start;
+        let first = match first {
+            Expression::Constant(_) => first,
+            other => match self.context.evaluate_absolute(&other, None) {
+                Some(value) => Expression::Constant(value),
+                None => other,
+            },
+        };
         let Expression::Constant(value) = first else {
             operands.push(parsed(Operand::Immediate(first), start, end));
             return Parse::Success;
@@ -2695,6 +2703,27 @@ impl<'s> Assembler<'s> {
                             let at = self.lexer.token.start;
                             self.lex();
                             operands.push(ParsedOperand::token("!", at));
+                        }
+                        if self.is(TokenKind::LeftBracket) {
+                            let index_start = self.lexer.token.start;
+                            self.lex();
+                            let Ok((expression, _)) = self.parse_expression() else {
+                                return true;
+                            };
+                            let Expression::Constant(index) = expression else {
+                                return self
+                                    .token_error("immediate value expected for vector index");
+                            };
+                            if !self.is(TokenKind::RightBracket) {
+                                return self.token_error("']' expected");
+                            }
+                            let index_end = self.lexer.token.end;
+                            self.lex();
+                            operands.push(parsed(
+                                Operand::VectorIndex(index as u32),
+                                index_start,
+                                index_end,
+                            ));
                         }
                         return false;
                     }
@@ -3771,6 +3800,11 @@ impl<'s> Assembler<'s> {
                 _ => false,
             },
             ClassKind::User => match operand_of(operand) {
+                Some(Operand::Immediate(expression))
+                    if held.name == "ModImm" && !matches!(expression, Expression::Constant(_)) =>
+                {
+                    true
+                }
                 Some(held_operand) => predicate(
                     self.target,
                     &self.arm32_class_predicate(class),
@@ -10161,4 +10195,28 @@ pub fn relocation_number(name: &str) -> Option<u32> {
             "BFD_RELOC_32" => Some(2),
             _ => None,
         })
+}
+
+pub fn variant_specifier(name: &str) -> Option<&'static str> {
+    Some(match name.to_ascii_lowercase().as_str() {
+        "none" => "none",
+        "plt" => "plt",
+        "got" => "got",
+        "gotoff" => "gotoff",
+        "got_prel" => "got_prel",
+        "tlsgd" => "tlsgd",
+        "tlsldm" => "tlsldm",
+        "tlsldo" => "tlsldo",
+        "gottpoff" => "gottpoff",
+        "tpoff" => "tpoff",
+        "target1" => "target1",
+        "target2" => "target2",
+        "prel31" => "prel31",
+        "sbrel" => "sbrel",
+        "tlsdesc" => "tlsdesc",
+        "tlscall" => "tlscall",
+        "tlsdescseq" => "tlsdescseq",
+        "secrel32" => "secrel32",
+        _ => return None,
+    })
 }

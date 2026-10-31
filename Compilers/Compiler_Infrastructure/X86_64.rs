@@ -11587,6 +11587,21 @@ impl<'s> Assembler<'s> {
                 } else if let Some((before, after)) = identifier.split_once('@') {
                     split = Some((before.to_string(), after.to_string()));
                 }
+                let mut variant_location: Option<SourceLocation> = None;
+                if split.is_none()
+                    && self.target.isa == Isa::Armv7
+                    && self.is(TokenKind::LeftParenthesis)
+                {
+                    self.lex();
+                    variant_location = Some(self.location());
+                    let variant = self.parse_identifier().unwrap_or_default();
+                    if !self.is(TokenKind::RightParenthesis) {
+                        self.token_error("expected ')'");
+                        return Err(());
+                    }
+                    self.lex();
+                    split = Some((identifier.clone(), variant));
+                }
                 let end = if first_kind == TokenKind::Identifier {
                     identifier_token.end_location()
                 } else {
@@ -11601,18 +11616,23 @@ impl<'s> Assembler<'s> {
                 let mut specifier: Option<String> = None;
                 if let Some((before, after)) = split {
                     if !after.is_empty() {
-                        match specifier_for_name(&after) {
+                        let found = if variant_location.is_some() {
+                            armv7::variant_specifier(&after).map(str::to_string)
+                        } else {
+                            specifier_for_name(&after).map(str::to_string)
+                        };
+                        match found {
                             Some(found) => {
                                 symbol_name = before;
-                                specifier = Some(found.to_string());
+                                specifier = Some(found);
                             }
                             None => {
                                 if self.context.triple.format != ObjectFormat::Coff {
                                     let offset = identifier.find('@').map(|at| at + 1).unwrap_or(0);
-                                    let location = SourceLocation {
+                                    let location = variant_location.unwrap_or(SourceLocation {
                                         buffer: identifier_token.buffer,
                                         position: identifier_token.start + offset,
-                                    };
+                                    });
                                     self.error(location, &format!("invalid variant '{after}'"));
                                     return Err(());
                                 }
