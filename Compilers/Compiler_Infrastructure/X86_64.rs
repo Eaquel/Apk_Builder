@@ -445,6 +445,7 @@ pub struct AssemblyOperandClass {
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum Isa {
     X86,
+    Armv7,
     Armv8,
 }
 
@@ -1139,7 +1140,7 @@ impl Target {
     fn mode_validity_for(&self, predicates: &[String]) -> [bool; 3] {
         match self.isa {
             Isa::X86 => mode_validity(&self.records, predicates),
-            Isa::Armv8 => [true; 3],
+            Isa::Armv7 | Isa::Armv8 => [true; 3],
         }
     }
 
@@ -1402,6 +1403,9 @@ impl Target {
             .and_then(|rest| rest.parse::<u32>().ok())
     }
 }
+
+#[path = "Armv7.rs"]
+pub mod armv7;
 
 #[path = "Armv8.rs"]
 pub mod armv8;
@@ -7037,6 +7041,7 @@ fn tokenize_assembly(isa: Isa, text: &str) -> Vec<(String, bool)> {
     let characters: Vec<char> = text.chars().collect();
     let (tokenizing, breaking): (&[char], &[char]) = match isa {
         Isa::X86 => (&['[', ']', '*', '!'], &[]),
+        Isa::Armv7 => (&['[', ']', '*', '!', '/'], &[]),
         Isa::Armv8 => (&['[', ']', '*', '!', '/'], &['.']),
     };
     let separators = [' ', '\t', ','];
@@ -7418,6 +7423,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
     };
     let variants: &[(usize, &str, &str)] = match target.isa {
         Isa::X86 => &[(0usize, "att", "%"), (1usize, "intel", "")],
+        Isa::Armv7 => &[(0usize, "generic", "")],
         Isa::Armv8 => &[(0usize, "generic", ""), (1usize, "apple-neon", "")],
     };
     let mut matchables: Vec<Matchable> = Vec::new();
@@ -7599,6 +7605,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
     matcher.matchables = sorted;
     let variant_names: &[&str] = match target.isa {
         Isa::X86 => &["att", "intel"],
+        Isa::Armv7 => &["generic"],
         Isa::Armv8 => &["generic", "apple-neon"],
     };
     for &variant_name in variant_names {
@@ -10935,6 +10942,7 @@ impl<'s> Assembler<'s> {
                 let target = target()?;
                 (target, matcher(target))
             }
+            Isa::Armv7 => (armv7::target()?, armv7::matcher()),
             Isa::Armv8 => (armv8::target()?, armv8::matcher()),
         };
         let mode = triple.mode;
@@ -20120,6 +20128,7 @@ pub fn assemble_source(
     let triple = TargetTriple::parse(&options.triple);
     let target = match triple.isa {
         Isa::X86 => target()?,
+        Isa::Armv7 => armv7::target()?,
         Isa::Armv8 => armv8::target()?,
     };
     let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);

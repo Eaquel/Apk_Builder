@@ -73205,6 +73205,7 @@ block3(%unexpected: i64):
 mod armv8_assembly {
     use crate::compilers::table_gen::TableValue;
     use crate::compilers::x86_64::armv8;
+    use crate::compilers::x86_64::armv7;
 
     fn value_text(value: &TableValue) -> String {
         match value {
@@ -73408,6 +73409,55 @@ mod armv8_assembly {
             }
         }
         eprintln!("records of {class}: {count}");
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_table_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        eprintln!(
+            "registers {} classes {} instructions {} aliases {} classes-asm {}",
+            target.registers.len(),
+            target.register_classes.len(),
+            target.instructions.len(),
+            target.aliases.len(),
+            target.assembly_operand_classes.len()
+        );
+        let matcher = armv7::matcher();
+        eprintln!(
+            "matchables {} classes {} maximum {}",
+            matcher.matchables.len(),
+            matcher.classes.len(),
+            matcher.maximum_operands
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_methods_debug() {
+        let table = armv7::table().expect("the table reads");
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for record in table.records.iter() {
+            for key in [
+                "EncoderMethod",
+                "DecoderMethod",
+                "PrintMethod",
+                "PredicateMethod",
+                "RenderMethod",
+                "ParserMethod",
+                "PostEncoderMethod",
+            ] {
+                if let Some(value) = record.field(key) {
+                    let text = value_text(value);
+                    if text != "\"\"" {
+                        *counts.entry(format!("{key}={text}")).or_default() += 1;
+                    }
+                }
+            }
+        }
+        for (name, count) in counts {
+            eprintln!("M {name} {count}");
+        }
     }
 
     fn assemble_object(source: &str) -> Result<Vec<u8>, String> {
