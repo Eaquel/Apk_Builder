@@ -7345,6 +7345,16 @@ impl<'t> MatcherBuilder<'t> {
                 value_name = format!("{value_name},{register_name}");
             }
         }
+        let (diagnostic, diagnostic_string) = named
+            .first()
+            .and_then(|class| self.target.records.get(&class.record))
+            .map(|record| {
+                (
+                    table_text(record, "DiagnosticType"),
+                    table_text(record, "DiagnosticString"),
+                )
+            })
+            .unwrap_or_default();
         let made = self.classes.len();
         self.classes.push(MatchClass {
             kind: ClassKind::Register,
@@ -7355,8 +7365,8 @@ impl<'t> MatcherBuilder<'t> {
             render: "addRegOperands".to_string(),
             predicate: String::new(),
             parser: String::new(),
-            diagnostic: String::new(),
-            diagnostic_string: String::new(),
+            diagnostic,
+            diagnostic_string,
             optional: false,
             default_method: String::new(),
             order: 0,
@@ -10839,6 +10849,7 @@ pub trait Streamer {
     fn emit_arm_subsection(&mut self, _name: &str, _optional: u8, _kind: u8) {}
     fn emit_arm_directive(&mut self, _text: &str) {}
     fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
+    fn set_arm_thumb(&mut self, _thumb: bool) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
     fn emit_arm32_attributes(&mut self, _contents: &[u8]) {}
     fn emits_object(&self) -> bool {
@@ -19024,7 +19035,11 @@ impl TextStreamer {
         if context.triple.is_64_bit() && flags & ELF_FLAG_X86_64_LARGE != 0 {
             out.push('l');
         }
-        out.push_str("\",@");
+        out.push_str(if context.triple.isa == Isa::Armv7 {
+            "\",%"
+        } else {
+            "\",@"
+        });
         let type_name = match held.section_type {
             ELF_SECTION_INITIALIZER_ARRAY => "init_array".to_string(),
             ELF_SECTION_FINALIZER_ARRAY => "fini_array".to_string(),
@@ -19388,7 +19403,15 @@ impl Streamer for TextStreamer {
             if context.triple.format != ObjectFormat::Elf {
                 return false;
             }
-            let text = format!("\t.type\t{},@{type_name}", self.symbol(context, symbol));
+            let prefix = if context.triple.isa == Isa::Armv7 {
+                '%'
+            } else {
+                '@'
+            };
+            let text = format!(
+                "\t.type\t{},{prefix}{type_name}",
+                self.symbol(context, symbol)
+            );
             self.line(&text);
             return true;
         }
@@ -25451,6 +25474,7 @@ pub mod object {
         pub has_instructions: bool,
         pub allow_auto_padding: bool,
         pub mode: Mode,
+        pub thumb: bool,
     }
 
     impl Fragment {
@@ -25468,6 +25492,7 @@ pub mod object {
                 has_instructions: false,
                 allow_auto_padding: false,
                 mode,
+                thumb: false,
             }
         }
 
@@ -25881,6 +25906,7 @@ pub mod object {
         arm32_thumb: bool,
         arm32_mapping_counter: u32,
         thumb_two_features: bool,
+        arm32_nop: bool,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
         has_layout: bool,
@@ -26071,8 +26097,11 @@ pub mod object {
                 arm_attributes: armv8::AttributeSet::default(),
                 arm32_attributes: Vec::new(),
                 arm32_mapping: BTreeMap::new(),
-                arm32_thumb: false,
+                arm32_thumb: triple.isa == Isa::Armv7 && triple.is_thumb(),
                 arm32_mapping_counter: 0,
+                arm32_nop: triple.isa == Isa::Armv7
+                    && armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                        .contains("HasV6T2Ops"),
                 thumb_two_features: triple.isa == Isa::Armv7
                     && armv7::initial_features(target, &triple, &options.cpu, &options.features)
                         .contains("FeatureThumb2"),
@@ -28704,7 +28733,42 @@ pub mod object {
             }
         }
 
-        fn write_nops(&self, out: &mut Vec<u8>, count: u64, offset: u64, maximum: u64, mode: Mode) {
+        fn write_nops(
+            &self,
+            out: &mut Vec<u8>,
+            count: u64,
+            offset: u64,
+            maximum: u64,
+            mode: Mode,
+            thumb: bool,
+        ) {
+            if self.target.isa == Isa::Armv7 {
+                if thumb {
+                    let encoding: u16 = if self.arm32_nop { 0xbf00 } else { 0x46c0 };
+                    for _ in 0..count / 2 {
+                        out.extend_from_slice(&encoding.to_le_bytes());
+                    }
+                    if count & 1 == 1 {
+                        out.push(0);
+                    }
+                } else {
+                    let encoding: u32 = if self.arm32_nop {
+                        0xe320f000
+                    } else {
+                        0xe1a00000
+                    };
+                    for _ in 0..count / 4 {
+                        out.extend_from_slice(&encoding.to_le_bytes());
+                    }
+                    match count % 4 {
+                        1 => out.push(0),
+                        2 => out.extend_from_slice(&[0, 0]),
+                        3 => out.extend_from_slice(&[0, 0, 0xa0]),
+                        _ => {}
+                    }
+                }
+                return;
+            }
             if self.target.isa == Isa::Armv8 {
                 out.extend(std::iter::repeat_n(0u8, (count % 4) as usize));
                 for _ in 0..count / 4 {
@@ -28758,6 +28822,7 @@ pub mod object {
                             held.offset + held.fixed.len() as u64,
                             maximum,
                             held.mode,
+                            held.thumb,
                         );
                     } else {
                         for _ in 0..count {
@@ -28807,10 +28872,17 @@ pub mod object {
                     if control == 0 {
                         control = maximum;
                     }
-                    self.write_nops(out, *count as u64, held.offset, control as u64, held.mode);
+                    self.write_nops(
+                        out,
+                        *count as u64,
+                        held.offset,
+                        control as u64,
+                        held.mode,
+                        held.thumb,
+                    );
                 }
                 Tail::BoundaryAlign { .. } => {
-                    self.write_nops(out, size, held.offset, size, held.mode);
+                    self.write_nops(out, size, held.offset, size, held.mode, held.thumb);
                 }
                 Tail::Org { value, .. } => {
                     out.extend(std::iter::repeat_n(*value, size as usize));
@@ -30383,6 +30455,7 @@ pub mod object {
 
         fn set_arm_features(&mut self, features: &BTreeSet<String>) {
             self.thumb_two_features = features.contains("FeatureThumb2");
+            self.arm32_nop = features.contains("HasV6T2Ops");
         }
 
         fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
@@ -30395,6 +30468,10 @@ pub mod object {
 
         fn emits_object(&self) -> bool {
             true
+        }
+
+        fn set_arm_thumb(&mut self, thumb: bool) {
+            self.arm32_thumb = thumb;
         }
 
         fn emit_arm32_inst(
@@ -30909,6 +30986,7 @@ pub mod object {
                 *nops = true;
             }
             self.fragments[fragment].mode = mode;
+            self.fragments[fragment].thumb = self.arm32_thumb;
         }
 
         fn emit_value_to_offset(

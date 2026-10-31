@@ -75851,8 +75851,13 @@ mod armv8_assembly {
         for class in &matcher.classes {
             if class.name.contains(&filter) {
                 eprintln!(
-                    "{}|{}|{}|{}",
-                    class.name, class.predicate, class.render, class.parser
+                    "{}|{}|{}|{}|diag={}|str={}",
+                    class.name,
+                    class.predicate,
+                    class.render,
+                    class.parser,
+                    class.diagnostic,
+                    class.diagnostic_string
                 );
             }
         }

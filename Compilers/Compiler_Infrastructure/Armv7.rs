@@ -3966,6 +3966,7 @@ impl<'s> Assembler<'s> {
 
     fn arm32_switch_mode(&mut self) {
         let thumb = self.arm_thumb;
+        self.streamer.set_arm_thumb(thumb);
         if thumb {
             self.arm32_set_features(&["thumb-mode"], &[]);
         } else {
@@ -9134,7 +9135,18 @@ impl<'a> Assembler<'a> {
                     .emit_arm_directive(&format!("\t.cpu\t{}", text.to_ascii_lowercase()));
             } else {
                 let shown = if tag == 65 {
-                    text.escape_default().to_string()
+                    let mut escaped = String::new();
+                    for character in text.chars() {
+                        match character {
+                            '\\' => escaped.push_str("\\\\"),
+                            '"' => escaped.push_str("\\\""),
+                            '\n' => escaped.push_str("\\n"),
+                            '\t' => escaped.push_str("\\t"),
+                            ' '..='~' => escaped.push(character),
+                            other => escaped.push_str(&format!("\\{:03o}", other as u32 & 0xff)),
+                        }
+                    }
+                    escaped
                 } else {
                     text.clone()
                 };
