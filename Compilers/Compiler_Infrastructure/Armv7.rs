@@ -690,7 +690,7 @@ enum Parse {
 
 impl<'s> Assembler<'s> {
     fn thumb_state(&self) -> bool {
-        self.context.triple.is_thumb()
+        self.arm_thumb
     }
 
     fn arm32_push_token(&self, operands: &mut Vec<ParsedOperand>, text: &str, start: usize) {
@@ -2071,6 +2071,162 @@ impl<'s> Assembler<'s> {
             return Outcome::MissingFeature(missing.unwrap_or_default());
         }
         Outcome::InvalidOperand(error_index.unwrap_or(0))
+    }
+
+    fn arm32_feature(&self, name: &str) -> Option<String> {
+        self.target
+            .records
+            .values()
+            .find(|record| record.is_a("SubtargetFeature") && table_text(record, "Name") == name)
+            .map(|record| record.name.clone())
+    }
+
+    fn arm32_set_features(&mut self, enable: &[&str], disable: &[&str]) {
+        let target = self.target;
+        for name in disable {
+            if let Some(held) = self.arm32_feature(name) {
+                armv8::clear_feature(target, &mut self.arm_features, &held);
+            }
+        }
+        for name in enable {
+            if let Some(held) = self.arm32_feature(name) {
+                armv8::set_feature(target, &mut self.arm_features, &held);
+            }
+        }
+        self.streamer.set_arm_features(&self.arm_features);
+    }
+
+    fn arm32_text_directive(&mut self, name: &str) -> Option<bool> {
+        let text = self.parse_string_to_end_of_statement();
+        let text = text.trim();
+        let line = if text.is_empty() {
+            format!("\t{name}")
+        } else {
+            format!("\t{name}\t{text}")
+        };
+        self.streamer.emit_arm_directive(&line);
+        Some(false)
+    }
+
+    pub(super) fn arm32_directive(
+        &mut self,
+        identifier: &str,
+        location: SourceLocation,
+    ) -> Option<bool> {
+        match identifier {
+            ".syntax" => {
+                let at = self.location();
+                let mode = if self.is(TokenKind::Identifier) {
+                    let text = self.lexer.token.text.clone();
+                    self.lex();
+                    text
+                } else {
+                    String::new()
+                };
+                if mode != "unified" && mode != "divided" {
+                    return Some(self.error(at, "unrecognized syntax mode in .syntax directive"));
+                }
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                self.streamer
+                    .emit_arm_directive(&format!("\t.syntax\t{mode}"));
+                Some(false)
+            }
+            ".arm" | ".thumb" => {
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                self.arm_thumb = identifier == ".thumb";
+                self.streamer.emit_arm_directive(if self.arm_thumb {
+                    "\t.code\t16"
+                } else {
+                    "\t.code\t32"
+                });
+                Some(false)
+            }
+            ".code" => {
+                let at = self.location();
+                let Ok((expression, _)) = self.parse_expression() else {
+                    return Some(true);
+                };
+                let value = match expression {
+                    Expression::Constant(16) => true,
+                    Expression::Constant(32) => false,
+                    _ => {
+                        return Some(
+                            self.error(at, "invalid operand to .code directive, expected 16 or 32"),
+                        )
+                    }
+                };
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                self.arm_thumb = value;
+                self.streamer
+                    .emit_arm_directive(if value { "\t.code\t16" } else { "\t.code\t32" });
+                Some(false)
+            }
+            ".thumb_func" | ".thumb_set" | ".fnstart" | ".fnend" | ".cantunwind"
+            | ".handlerdata" | ".personality" | ".personalityindex" | ".save" | ".vsave"
+            | ".setfp" | ".pad" | ".movsp" | ".unwind_raw" | ".eabi_attribute" | ".object_arch"
+            | ".tlsdescseq" | ".even" => self.arm32_text_directive(identifier),
+            ".hword" => Some(self.parse_directive_value(2)),
+            ".word" => Some(self.parse_directive_value(4)),
+            ".align" => Some(self.parse_directive_align(true, 1)),
+            ".ltorg" | ".pool" => {
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                Some(false)
+            }
+            ".fpu" => {
+                let at = self.location();
+                let name = self.parse_string_to_end_of_statement().trim().to_string();
+                let (enable, disable): (&[&str], &[&str]) = match name.as_str() {
+                    "none" | "softvfp" => (
+                        &[],
+                        &["vfp2", "vfp3", "vfp4", "fp-armv8", "neon", "d32", "crypto"],
+                    ),
+                    "vfp" | "vfpv2" => (&["vfp2"], &["vfp3", "neon"]),
+                    "vfpv3" | "vfpv3-fp16" => (&["vfp3", "d32"], &[]),
+                    "vfpv3-d16" | "vfpv3-d16-fp16" => (&["vfp3"], &["d32"]),
+                    "vfpv4" => (&["vfp4", "d32"], &[]),
+                    "vfpv4-d16" => (&["vfp4"], &["d32"]),
+                    "fpv4-sp-d16" | "fpv5-sp-d16" => (&["vfp4"], &["d32", "fp64"]),
+                    "fpv5-d16" => (&["fp-armv8"], &["d32"]),
+                    "fp-armv8" => (&["fp-armv8", "d32"], &[]),
+                    "neon" | "neon-vfpv3" | "neon-fp16" => (&["neon", "vfp3", "d32"], &[]),
+                    "neon-vfpv4" => (&["neon", "vfp4", "d32"], &[]),
+                    "neon-fp-armv8" => (&["neon", "fp-armv8", "d32"], &[]),
+                    "crypto-neon-fp-armv8" => (&["neon", "fp-armv8", "d32", "crypto"], &[]),
+                    _ => return Some(self.error(at, "Unknown FPU name")),
+                };
+                self.arm32_set_features(enable, disable);
+                self.streamer.emit_arm_directive(&format!("\t.fpu\t{name}"));
+                Some(false)
+            }
+            ".cpu" => {
+                let at = self.location();
+                let name = self.parse_string_to_end_of_statement().trim().to_string();
+                let target = self.target;
+                let known = target.records.values().any(|record| {
+                    record.is_a("ProcessorModel") && table_text(record, "Name") == name
+                });
+                if !known {
+                    return Some(self.error(at, "unknown CPU name"));
+                }
+                self.arm_features = armv8::feature_set(target, &name, &[]);
+                self.streamer.set_arm_features(&self.arm_features);
+                self.streamer.emit_arm_directive(&format!("\t.cpu\t{name}"));
+                Some(false)
+            }
+            ".arch" | ".arch_extension" => self.arm32_text_directive(identifier),
+            _ => {
+                let _ = location;
+                None
+            }
+        }
     }
 
     fn arm32_record_index(&self, record: &str) -> Option<usize> {

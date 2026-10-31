@@ -6990,7 +6990,7 @@ fn extension_features(_target: &Target, name: &str) -> Option<Vec<String>> {
         .map(|(_, features)| features.iter().map(|feature| feature.to_string()).collect())
 }
 
-fn set_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
+pub(super) fn set_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
     let mut pending = vec![name.to_string()];
     while let Some(held) = pending.pop() {
         if features.insert(held.clone()) {
@@ -7001,7 +7001,7 @@ fn set_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
     }
 }
 
-fn clear_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
+pub(super) fn clear_feature(target: &Target, features: &mut BTreeSet<String>, name: &str) {
     let mut removed = BTreeSet::new();
     removed.insert(name.to_string());
     loop {

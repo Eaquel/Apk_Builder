@@ -71792,6 +71792,8 @@ mod x86_assembly {
                     "x86-64" => Some("x86_64"),
                     "aarch64" => Some("aarch64"),
                     "arm64" => Some("arm64"),
+                    "arm" => Some("arm"),
+                    "thumb" => Some("thumb"),
                     _ => None,
                 };
                 match (replaced, triple.split_once('-')) {
@@ -71818,7 +71820,9 @@ mod x86_assembly {
             || triple == "aarch64"
             || triple == "arm64"
             || triple.starts_with("aarch64-")
-            || triple.starts_with("arm64-"))
+            || triple.starts_with("arm64-")
+            || (triple.starts_with("arm") && !triple.starts_with("armeb"))
+            || (triple.starts_with("thumb") && !triple.starts_with("thumbeb")))
         {
             unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
         }
@@ -72125,6 +72129,7 @@ mod x86_assembly {
             "non-root-user",
             "x86-registered-target",
             "aarch64-registered-target",
+            "arm-registered-target",
             "asserts",
         ];
         let suite = LitSuite {
@@ -72188,6 +72193,12 @@ mod x86_assembly {
     #[ignore]
     fn suite_mc_aarch64() {
         mc_suite("mc-aarch64", "MC/AArch64");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_arm() {
+        mc_suite("mc-arm", "MC/ARM");
     }
 
     #[test]
@@ -74884,6 +74895,19 @@ mod armv8_assembly {
 
     #[test]
     #[ignore]
+    fn armv7_record_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        let name = std::env::var("RECORD").unwrap_or_else(|_| "SUBri".to_string());
+        let index = target.instruction_by_record[&name];
+        let held = &target.instructions[index];
+        eprintln!(
+            "R {} two={:?} asm={:?} groups={:?}",
+            held.record, held.two_operand_alias_constraint, held.assembly, held.groups
+        );
+    }
+
+    #[test]
+    #[ignore]
     fn armv7_classes_debug() {
         let target = armv7::target().expect("the ARMv7 target loads");
         for class in &target.assembly_operand_classes {
@@ -75258,6 +75282,27 @@ mod armv8_assembly {
             failures.len(),
             cases.len()
         );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_debug_line() {
+        use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+        let source = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let triple =
+            std::env::var("APK_BUILDER_TRIPLE").unwrap_or_else(|_| "armv7a-linux-gnueabihf".into());
+        let mut options = AssemblerOptions::new(&triple);
+        options.output = OutputKind::Assembly;
+        options.show_encoding = true;
+        if let Ok(cpu) = std::env::var("APK_BUILDER_CPU") {
+            options.cpu = cpu;
+        }
+        let result = assemble_source(&options, source.replace("\\n", "\n").as_bytes(), None)
+            .expect("the source assembles");
+        for message in &result.messages {
+            eprintln!("{:?}: {}", message.kind, message.text);
+        }
+        print!("{}", String::from_utf8_lossy(&result.output));
     }
 
     #[test]

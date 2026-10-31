@@ -7462,24 +7462,42 @@ pub fn build_matcher(target: &Target) -> Matcher {
             if !valid || flat.contains('\n') {
                 continue;
             }
-            prepared.push((
-                Matchable {
-                    variant,
-                    mnemonic,
-                    operands: Vec::new(),
-                    result: opcode,
-                    record: instruction.record.clone(),
-                    alias: None,
-                    modes: instruction.modes,
-                    required_count: instruction
-                        .predicates
-                        .iter()
-                        .filter(|p| is_mode_predicate(p))
-                        .count(),
-                    conversions: Vec::new(),
-                },
-                tokens,
-            ));
+            let two_operand = if target.isa == Isa::Armv7 {
+                instruction
+                    .two_operand_alias_constraint
+                    .split_once('=')
+                    .map(|(left, _)| left.trim().trim_start_matches('$').to_string())
+            } else {
+                None
+            };
+            let template = Matchable {
+                variant,
+                mnemonic,
+                operands: Vec::new(),
+                result: opcode,
+                record: instruction.record.clone(),
+                alias: None,
+                modes: instruction.modes,
+                required_count: instruction
+                    .predicates
+                    .iter()
+                    .filter(|p| is_mode_predicate(p))
+                    .count(),
+                conversions: Vec::new(),
+            };
+            if let Some(omitted) = two_operand {
+                let reduced: Vec<(String, bool)> = tokens
+                    .iter()
+                    .filter(|(token, _)| {
+                        token != &format!("${omitted}") && token != &format!("${{{omitted}}}")
+                    })
+                    .cloned()
+                    .collect();
+                if reduced.len() + 1 == tokens.len() {
+                    prepared.push((template.clone(), reduced));
+                }
+            }
+            prepared.push((template, tokens));
         }
         for (alias_index, alias) in target.aliases.iter().enumerate() {
             if !alias.variant_name.is_empty() && alias.variant_name != variant_name {
@@ -7782,6 +7800,19 @@ fn build_instruction_conversions(target: &Target, matchable: &mut Matchable) -> 
             find_named(matchable, &group.name, None)
         };
         let Some(source) = source else {
+            if let Some((left, right)) = instruction.two_operand_alias_constraint.split_once('=') {
+                if left.trim().trim_start_matches('$') == group.name {
+                    if let Some(partner) =
+                        find_named(matchable, right.trim().trim_start_matches('$'), None)
+                    {
+                        conversions.push(Conversion::Render {
+                            operand: partner,
+                            count: group.count,
+                        });
+                        continue;
+                    }
+                }
+            }
             for _ in 0..group.count {
                 conversions.push(Conversion::Immediate(0));
             }
@@ -10773,6 +10804,7 @@ pub trait Streamer {
         context.symbols[symbol].other |= 0x80;
     }
     fn emit_arm_subsection(&mut self, _name: &str, _optional: u8, _kind: u8) {}
+    fn emit_arm_directive(&mut self, _text: &str) {}
     fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
@@ -10819,6 +10851,7 @@ pub struct Assembler<'s> {
     pub arm_suffixes: BTreeSet<usize>,
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pub arm_keep_symbols: bool,
+    pub arm_thumb: bool,
     pub arm_attributes: armv8::AttributeSet,
     pub arm_pools: Vec<(usize, Vec<armv8::PoolEntry>)>,
     pending_errors: Vec<AssemblyMessage>,
@@ -10969,6 +11002,7 @@ impl<'s> Assembler<'s> {
         lexer.hash_token = triple.isa != Isa::X86;
         lexer.at_comment = triple.isa == Isa::Armv7;
         let unnamed_temporaries = triple.isa == Isa::Armv8 && options.output == OutputKind::Object;
+        let starts_thumb = triple.is_thumb();
         Ok(Assembler {
             target,
             matcher,
@@ -10987,6 +11021,7 @@ impl<'s> Assembler<'s> {
             arm_suffixes: BTreeSet::new(),
             arm_aliases: BTreeMap::new(),
             arm_keep_symbols: false,
+            arm_thumb: starts_thumb,
             arm_attributes: armv8::AttributeSet::default(),
             arm_pools: Vec::new(),
             pending_errors: Vec::new(),
@@ -14509,6 +14544,9 @@ impl<'s> Assembler<'s> {
     ) -> Option<bool> {
         if self.target.isa == Isa::Armv8 {
             return self.arm_directive(&identifier.to_ascii_lowercase(), location);
+        }
+        if self.target.isa == Isa::Armv7 {
+            return self.arm32_directive(&identifier.to_ascii_lowercase(), location);
         }
         if identifier.starts_with(".arch") {
             self.parse_string_to_end_of_statement();
@@ -19772,6 +19810,10 @@ impl Streamer for TextStreamer {
 
     fn set_arm_features(&mut self, features: &BTreeSet<String>) {
         self.arm_features = features.clone();
+    }
+
+    fn emit_arm_directive(&mut self, text: &str) {
+        self.line(text);
     }
 
     fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
