@@ -10841,6 +10841,9 @@ pub trait Streamer {
     fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
     fn emit_arm32_attributes(&mut self, _contents: &[u8]) {}
+    fn emits_object(&self) -> bool {
+        false
+    }
     fn emit_arm32_inst(
         &mut self,
         context: &mut AssemblyContext,
@@ -10902,6 +10905,7 @@ pub struct Assembler<'s> {
     pub arm_writeback: bool,
     pub arm_attributes: armv8::AttributeSet,
     pub arm_attribute_state: armv7::AttributeState,
+    pub arm_unwind: armv7::UnwindState,
     pub arm_pools: Vec<(usize, Vec<armv8::PoolEntry>)>,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
@@ -11078,6 +11082,7 @@ impl<'s> Assembler<'s> {
             arm_writeback: false,
             arm_attributes: armv8::AttributeSet::default(),
             arm_attribute_state: armv7::AttributeState::default(),
+            arm_unwind: armv7::UnwindState::default(),
             arm_pools: Vec::new(),
             pending_errors: Vec::new(),
             condition: ConditionState {
@@ -11817,7 +11822,7 @@ impl<'s> Assembler<'s> {
             }
         }
         if !self.context.had_error {
-            if self.target.isa == Isa::Armv8 {
+            if self.target.isa == Isa::Armv8 || self.target.isa == Isa::Armv7 {
                 self.arm_pool_finish();
             }
             if self.target.isa == Isa::Armv7 {
@@ -25854,6 +25859,7 @@ pub mod object {
         arm32_attributes: Vec<u8>,
         arm32_mapping: BTreeMap<usize, (u8, Option<(usize, u64)>)>,
         arm32_thumb: bool,
+        arm32_mapping_counter: u32,
         thumb_two_features: bool,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
@@ -26046,6 +26052,7 @@ pub mod object {
                 arm32_attributes: Vec::new(),
                 arm32_mapping: BTreeMap::new(),
                 arm32_thumb: false,
+                arm32_mapping_counter: 0,
                 thumb_two_features: triple.isa == Isa::Armv7
                     && armv7::initial_features(target, &triple, &options.cpu, &options.features)
                         .contains("FeatureThumb2"),
@@ -26506,8 +26513,9 @@ pub mod object {
         }
 
         fn arm32_mapping_symbol(&mut self, context: &mut AssemblyContext, name: &str) -> usize {
-            let symbol = context.symbols.len();
-            context.symbols.push(Symbol::new(name, false));
+            let number = self.arm32_mapping_counter;
+            self.arm32_mapping_counter += 1;
+            let symbol = context.renamable_symbol(&format!("{name}.{number}"), false, false);
             self.emit_label(context, symbol, None);
             symbol
         }
@@ -30365,6 +30373,10 @@ pub mod object {
             self.arm32_attributes = contents.to_vec();
         }
 
+        fn emits_object(&self) -> bool {
+            true
+        }
+
         fn emit_arm32_inst(
             &mut self,
             context: &mut AssemblyContext,
@@ -31266,6 +31278,8 @@ pub mod object {
         ) {
             let relocation_type = if context.triple.isa == Isa::Armv8 {
                 armv8::relocation_number(name)
+            } else if context.triple.isa == Isa::Armv7 {
+                armv7::relocation_number(name)
             } else {
                 relocation_number(name, context.triple.is_64_bit())
             };

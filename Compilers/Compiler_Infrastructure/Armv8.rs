@@ -10149,7 +10149,12 @@ impl<'s> Assembler<'s> {
         false
     }
 
-    fn arm_pool_add(&mut self, value: Expression, size: u32, location: SourceLocation) -> usize {
+    pub(super) fn arm_pool_add(
+        &mut self,
+        value: Expression,
+        size: u32,
+        location: SourceLocation,
+    ) -> usize {
         let section = self
             .context
             .current_section()
@@ -10186,7 +10191,7 @@ impl<'s> Assembler<'s> {
         label
     }
 
-    fn arm_pool_emit(&mut self, section: usize) {
+    pub(super) fn arm_pool_emit(&mut self, section: usize) {
         let Some(slot) = self.arm_pools.iter().position(|(held, _)| *held == section) else {
             return;
         };

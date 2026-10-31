@@ -75427,6 +75427,189 @@ mod armv8_assembly {
         );
     }
 
+    fn armv7_object_summary(object: &[u8]) -> Option<String> {
+        use crate::compilers::elf::ElfFile;
+        let parsed = ElfFile::parse(object).ok()?;
+        let mut out = String::new();
+        let table = parsed.symbol_table()?;
+        let symbols = parsed.symbols(table).ok()?;
+        let section_label = |index: u32| -> String {
+            parsed
+                .sections
+                .get(index as usize)
+                .map(|section| section.name.clone())
+                .unwrap_or_else(|| format!("#{index}"))
+        };
+        for (index, section) in parsed.sections.iter().enumerate() {
+            if matches!(
+                section.name.as_str(),
+                ".symtab" | ".strtab" | ".shstrtab" | ""
+            ) {
+                continue;
+            }
+            if section.name.starts_with(".rel") {
+                let mut lines: Vec<String> = parsed
+                    .relocations(index)
+                    .ok()?
+                    .iter()
+                    .map(|reloc| {
+                        let name = symbols
+                            .get(reloc.symbol as usize)
+                            .map(|held| {
+                                if held.name.is_empty() {
+                                    section_label(held.section)
+                                } else {
+                                    held.name.clone()
+                                }
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "  reloc {:#x} {} {} {}",
+                            reloc.offset, reloc.kind, name, reloc.addend
+                        )
+                    })
+                    .collect();
+                lines.sort();
+                out.push_str(&format!(
+                    "{} link={} info={}\n",
+                    section.name,
+                    section_label(section.link),
+                    section_label(section.info)
+                ));
+                out.push_str(&lines.join("\n"));
+                out.push('\n');
+                continue;
+            }
+            out.push_str(&format!(
+                "{} type={:#x} flags={:#x} link={} align={} data={:02x?}\n",
+                section.name,
+                section.kind,
+                section.flags,
+                section_label(section.link),
+                section.alignment,
+                section.data
+            ));
+        }
+        let mut rows: Vec<String> = symbols
+            .iter()
+            .map(|held| {
+                format!(
+                    "sym {} value={:#x} size={} bind={} type={} other={} in={}",
+                    held.name,
+                    held.value,
+                    held.size,
+                    held.binding,
+                    held.kind,
+                    held.other,
+                    section_label(held.section)
+                )
+            })
+            .collect();
+        rows.sort();
+        out.push_str(&rows.join("\n"));
+        Some(out)
+    }
+
+    fn armv7_summary(source: &str, triple: &str, ours: bool) -> Option<String> {
+        use std::io::Write;
+        let object = if ours {
+            use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+            let mut options = AssemblerOptions::new(triple);
+            options.output = OutputKind::Object;
+            let result = assemble_source(&options, format!("{source}\n").as_bytes(), None).ok()?;
+            if result.failed {
+                let errors: Vec<String> = result
+                    .messages
+                    .iter()
+                    .map(|message| message.text.clone())
+                    .collect();
+                return Some(format!("ERRORS {errors:?}"));
+            }
+            result.output
+        } else {
+            let folder = std::env::temp_dir().join(format!(
+                "apk_builder_armv7_sum_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&folder).ok()?;
+            let path = folder.join("expected.o");
+            let mut child = std::process::Command::new("llvm-mc-18")
+                .args([&format!("-triple={triple}"), "-filetype=obj", "-o"])
+                .arg(&path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            child
+                .stdin
+                .take()?
+                .write_all(format!("{source}\n").as_bytes())
+                .ok()?;
+            if !child.wait().ok()?.success() {
+                let _ = std::fs::remove_dir_all(&folder);
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok();
+            let _ = std::fs::remove_dir_all(&folder);
+            bytes?
+        };
+        armv7_object_summary(&object)
+    }
+
+    #[test]
+    fn the_armv7_assembler_writes_the_same_objects_as_llvm_mc() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[&str] = &[
+            ".fnstart\n.cantunwind\n.fnend",
+            ".fnstart\n.save {r4, r5, lr}\n.pad #8\nnop\n.fnend",
+            ".fnstart\n.save {r4-r11, lr}\n.setfp r11, sp, #8\nnop\n.fnend",
+            ".fnstart\n.vsave {d8, d9}\n.save {r7, lr}\n.movsp r7\nnop\n.fnend",
+            ".fnstart\n.personality __gxx_personality_v0\n.handlerdata\n.long 0\n.fnend",
+            ".fnstart\n.personalityindex 1\n.save {r4}\nnop\n.fnend",
+            ".fnstart\n.personalityindex 2\n.pad #4\nnop\n.fnend",
+            ".fnstart\n.unwind_raw 4, 0xb1, 0x01\nnop\n.fnend",
+            ".section .text.f,\"ax\"\n.fnstart\n.save {r4, lr}\nnop\n.fnend",
+            ".section .text.g,\"axG\",%progbits,grp,comdat\n.fnstart\n.cantunwind\nnop\n.fnend",
+            ".thumb\n.thumb_func\nf:\nnop\n.word f",
+            ".thumb\nf:\n.type f,%function\nnop\n.word f",
+            ".arm\nnop\n.word 1\nnop",
+            ".word 1\nnop\n.thumb\nnop",
+            ".thumb\n.thumb_func\nf:\nbx lr\ng = f\n.word g",
+            ".arm\nb undefined\nbl undefined\nldr r0, =0x12345678",
+            ".thumb\nnop\nbl undefined\nlabel: .word label",
+            ".arm\nlocal: nop\nb local\n.word local",
+            ".text\n.inst 0xe1a00000\n.thumb\n.inst.n 0xbf00\n.inst.w 0xf3af8000",
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for source in cases {
+            let expected = armv7_summary(source, "armv7-unknown-linux-gnueabi", false);
+            let actual = armv7_summary(source, "armv7-unknown-linux-gnueabi", true);
+            if expected != actual {
+                failures.push(format!(
+                    "--- {source}\nours:\n{}\nllvm-mc:\n{}",
+                    actual.unwrap_or_else(|| "(none)".into()),
+                    expected.unwrap_or_else(|| "(none)".into())
+                ));
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} object cases differ",
+            failures.len()
+        );
+    }
+
     #[test]
     fn the_armv7_assembler_matches_llvm_mc_on_thumb_instructions() {
         let cases: &[&str] = &[

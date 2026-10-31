@@ -3980,13 +3980,30 @@ impl<'s> Assembler<'s> {
                 if self.parse_end_of_line() {
                     return Some(true);
                 }
-                self.arm_thumb = identifier == ".thumb";
+                let thumb = identifier == ".thumb";
+                if thumb && !self.arm32_has_thumb() {
+                    return Some(self.error(location, "target does not support Thumb mode"));
+                }
+                if !thumb && !self.arm32_has_arm() {
+                    return Some(self.error(location, "target does not support ARM mode"));
+                }
+                self.arm_thumb = thumb;
                 self.arm32_switch_mode();
                 self.streamer.emit_arm_directive(if self.arm_thumb {
                     "\t.code\t16"
                 } else {
                     "\t.code\t32"
                 });
+                if self.check_for_valid_section() {
+                    return Some(true);
+                }
+                let mode = self.mode;
+                self.streamer.emit_code_alignment(
+                    &mut self.context,
+                    if thumb { 2 } else { 4 },
+                    0,
+                    mode,
+                );
                 Some(false)
             }
             ".code" => {
@@ -4050,9 +4067,19 @@ impl<'s> Assembler<'s> {
                 }
                 Some(false)
             }
-            ".fnstart" | ".fnend" | ".cantunwind" | ".handlerdata" | ".personality"
-            | ".personalityindex" | ".save" | ".vsave" | ".setfp" | ".pad" | ".movsp"
-            | ".unwind_raw" | ".tlsdescseq" => self.arm32_text_directive(identifier),
+            ".fnstart" => Some(self.arm32_directive_fnstart(location)),
+            ".fnend" => Some(self.arm32_directive_fnend(location)),
+            ".cantunwind" => Some(self.arm32_directive_cantunwind(location)),
+            ".handlerdata" => Some(self.arm32_directive_handlerdata(location)),
+            ".personality" => Some(self.arm32_directive_personality(location)),
+            ".personalityindex" => Some(self.arm32_directive_personality_index(location)),
+            ".save" => Some(self.arm32_directive_register_save(location, false)),
+            ".vsave" => Some(self.arm32_directive_register_save(location, true)),
+            ".setfp" => Some(self.arm32_directive_setfp(location)),
+            ".pad" => Some(self.arm32_directive_pad(location)),
+            ".movsp" => Some(self.arm32_directive_movsp(location)),
+            ".unwind_raw" => Some(self.arm32_directive_unwind_raw(location)),
+            ".tlsdescseq" => self.arm32_text_directive(identifier),
             ".eabi_attribute" => Some(self.arm32_directive_eabi_attribute()),
             ".object_arch" => Some(self.arm32_directive_object_arch()),
             ".arch_extension" => Some(self.arm32_directive_arch_extension()),
@@ -4066,6 +4093,9 @@ impl<'s> Assembler<'s> {
                 if self.parse_end_of_line() {
                     return Some(true);
                 }
+                if let Some((section, _)) = self.context.current_section() {
+                    self.arm_pool_emit(section);
+                }
                 Some(false)
             }
             _ => {
@@ -4073,6 +4103,108 @@ impl<'s> Assembler<'s> {
                 None
             }
         }
+    }
+
+    fn arm32_constant_pool(
+        &mut self,
+        instruction: &mut MachineInstruction,
+        location: SourceLocation,
+    ) -> bool {
+        let target = self.target;
+        let kind = match target.instructions[instruction.opcode].record.as_str() {
+            "LDRConstPool" => 0,
+            "tLDRConstPool" => 1,
+            "t2LDRConstPool" => 2,
+            _ => return false,
+        };
+        let value = instruction.operand(1).clone();
+        let register = instruction.register_at(0);
+        let stack = register_named(target, "sp").unwrap_or(NO_REGISTER);
+        let counter = register_named(target, "pc").unwrap_or(NO_REGISTER);
+        let condition = instruction.operand(2).clone();
+        let condition_register = instruction.operand(3).clone();
+        let feature = |name: &str| self.arm_features.contains(name);
+        if let MachineOperand::Immediate(constant) = &value {
+            if register != counter && register != stack {
+                let constant = *constant;
+                let mut chosen: Option<(&str, i64, bool)> = None;
+                if kind == 0 {
+                    if let Some(encoded) = so_immediate(constant as u32) {
+                        chosen = Some(("MOVi", i64::from(encoded), true));
+                    } else if let Some(encoded) = so_immediate(!(constant as u32)) {
+                        chosen = Some(("MVNi", i64::from(encoded), true));
+                    } else if feature("HasV6T2Ops") && (0..65536).contains(&constant) {
+                        chosen = Some(("MOVi16", constant, false));
+                    }
+                } else {
+                    let thumb_two = self.arm32_thumb_two();
+                    if thumb_two && thumb_so_immediate(constant as u32).is_some() {
+                        chosen = Some(("t2MOVi", constant, true));
+                    } else if thumb_two && thumb_so_immediate(!(constant as u32)).is_some() {
+                        chosen = Some(("t2MVNi", i64::from(!(constant as u32)), true));
+                    } else if feature("HasV8MBaselineOps") && (0..65536).contains(&constant) {
+                        chosen = Some(("t2MOVi16", constant, false));
+                    }
+                }
+                if let Some((name, immediate, sets_flags)) = chosen {
+                    if let Some(opcode) = self.arm32_record_index(name) {
+                        let mut replaced = MachineInstruction::new(opcode);
+                        replaced.operands = vec![
+                            MachineOperand::Register(register),
+                            MachineOperand::Immediate(immediate),
+                            condition,
+                            condition_register,
+                        ];
+                        if sets_flags {
+                            replaced
+                                .operands
+                                .push(MachineOperand::Register(NO_REGISTER));
+                        }
+                        replaced.flags = instruction.flags;
+                        *instruction = replaced;
+                        return false;
+                    }
+                }
+            }
+        }
+        let expression = match value {
+            MachineOperand::Immediate(constant) => Expression::Constant(constant),
+            MachineOperand::Expression(held) => held,
+            MachineOperand::Register(_) => return false,
+        };
+        let label = self.arm_pool_add(expression, 4, location);
+        let name = self.context.symbols[label].name.clone();
+        let name_record = match kind {
+            0 => "LDRi12",
+            1 => "tLDRpci",
+            _ => "t2LDRpci",
+        };
+        let Some(opcode) = self.arm32_record_index(name_record) else {
+            return false;
+        };
+        let mut replaced = MachineInstruction::new(opcode);
+        replaced.operands = vec![
+            MachineOperand::Register(register),
+            MachineOperand::Expression(Expression::symbol(&name)),
+        ];
+        if kind == 0 {
+            replaced.operands.push(MachineOperand::Immediate(0));
+        }
+        replaced.operands.push(condition);
+        replaced.operands.push(condition_register);
+        replaced.flags = instruction.flags;
+        *instruction = replaced;
+        false
+    }
+
+    fn arm32_has_thumb(&self) -> bool {
+        self.arm32_feature("v4t")
+            .is_some_and(|held| self.arm_features.contains(&held))
+    }
+
+    fn arm32_has_arm(&self) -> bool {
+        self.arm32_feature("no-arm-mode")
+            .is_none_or(|held| !self.arm_features.contains(&held))
     }
 
     fn arm32_track_it_block(&mut self, instruction: &MachineInstruction) {
@@ -4632,6 +4764,9 @@ impl<'s> Assembler<'s> {
                     .count();
                 self.arm_writeback = operands.iter().any(|held| held.token_text() == "!");
                 let wide = operands.iter().any(|held| held.token_text() == ".w");
+                if self.arm32_constant_pool(&mut instruction, location) {
+                    return true;
+                }
                 while self.arm32_process(&mut instruction, wide) {}
                 self.arm32_track_it_block(&instruction);
                 let locations = std::mem::take(&mut self.expression_locations);
@@ -8980,4 +9115,1050 @@ impl<'a> Assembler<'a> {
         let bytes = self.arm_attribute_state.encode();
         self.streamer.emit_arm32_attributes(&bytes);
     }
+}
+
+#[derive(Clone, Debug, Default)]
+pub struct UnwindOpcodes {
+    operations: Vec<u8>,
+    begins: Vec<usize>,
+    has_personality: bool,
+}
+
+impl UnwindOpcodes {
+    fn begin(&mut self) {
+        if self.begins.is_empty() {
+            self.begins.push(0);
+        }
+    }
+
+    fn reset(&mut self) {
+        self.operations.clear();
+        self.begins.clear();
+        self.begins.push(0);
+        self.has_personality = false;
+    }
+
+    fn eight(&mut self, value: u32) {
+        self.begin();
+        self.operations.push((value & 0xff) as u8);
+        let last = *self.begins.last().unwrap_or(&0);
+        self.begins.push(last + 1);
+    }
+
+    fn sixteen(&mut self, value: u32) {
+        self.begin();
+        self.operations.push(((value >> 8) & 0xff) as u8);
+        self.operations.push((value & 0xff) as u8);
+        let last = *self.begins.last().unwrap_or(&0);
+        self.begins.push(last + 2);
+    }
+
+    fn bytes(&mut self, bytes: &[u8]) {
+        self.begin();
+        self.operations.extend_from_slice(bytes);
+        let last = *self.begins.last().unwrap_or(&0);
+        self.begins.push(last + bytes.len());
+    }
+
+    fn register_save(&mut self, mask: u32) {
+        let mut mask_value = mask;
+        if mask_value == 0 {
+            self.eight(0xb4);
+            return;
+        }
+        if mask_value & (1 << 4) != 0 {
+            let mut window = mask_value & 0xff0;
+            let range = (window >> 5).trailing_ones();
+            window &= !(0xffff_ffe0u32 << range);
+            let unmasked = mask_value & 0xfff0 & !window;
+            if unmasked == 0 {
+                self.eight(0xa0 | range);
+                mask_value &= 0x000f;
+            } else if unmasked == 1 << 14 {
+                self.eight(0xa8 | range);
+                mask_value &= 0x000f;
+            }
+        }
+        if mask_value & 0xfff0 != 0 {
+            self.sixteen(0x8000 | (mask_value >> 4));
+        }
+        if mask_value & 0x000f != 0 {
+            self.sixteen(0xb100 | (mask_value & 0x000f));
+        }
+    }
+
+    fn vfp_register_save(&mut self, mask: u32) {
+        for half in [mask & 0xffff_0000, mask & 0x0000_ffff] {
+            let mut regs = half;
+            while regs != 0 {
+                let most = 32 - regs.leading_zeros();
+                let length = (regs << (32 - most)).leading_ones();
+                let least = most - length;
+                let opcode = if least >= 16 { 0xc800 } else { 0xc900 };
+                self.sixteen(opcode | ((least % 16) << 4) | (length - 1));
+                regs &= !(u32::MAX << least);
+            }
+        }
+    }
+
+    fn set_stack_pointer(&mut self, register: u32) {
+        self.eight(0x90 | register);
+    }
+
+    fn stack_offset(&mut self, offset: i64) {
+        let mut offset = offset;
+        if offset > 0x200 {
+            let mut buffer = vec![0xb2u8];
+            uleb(&mut buffer, ((offset - 0x204) >> 2) as u64);
+            self.bytes(&buffer);
+        } else if offset > 0 {
+            if offset > 0x100 {
+                self.eight(0x3f);
+                offset -= 0x100;
+            }
+            self.eight(((offset - 4) >> 2) as u32 & 0xff);
+        } else if offset < 0 {
+            while offset < -0x100 {
+                self.eight(0x40 | 0x3f);
+                offset += 0x100;
+            }
+            self.eight(0x40 | ((((-offset) - 4) >> 2) as u32 & 0xff));
+        }
+    }
+
+    fn finalize(&mut self, personality_index: &mut u32, result: &mut Vec<u8>) {
+        self.begin();
+        result.clear();
+        let mut position = 3usize;
+        let emit = |result: &mut Vec<u8>, position: &mut usize, byte: u8| {
+            if *position < result.len() {
+                result[*position] = byte;
+            }
+            *position = ((*position ^ 3) + 1) ^ 3;
+        };
+        let size_byte = |size: usize| -> u8 { (size.div_ceil(4) - 1) as u8 };
+        if self.has_personality {
+            *personality_index = 4;
+            let rounded = (self.operations.len() + 1).div_ceil(4) * 4;
+            result.resize(rounded, 0);
+            emit(result, &mut position, size_byte(rounded));
+        } else {
+            if *personality_index == 4 {
+                *personality_index = if self.operations.len() <= 3 { 0 } else { 1 };
+            }
+            if *personality_index == 0 {
+                result.resize(4, 0);
+                emit(result, &mut position, 0x80);
+            } else {
+                let rounded = (self.operations.len() + 2).div_ceil(4) * 4;
+                result.resize(rounded, 0);
+                emit(result, &mut position, 0x80 | *personality_index as u8);
+                emit(result, &mut position, size_byte(rounded));
+            }
+        }
+        for index in (1..self.begins.len()).rev() {
+            for at in self.begins[index - 1]..self.begins[index] {
+                emit(result, &mut position, self.operations[at]);
+            }
+        }
+        while position < result.len() {
+            emit(result, &mut position, 0xb0);
+        }
+        self.reset();
+    }
+}
+
+#[derive(Clone, Debug)]
+pub struct UnwindState {
+    function_start: Option<usize>,
+    function_section: Option<(usize, i64)>,
+    exception_table: Option<usize>,
+    personality: Option<String>,
+    personality_index: u32,
+    frame_register: Option<RegisterId>,
+    frame_offset: i64,
+    stack_offset: i64,
+    pending_offset: i64,
+    used_frame: bool,
+    cannot_unwind: bool,
+    opcodes: Vec<u8>,
+    assembler: UnwindOpcodes,
+    start_locations: Vec<SourceLocation>,
+    cannot_unwind_locations: Vec<SourceLocation>,
+    personality_locations: Vec<SourceLocation>,
+    index_locations: Vec<SourceLocation>,
+    handler_locations: Vec<SourceLocation>,
+    context_frame_register: Option<RegisterId>,
+}
+
+impl Default for UnwindState {
+    fn default() -> UnwindState {
+        UnwindState {
+            function_start: None,
+            function_section: None,
+            exception_table: None,
+            personality: None,
+            personality_index: 4,
+            frame_register: None,
+            frame_offset: 0,
+            stack_offset: 0,
+            pending_offset: 0,
+            used_frame: false,
+            cannot_unwind: false,
+            opcodes: Vec::new(),
+            assembler: UnwindOpcodes::default(),
+            start_locations: Vec::new(),
+            cannot_unwind_locations: Vec::new(),
+            personality_locations: Vec::new(),
+            index_locations: Vec::new(),
+            handler_locations: Vec::new(),
+            context_frame_register: None,
+        }
+    }
+}
+
+impl UnwindState {
+    fn has_personality(&self) -> bool {
+        !(self.personality_locations.is_empty() && self.index_locations.is_empty())
+    }
+
+    fn reset_context(&mut self) {
+        self.start_locations.clear();
+        self.cannot_unwind_locations.clear();
+        self.personality_locations.clear();
+        self.handler_locations.clear();
+        self.index_locations.clear();
+        self.context_frame_register = None;
+    }
+
+    fn reset_streamer(&mut self) {
+        self.exception_table = None;
+        self.function_start = None;
+        self.personality = None;
+        self.personality_index = 4;
+        self.frame_register = None;
+        self.frame_offset = 0;
+        self.stack_offset = 0;
+        self.pending_offset = 0;
+        self.used_frame = false;
+        self.cannot_unwind = false;
+        self.opcodes.clear();
+        self.assembler.reset();
+    }
+}
+
+impl<'a> Assembler<'a> {
+    fn arm32_note(&mut self, location: SourceLocation, text: &str) {
+        let message = AssemblyMessage {
+            kind: MessageKind::Note,
+            location: Some(location),
+            range: None,
+            text: text.to_string(),
+            marker: self.context.line_marker.clone(),
+        };
+        if self.pending_errors.is_empty() {
+            self.context.messages.push(message);
+        } else {
+            self.pending_errors.push(message);
+        }
+    }
+
+    fn arm32_note_start(&mut self) {
+        for location in self.arm_unwind.start_locations.clone() {
+            self.arm32_note(location, ".fnstart was specified here");
+        }
+    }
+
+    fn arm32_note_cannot_unwind(&mut self) {
+        for location in self.arm_unwind.cannot_unwind_locations.clone() {
+            self.arm32_note(location, ".cantunwind was specified here");
+        }
+    }
+
+    fn arm32_note_handler(&mut self) {
+        for location in self.arm_unwind.handler_locations.clone() {
+            self.arm32_note(location, ".handlerdata was specified here");
+        }
+    }
+
+    fn arm32_note_personality(&mut self) {
+        let mut names: Vec<(SourceLocation, &str)> = Vec::new();
+        for location in &self.arm_unwind.personality_locations {
+            names.push((*location, ".personality was specified here"));
+        }
+        for location in &self.arm_unwind.index_locations {
+            names.push((*location, ".personalityindex was specified here"));
+        }
+        names.sort_by_key(|(location, _)| (location.buffer, location.position));
+        for (location, text) in names {
+            self.arm32_note(location, text);
+        }
+    }
+
+    fn arm32_stack_register(&self) -> Option<RegisterId> {
+        register_named(self.target, "sp")
+    }
+
+    fn arm32_emit_label_here(&mut self) -> usize {
+        let symbol = self.context.temporary_symbol();
+        self.streamer.emit_label(&mut self.context, symbol, None);
+        symbol
+    }
+
+    fn arm32_switch_unwind_section(&mut self, prefix: &str, section_type: u32, flags: u64) {
+        let Some((function_section, _)) = self.arm_unwind.function_section else {
+            return;
+        };
+        let held = self.context.sections[function_section].clone();
+        let mut name = prefix.to_string();
+        if held.name != ".text" {
+            name.push_str(&held.name);
+        }
+        let mut flags = flags;
+        let group = held.group.clone().unwrap_or_default();
+        if held.group.is_some() {
+            flags |= ELF_FLAG_GROUP;
+        }
+        let linked = held
+            .begin_symbol
+            .map(|symbol| self.context.symbols[symbol].name.clone());
+        let section = match self.context.find_section(&name, &group, held.unique) {
+            Some(found) => found,
+            None => {
+                let created =
+                    self.context
+                        .elf_section(&name, section_type, flags, 0, &group, held.unique);
+                self.context.sections[created].comdat = held.comdat;
+                if section_type == 0x7000_0001 {
+                    self.context.sections[created].linked_symbol = linked;
+                }
+                created
+            }
+        };
+        self.streamer.switch_section(&mut self.context, section, 0);
+        self.streamer
+            .emit_value_to_alignment(&mut self.context, 4, 0, 1, 0);
+    }
+
+    fn arm32_prel31(&self, symbol: usize) -> Expression {
+        Expression::Symbol {
+            name: self.context.symbols[symbol].name.clone(),
+            specifier: Some("prel31".to_string()),
+        }
+    }
+
+    fn arm32_personality_fixup(&mut self, name: &str, location: SourceLocation) {
+        let symbol = self.context.symbol(name);
+        let here = self.arm32_emit_label_here();
+        let offset = Expression::symbol(&self.context.symbols[here].name.clone());
+        let target = Expression::symbol(&self.context.symbols[symbol].name.clone());
+        self.streamer.emit_relocation_directive(
+            &mut self.context,
+            &offset,
+            "R_ARM_NONE",
+            Some(&target),
+            location,
+        );
+    }
+
+    fn arm32_flush_pending_offset(&mut self) {
+        if self.arm_unwind.pending_offset != 0 {
+            let offset = -self.arm_unwind.pending_offset;
+            self.arm_unwind.assembler.stack_offset(offset);
+            self.arm_unwind.pending_offset = 0;
+        }
+    }
+
+    fn arm32_flush_unwind_opcodes(&mut self, no_handler_data: bool, location: SourceLocation) {
+        if self.arm_unwind.used_frame {
+            let last = self.arm_unwind.stack_offset - self.arm_unwind.pending_offset;
+            let offset = last - self.arm_unwind.frame_offset;
+            self.arm_unwind.assembler.stack_offset(offset);
+            let register = self
+                .arm_unwind
+                .frame_register
+                .map_or(13, |held| register_encoding(self.target, held));
+            self.arm_unwind.assembler.set_stack_pointer(register);
+        } else {
+            self.arm32_flush_pending_offset();
+        }
+        let mut index = self.arm_unwind.personality_index;
+        let mut opcodes = Vec::new();
+        self.arm_unwind.assembler.finalize(&mut index, &mut opcodes);
+        self.arm_unwind.personality_index = index;
+        self.arm_unwind.opcodes = opcodes;
+        if no_handler_data && self.arm_unwind.personality_index == 0 {
+            return;
+        }
+        self.arm32_switch_unwind_section(".ARM.extab", 1, ELF_FLAG_ALLOCATE);
+        let table = self.arm32_emit_label_here();
+        self.arm_unwind.exception_table = Some(table);
+        if let Some(name) = self.arm_unwind.personality.clone() {
+            let symbol = self.context.symbol(&name);
+            let expression = self.arm32_prel31(symbol);
+            self.streamer
+                .emit_value(&mut self.context, &expression, 4, location);
+        }
+        let opcodes = self.arm_unwind.opcodes.clone();
+        for chunk in opcodes.chunks(4) {
+            let mut word = 0i64;
+            for (at, byte) in chunk.iter().enumerate() {
+                word |= i64::from(*byte) << (8 * at);
+            }
+            self.streamer
+                .emit_value(&mut self.context, &Expression::Constant(word), 4, location);
+        }
+        if no_handler_data && self.arm_unwind.personality.is_none() {
+            self.streamer
+                .emit_value(&mut self.context, &Expression::Constant(0), 4, location);
+        }
+    }
+
+    fn arm32_unwind_text(&mut self, text: &str) {
+        self.streamer.emit_arm_directive(text);
+    }
+
+    pub(super) fn arm32_directive_fnstart(&mut self, location: SourceLocation) -> bool {
+        if self.parse_end_of_line() {
+            return true;
+        }
+        if !self.arm_unwind.start_locations.is_empty() {
+            self.error(location, ".fnstart starts before the end of previous one");
+            self.arm32_note_start();
+            return true;
+        }
+        if self.check_for_valid_section() {
+            return true;
+        }
+        self.arm_unwind.reset_context();
+        self.arm_unwind.reset_streamer();
+        self.arm32_unwind_text("\t.fnstart");
+        if self.streamer.emits_object() {
+            let symbol = self.arm32_emit_label_here();
+            self.arm_unwind.function_start = Some(symbol);
+            self.arm_unwind.function_section = self.context.current_section();
+        }
+        self.arm_unwind.start_locations.push(location);
+        false
+    }
+
+    pub(super) fn arm32_directive_fnend(&mut self, location: SourceLocation) -> bool {
+        if self.parse_end_of_line() {
+            return true;
+        }
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .fnend directive");
+        }
+        self.arm32_unwind_text("\t.fnend");
+        let Some(start) = self.arm_unwind.function_start else {
+            self.arm_unwind.reset_streamer();
+            self.arm_unwind.reset_context();
+            return false;
+        };
+        if self.arm_unwind.exception_table.is_none() && !self.arm_unwind.cannot_unwind {
+            self.arm32_flush_unwind_opcodes(true, location);
+        }
+        self.arm32_switch_unwind_section(
+            ".ARM.exidx",
+            0x7000_0001,
+            ELF_FLAG_ALLOCATE | ELF_FLAG_LINK_ORDER,
+        );
+        if self.arm_unwind.personality_index < 4 {
+            let name = format!("__aeabi_unwind_cpp_pr{}", self.arm_unwind.personality_index);
+            self.arm32_personality_fixup(&name, location);
+        }
+        let reference = self.arm32_prel31(start);
+        self.streamer
+            .emit_value(&mut self.context, &reference, 4, location);
+        if self.arm_unwind.cannot_unwind {
+            self.streamer
+                .emit_value(&mut self.context, &Expression::Constant(1), 4, location);
+        } else if let Some(table) = self.arm_unwind.exception_table {
+            let reference = self.arm32_prel31(table);
+            self.streamer
+                .emit_value(&mut self.context, &reference, 4, location);
+        } else {
+            let opcodes = &self.arm_unwind.opcodes;
+            let mut word = 0i64;
+            for (at, byte) in opcodes.iter().take(4).enumerate() {
+                word |= i64::from(*byte) << (8 * at);
+            }
+            self.streamer
+                .emit_value(&mut self.context, &Expression::Constant(word), 4, location);
+        }
+        if let Some((section, subsection)) = self.arm_unwind.function_section {
+            self.streamer
+                .switch_section(&mut self.context, section, subsection);
+        }
+        self.arm_unwind.reset_streamer();
+        self.arm_unwind.reset_context();
+        false
+    }
+
+    pub(super) fn arm32_directive_cantunwind(&mut self, location: SourceLocation) -> bool {
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm_unwind.cannot_unwind_locations.push(location);
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .cantunwind directive");
+        }
+        if !self.arm_unwind.handler_locations.is_empty() {
+            self.error(
+                location,
+                ".cantunwind can't be used with .handlerdata directive",
+            );
+            self.arm32_note_handler();
+            return true;
+        }
+        if self.arm_unwind.has_personality() {
+            self.error(
+                location,
+                ".cantunwind can't be used with .personality directive",
+            );
+            self.arm32_note_personality();
+            return true;
+        }
+        self.arm32_unwind_text("\t.cantunwind");
+        self.arm_unwind.cannot_unwind = true;
+        false
+    }
+
+    pub(super) fn arm32_directive_personality(&mut self, location: SourceLocation) -> bool {
+        let existing = self.arm_unwind.has_personality();
+        if !self.is(TokenKind::Identifier) {
+            return self.error(location, "unexpected input in .personality directive.");
+        }
+        let name = self.lexer.token.text.clone();
+        self.lex();
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm_unwind.personality_locations.push(location);
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .personality directive");
+        }
+        if !self.arm_unwind.cannot_unwind_locations.is_empty() {
+            self.error(
+                location,
+                ".personality can't be used with .cantunwind directive",
+            );
+            self.arm32_note_cannot_unwind();
+            return true;
+        }
+        if !self.arm_unwind.handler_locations.is_empty() {
+            self.error(location, ".personality must precede .handlerdata directive");
+            self.arm32_note_handler();
+            return true;
+        }
+        if existing {
+            self.error(location, "multiple personality directives");
+            self.arm32_note_personality();
+            return true;
+        }
+        let symbol = self.context.symbol(&name);
+        self.arm32_unwind_text(&format!("\t.personality {name}"));
+        self.arm_unwind.personality = Some(self.context.symbols[symbol].name.clone());
+        self.arm_unwind.assembler.begin();
+        self.arm_unwind.assembler.has_personality = true;
+        false
+    }
+
+    pub(super) fn arm32_directive_personality_index(&mut self, location: SourceLocation) -> bool {
+        let existing = self.arm_unwind.has_personality();
+        let index_location = self.location();
+        let Ok((expression, _)) = self.parse_expression() else {
+            return true;
+        };
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm_unwind.index_locations.push(location);
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(
+                location,
+                ".fnstart must precede .personalityindex directive",
+            );
+        }
+        if !self.arm_unwind.cannot_unwind_locations.is_empty() {
+            self.error(
+                location,
+                ".personalityindex cannot be used with .cantunwind",
+            );
+            self.arm32_note_cannot_unwind();
+            return true;
+        }
+        if !self.arm_unwind.handler_locations.is_empty() {
+            self.error(
+                location,
+                ".personalityindex must precede .handlerdata directive",
+            );
+            self.arm32_note_handler();
+            return true;
+        }
+        if existing {
+            self.error(location, "multiple personality directives");
+            self.arm32_note_personality();
+            return true;
+        }
+        let Expression::Constant(value) = expression else {
+            return self.error(index_location, "index must be a constant number");
+        };
+        if !(0..4).contains(&value) {
+            return self.error(
+                index_location,
+                "personality routine index should be in range [0-3]",
+            );
+        }
+        self.arm32_unwind_text(&format!("\t.personalityindex {value}"));
+        self.arm_unwind.personality_index = value as u32;
+        false
+    }
+
+    pub(super) fn arm32_directive_handlerdata(&mut self, location: SourceLocation) -> bool {
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm_unwind.handler_locations.push(location);
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .personality directive");
+        }
+        if !self.arm_unwind.cannot_unwind_locations.is_empty() {
+            self.error(
+                location,
+                ".handlerdata can't be used with .cantunwind directive",
+            );
+            self.arm32_note_cannot_unwind();
+            return true;
+        }
+        self.arm32_unwind_text("\t.handlerdata");
+        if self.streamer.emits_object() {
+            self.arm32_flush_unwind_opcodes(false, location);
+        }
+        false
+    }
+
+    pub(super) fn arm32_directive_setfp(&mut self, location: SourceLocation) -> bool {
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .setfp directive");
+        }
+        if !self.arm_unwind.handler_locations.is_empty() {
+            return self.error(location, ".setfp must precede .handlerdata directive");
+        }
+        let frame_location = self.location();
+        let Some(frame) = self.arm32_try_register() else {
+            return self.error(frame_location, "frame pointer register expected");
+        };
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let stack_location = self.location();
+        let Some(stack) = self.arm32_try_register() else {
+            return self.error(stack_location, "stack pointer register expected");
+        };
+        let sp = self.arm32_stack_register();
+        let latest = self.arm_unwind.context_frame_register.or(sp);
+        if Some(stack) != sp && Some(stack) != latest {
+            return self.error(
+                stack_location,
+                "register should be either $sp or the latest fp register",
+            );
+        }
+        self.arm_unwind.context_frame_register = Some(frame);
+        let mut offset = 0i64;
+        if self.parse_optional_token(TokenKind::Comma) {
+            if !self.is(TokenKind::Hash) && !self.is(TokenKind::Dollar) {
+                let at = self.location();
+                return self.error(at, "'#' expected");
+            }
+            self.lex();
+            let at = self.location();
+            let Ok((expression, _)) = self.parse_expression() else {
+                return self.error(at, "malformed setfp offset");
+            };
+            let Expression::Constant(value) = expression else {
+                return self.error(at, "setfp offset must be an immediate");
+            };
+            offset = value;
+        }
+        if self.parse_end_of_line() {
+            return true;
+        }
+        let frame_name = self.target.register_name(frame);
+        let stack_name = self.target.register_name(stack);
+        let mut line = format!("\t.setfp\t{frame_name}, {stack_name}");
+        if offset != 0 {
+            line.push_str(&format!(", #{offset}"));
+        }
+        self.arm32_unwind_text(&line);
+        self.arm_unwind.used_frame = true;
+        let previous = self.arm_unwind.frame_register.or(sp);
+        self.arm_unwind.frame_register = Some(frame);
+        if Some(stack) == sp {
+            self.arm_unwind.frame_offset = self.arm_unwind.stack_offset + offset;
+        } else {
+            let _ = previous;
+            self.arm_unwind.frame_offset += offset;
+        }
+        false
+    }
+
+    pub(super) fn arm32_directive_pad(&mut self, location: SourceLocation) -> bool {
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .pad directive");
+        }
+        if !self.arm_unwind.handler_locations.is_empty() {
+            return self.error(location, ".pad must precede .handlerdata directive");
+        }
+        if !self.is(TokenKind::Hash) && !self.is(TokenKind::Dollar) {
+            let at = self.location();
+            return self.error(at, "'#' expected");
+        }
+        self.lex();
+        let at = self.location();
+        let Ok((expression, _)) = self.parse_expression() else {
+            return self.error(at, "malformed pad offset");
+        };
+        let Expression::Constant(value) = expression else {
+            return self.error(at, "pad offset must be an immediate");
+        };
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm32_unwind_text(&format!("\t.pad\t#{value}"));
+        self.arm_unwind.stack_offset -= value;
+        self.arm_unwind.pending_offset -= value;
+        false
+    }
+
+    pub(super) fn arm32_directive_movsp(&mut self, location: SourceLocation) -> bool {
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .movsp directives");
+        }
+        let sp = self.arm32_stack_register();
+        let latest = self.arm_unwind.context_frame_register.or(sp);
+        if latest != sp {
+            return self.error(location, "unexpected .movsp directive");
+        }
+        let at = self.location();
+        let Some(register) = self.arm32_try_register() else {
+            return self.error(at, "register expected");
+        };
+        let pc = register_named(self.target, "pc");
+        if Some(register) == sp || Some(register) == pc {
+            return self.error(at, "sp and pc are not permitted in .movsp directive");
+        }
+        let mut offset = 0i64;
+        if self.parse_optional_token(TokenKind::Comma) {
+            if self.parse_token(TokenKind::Hash, "expected #constant") {
+                return true;
+            }
+            let at = self.location();
+            let Ok((expression, _)) = self.parse_expression() else {
+                return self.error(at, "malformed offset expression");
+            };
+            let Expression::Constant(value) = expression else {
+                return self.error(at, "offset must be an immediate");
+            };
+            offset = value;
+        }
+        if self.parse_end_of_line() {
+            return true;
+        }
+        self.arm_unwind.context_frame_register = Some(register);
+        let name = self.target.register_name(register);
+        let mut line = format!("\t.movsp\t{name}");
+        if offset != 0 {
+            line.push_str(&format!(", #{offset}"));
+        }
+        self.arm32_unwind_text(&line);
+        self.arm32_flush_pending_offset();
+        self.arm_unwind.frame_register = Some(register);
+        self.arm_unwind.frame_offset = self.arm_unwind.stack_offset + offset;
+        let encoding = register_encoding(self.target, register);
+        self.arm_unwind.assembler.set_stack_pointer(encoding);
+        false
+    }
+
+    pub(super) fn arm32_directive_register_save(
+        &mut self,
+        location: SourceLocation,
+        vector: bool,
+    ) -> bool {
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .save or .vsave directives");
+        }
+        if !self.arm_unwind.handler_locations.is_empty() {
+            return self.error(
+                location,
+                ".save or .vsave must precede .handlerdata directive",
+            );
+        }
+        let mut operands: Vec<ParsedOperand> = Vec::new();
+        if !self.is(TokenKind::LeftBrace) {
+            return self.token_error("register list expected");
+        }
+        if self.arm32_parse_register_list(&mut operands) {
+            return true;
+        }
+        if self.parse_end_of_line() {
+            return true;
+        }
+        let Some(Operand::RegisterList(list)) = operands.first().and_then(operand_of) else {
+            return true;
+        };
+        let list = list.clone();
+        let doubles = list
+            .first()
+            .is_some_and(|held| in_class(self.target, "DPR", *held));
+        if !vector && doubles
+            || !vector && list.iter().any(|held| in_class(self.target, "SPR", *held))
+        {
+            return self.error(location, ".save expects GPR registers");
+        }
+        if vector && !doubles {
+            return self.error(location, ".vsave expects DPR registers");
+        }
+        let names: Vec<&str> = list
+            .iter()
+            .map(|held| self.target.register_name(*held))
+            .collect();
+        self.arm32_unwind_text(&format!(
+            "\t.{}\t{{{}}}",
+            if vector { "vsave" } else { "save" },
+            names.join(", ")
+        ));
+        let mut mask = 0u32;
+        let mut count = 0i64;
+        for held in &list {
+            let encoding = register_encoding(self.target, *held);
+            if mask & (1 << encoding) == 0 {
+                mask |= 1 << encoding;
+                count += 1;
+            }
+        }
+        if count > 0 {
+            self.arm_unwind.stack_offset -= count * if vector { 8 } else { 4 };
+            self.arm32_flush_pending_offset();
+            if vector {
+                self.arm_unwind.assembler.vfp_register_save(mask);
+            } else {
+                self.arm_unwind.assembler.register_save(mask);
+            }
+        }
+        false
+    }
+
+    pub(super) fn arm32_directive_unwind_raw(&mut self, location: SourceLocation) -> bool {
+        let offset_location = self.location();
+        if self.arm_unwind.start_locations.is_empty() {
+            return self.error(location, ".fnstart must precede .unwind_raw directives");
+        }
+        let Ok((expression, _)) = self.parse_expression() else {
+            return self.error(offset_location, "expected expression");
+        };
+        let Expression::Constant(offset) = expression else {
+            return self.error(offset_location, "offset must be a constant");
+        };
+        if self.parse_token(TokenKind::Comma, "expected comma") {
+            return true;
+        }
+        let first = self.location();
+        if self.is(TokenKind::EndOfStatement) {
+            return self.error(first, "expected opcode expression");
+        }
+        let mut opcodes: Vec<u8> = Vec::new();
+        let failed = self.parse_many(|parser| {
+            let at = parser.location();
+            if parser.is(TokenKind::EndOfStatement) {
+                return parser.error(at, "expected opcode expression");
+            }
+            let Ok((expression, _)) = parser.parse_expression() else {
+                return parser.error(at, "expected opcode expression");
+            };
+            let Expression::Constant(value) = expression else {
+                return parser.error(at, "opcode value must be a constant");
+            };
+            if value & !0xff != 0 {
+                return parser.error(at, "invalid opcode");
+            }
+            opcodes.push(value as u8);
+            false
+        });
+        if failed {
+            return true;
+        }
+        let mut line = format!("\t.unwind_raw {offset}");
+        for opcode in &opcodes {
+            line.push_str(&format!(", 0x{opcode:x}"));
+        }
+        self.arm32_unwind_text(&line);
+        self.arm32_flush_pending_offset();
+        self.arm_unwind.stack_offset -= offset;
+        self.arm_unwind.assembler.bytes(&opcodes);
+        false
+    }
+}
+
+const ARM_RELOCATIONS: &[(&str, u32)] = &[
+    ("R_ARM_NONE", 0x00),
+    ("R_ARM_PC24", 0x01),
+    ("R_ARM_ABS32", 0x02),
+    ("R_ARM_REL32", 0x03),
+    ("R_ARM_LDR_PC_G0", 0x04),
+    ("R_ARM_ABS16", 0x05),
+    ("R_ARM_ABS12", 0x06),
+    ("R_ARM_THM_ABS5", 0x07),
+    ("R_ARM_ABS8", 0x08),
+    ("R_ARM_SBREL32", 0x09),
+    ("R_ARM_THM_CALL", 0x0a),
+    ("R_ARM_THM_PC8", 0x0b),
+    ("R_ARM_BREL_ADJ", 0x0c),
+    ("R_ARM_TLS_DESC", 0x0d),
+    ("R_ARM_THM_SWI8", 0x0e),
+    ("R_ARM_XPC25", 0x0f),
+    ("R_ARM_THM_XPC22", 0x10),
+    ("R_ARM_TLS_DTPMOD32", 0x11),
+    ("R_ARM_TLS_DTPOFF32", 0x12),
+    ("R_ARM_TLS_TPOFF32", 0x13),
+    ("R_ARM_COPY", 0x14),
+    ("R_ARM_GLOB_DAT", 0x15),
+    ("R_ARM_JUMP_SLOT", 0x16),
+    ("R_ARM_RELATIVE", 0x17),
+    ("R_ARM_GOTOFF32", 0x18),
+    ("R_ARM_BASE_PREL", 0x19),
+    ("R_ARM_GOT_BREL", 0x1a),
+    ("R_ARM_PLT32", 0x1b),
+    ("R_ARM_CALL", 0x1c),
+    ("R_ARM_JUMP24", 0x1d),
+    ("R_ARM_THM_JUMP24", 0x1e),
+    ("R_ARM_BASE_ABS", 0x1f),
+    ("R_ARM_ALU_PCREL_7_0", 0x20),
+    ("R_ARM_ALU_PCREL_15_8", 0x21),
+    ("R_ARM_ALU_PCREL_23_15", 0x22),
+    ("R_ARM_LDR_SBREL_11_0_NC", 0x23),
+    ("R_ARM_ALU_SBREL_19_12_NC", 0x24),
+    ("R_ARM_ALU_SBREL_27_20_CK", 0x25),
+    ("R_ARM_TARGET1", 0x26),
+    ("R_ARM_SBREL31", 0x27),
+    ("R_ARM_V4BX", 0x28),
+    ("R_ARM_TARGET2", 0x29),
+    ("R_ARM_PREL31", 0x2a),
+    ("R_ARM_MOVW_ABS_NC", 0x2b),
+    ("R_ARM_MOVT_ABS", 0x2c),
+    ("R_ARM_MOVW_PREL_NC", 0x2d),
+    ("R_ARM_MOVT_PREL", 0x2e),
+    ("R_ARM_THM_MOVW_ABS_NC", 0x2f),
+    ("R_ARM_THM_MOVT_ABS", 0x30),
+    ("R_ARM_THM_MOVW_PREL_NC", 0x31),
+    ("R_ARM_THM_MOVT_PREL", 0x32),
+    ("R_ARM_THM_JUMP19", 0x33),
+    ("R_ARM_THM_JUMP6", 0x34),
+    ("R_ARM_THM_ALU_PREL_11_0", 0x35),
+    ("R_ARM_THM_PC12", 0x36),
+    ("R_ARM_ABS32_NOI", 0x37),
+    ("R_ARM_REL32_NOI", 0x38),
+    ("R_ARM_ALU_PC_G0_NC", 0x39),
+    ("R_ARM_ALU_PC_G0", 0x3a),
+    ("R_ARM_ALU_PC_G1_NC", 0x3b),
+    ("R_ARM_ALU_PC_G1", 0x3c),
+    ("R_ARM_ALU_PC_G2", 0x3d),
+    ("R_ARM_LDR_PC_G1", 0x3e),
+    ("R_ARM_LDR_PC_G2", 0x3f),
+    ("R_ARM_LDRS_PC_G0", 0x40),
+    ("R_ARM_LDRS_PC_G1", 0x41),
+    ("R_ARM_LDRS_PC_G2", 0x42),
+    ("R_ARM_LDC_PC_G0", 0x43),
+    ("R_ARM_LDC_PC_G1", 0x44),
+    ("R_ARM_LDC_PC_G2", 0x45),
+    ("R_ARM_ALU_SB_G0_NC", 0x46),
+    ("R_ARM_ALU_SB_G0", 0x47),
+    ("R_ARM_ALU_SB_G1_NC", 0x48),
+    ("R_ARM_ALU_SB_G1", 0x49),
+    ("R_ARM_ALU_SB_G2", 0x4a),
+    ("R_ARM_LDR_SB_G0", 0x4b),
+    ("R_ARM_LDR_SB_G1", 0x4c),
+    ("R_ARM_LDR_SB_G2", 0x4d),
+    ("R_ARM_LDRS_SB_G0", 0x4e),
+    ("R_ARM_LDRS_SB_G1", 0x4f),
+    ("R_ARM_LDRS_SB_G2", 0x50),
+    ("R_ARM_LDC_SB_G0", 0x51),
+    ("R_ARM_LDC_SB_G1", 0x52),
+    ("R_ARM_LDC_SB_G2", 0x53),
+    ("R_ARM_MOVW_BREL_NC", 0x54),
+    ("R_ARM_MOVT_BREL", 0x55),
+    ("R_ARM_MOVW_BREL", 0x56),
+    ("R_ARM_THM_MOVW_BREL_NC", 0x57),
+    ("R_ARM_THM_MOVT_BREL", 0x58),
+    ("R_ARM_THM_MOVW_BREL", 0x59),
+    ("R_ARM_TLS_GOTDESC", 0x5a),
+    ("R_ARM_TLS_CALL", 0x5b),
+    ("R_ARM_TLS_DESCSEQ", 0x5c),
+    ("R_ARM_THM_TLS_CALL", 0x5d),
+    ("R_ARM_PLT32_ABS", 0x5e),
+    ("R_ARM_GOT_ABS", 0x5f),
+    ("R_ARM_GOT_PREL", 0x60),
+    ("R_ARM_GOT_BREL12", 0x61),
+    ("R_ARM_GOTOFF12", 0x62),
+    ("R_ARM_GOTRELAX", 0x63),
+    ("R_ARM_GNU_VTENTRY", 0x64),
+    ("R_ARM_GNU_VTINHERIT", 0x65),
+    ("R_ARM_THM_JUMP11", 0x66),
+    ("R_ARM_THM_JUMP8", 0x67),
+    ("R_ARM_TLS_GD32", 0x68),
+    ("R_ARM_TLS_LDM32", 0x69),
+    ("R_ARM_TLS_LDO32", 0x6a),
+    ("R_ARM_TLS_IE32", 0x6b),
+    ("R_ARM_TLS_LE32", 0x6c),
+    ("R_ARM_TLS_LDO12", 0x6d),
+    ("R_ARM_TLS_LE12", 0x6e),
+    ("R_ARM_TLS_IE12GP", 0x6f),
+    ("R_ARM_PRIVATE_0", 0x70),
+    ("R_ARM_PRIVATE_1", 0x71),
+    ("R_ARM_PRIVATE_2", 0x72),
+    ("R_ARM_PRIVATE_3", 0x73),
+    ("R_ARM_PRIVATE_4", 0x74),
+    ("R_ARM_PRIVATE_5", 0x75),
+    ("R_ARM_PRIVATE_6", 0x76),
+    ("R_ARM_PRIVATE_7", 0x77),
+    ("R_ARM_PRIVATE_8", 0x78),
+    ("R_ARM_PRIVATE_9", 0x79),
+    ("R_ARM_PRIVATE_10", 0x7a),
+    ("R_ARM_PRIVATE_11", 0x7b),
+    ("R_ARM_PRIVATE_12", 0x7c),
+    ("R_ARM_PRIVATE_13", 0x7d),
+    ("R_ARM_PRIVATE_14", 0x7e),
+    ("R_ARM_PRIVATE_15", 0x7f),
+    ("R_ARM_ME_TOO", 0x80),
+    ("R_ARM_THM_TLS_DESCSEQ16", 0x81),
+    ("R_ARM_THM_TLS_DESCSEQ32", 0x82),
+    ("R_ARM_THM_ALU_ABS_G0_NC", 0x84),
+    ("R_ARM_THM_ALU_ABS_G1_NC", 0x85),
+    ("R_ARM_THM_ALU_ABS_G2_NC", 0x86),
+    ("R_ARM_THM_ALU_ABS_G3", 0x87),
+    ("R_ARM_THM_BF16", 0x88),
+    ("R_ARM_THM_BF12", 0x89),
+    ("R_ARM_THM_BF18", 0x8a),
+    ("R_ARM_IRELATIVE", 0xa0),
+    ("R_ARM_GOTFUNCDESC", 0xa1),
+    ("R_ARM_GOTOFFFUNCDESC", 0xa2),
+    ("R_ARM_FUNCDESC", 0xa3),
+    ("R_ARM_FUNCDESC_VALUE", 0xa4),
+    ("R_ARM_TLS_GD32_FDPIC", 0xa5),
+    ("R_ARM_TLS_LDM32_FDPIC", 0xa6),
+    ("R_ARM_TLS_IE32_FDPIC", 0xa7),
+];
+
+pub fn relocation_number(name: &str) -> Option<u32> {
+    ARM_RELOCATIONS
+        .iter()
+        .find(|(held, _)| *held == name)
+        .map(|(_, value)| *value)
+        .or(match name {
+            "BFD_RELOC_NONE" => Some(0),
+            "BFD_RELOC_8" => Some(8),
+            "BFD_RELOC_16" => Some(5),
+            "BFD_RELOC_32" => Some(2),
+            _ => None,
+        })
 }
