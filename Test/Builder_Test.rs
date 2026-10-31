@@ -74995,6 +74995,7 @@ mod armv8_assembly {
             .args([
                 &format!("-triple={triple}"),
                 "-mcpu=cortex-a15",
+                "-mattr=+neon",
                 "-filetype=obj",
                 "-o",
             ])
@@ -75031,7 +75032,11 @@ mod armv8_assembly {
     fn armv7_text_expected(source: &str, triple: &str) -> Option<String> {
         use std::io::Write;
         let mut child = std::process::Command::new("llvm-mc-18")
-            .args([&format!("-triple={triple}"), "-mcpu=cortex-a15"])
+            .args([
+                &format!("-triple={triple}"),
+                "-mcpu=cortex-a15",
+                "-mattr=+neon",
+            ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -75056,6 +75061,7 @@ mod armv8_assembly {
         let mut options = AssemblerOptions::new(triple);
         options.output = OutputKind::Assembly;
         options.cpu = "cortex-a15".to_string();
+        options.features = vec!["+neon".to_string()];
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
             .map_err(|diagnostic| diagnostic.message)?;
         let errors: Vec<String> = result
@@ -75081,6 +75087,7 @@ mod armv8_assembly {
         let mut options = AssemblerOptions::new(triple);
         options.output = OutputKind::Object;
         options.cpu = "cortex-a15".to_string();
+        options.features = vec!["+neon".to_string()];
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
             .map_err(|diagnostic| diagnostic.message)?;
         let errors: Vec<String> = result
@@ -75242,6 +75249,65 @@ mod armv8_assembly {
             "movne r0, #1",
             "ldrne r0, [r1, #4]",
             "pld [r0, #4]",
+        ];
+        compare_armv7(cases, "armv7a-linux-gnueabihf");
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_floating_point_instructions() {
+        let cases: &[&str] = &[
+            "vadd.f32 s0, s1, s2",
+            "vadd.f64 d0, d1, d2",
+            "vsub.f64 d0, d1, d2",
+            "vmul.f32 s0, s1, s2",
+            "vdiv.f64 d0, d1, d2",
+            "vmov s0, r0",
+            "vmov r0, s0",
+            "vmov d0, r0, r1",
+            "vmov r0, r1, d0",
+            "vmov.f32 s0, #1.0",
+            "vmov.f64 d0, #2.0",
+            "vmov.f64 d0, d1",
+            "vldr d0, [r0]",
+            "vldr s0, [r0, #8]",
+            "vstr d0, [r1, #-8]",
+            "vpush {d8, d9}",
+            "vpop {s16, s17}",
+            "vldmia r0!, {d0, d1}",
+            "vstmdb sp!, {d8-d11}",
+            "vcvt.f64.f32 d0, s0",
+            "vcvt.f32.s32 s0, s1",
+            "vcvt.s32.f64 s0, d1",
+            "vcmp.f64 d0, d1",
+            "vcmp.f32 s0, #0",
+            "vmrs APSR_nzcv, fpscr",
+            "vmsr fpscr, r0",
+            "vabs.f32 s0, s1",
+            "vneg.f64 d0, d1",
+            "vsqrt.f64 d0, d1",
+            "vmla.f32 s0, s1, s2",
+            "vfma.f64 d0, d1, d2",
+            "vadd.i32 q0, q1, q2",
+            "vadd.i8 d0, d1, d2",
+            "vsub.i16 q0, q1, q2",
+            "vmul.f32 q0, q1, q2",
+            "vand q0, q1, q2",
+            "vorr d0, d1, d2",
+            "veor q0, q1, q2",
+            "vmov q0, q1",
+            "vmov.i32 q0, #0",
+            "vmov.i8 d0, #0xff",
+            "vdup.32 q0, r0",
+            "vld1.32 {d0}, [r0]",
+            "vld1.8 {d0, d1}, [r0]!",
+            "vst1.32 {d0, d1}, [r0:128]",
+            "vld2.16 {d0, d1}, [r0], r1",
+            "vmax.s32 q0, q1, q2",
+            "vshl.i32 q0, q1, #3",
+            "vshr.u16 d0, d1, #4",
+            "vcvt.f32.s32 q0, q1",
+            "vtbl.8 d0, {d1, d2}, d3",
+            "vext.8 q0, q1, q2, #3",
         ];
         compare_armv7(cases, "armv7a-linux-gnueabihf");
     }
@@ -75423,6 +75489,68 @@ mod armv8_assembly {
             eprintln!("{:?}: {}", message.kind, message.text);
         }
         print!("{}", String::from_utf8_lossy(&result.output));
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_matchables() {
+        let name = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let matcher = crate::compilers::x86_64::armv7::matcher();
+        for entry in &matcher.matchables {
+            if entry.mnemonic != name {
+                continue;
+            }
+            let operands: Vec<String> = entry
+                .operands
+                .iter()
+                .map(|operand| {
+                    let class = &matcher.classes[operand.class];
+                    format!(
+                        "{}[{}|{}|{}]",
+                        operand.token, class.name, class.predicate, class.parser
+                    )
+                })
+                .collect();
+            eprintln!("{} {}", entry.record, operands.join(" "));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_registers() {
+        let filter = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let target = crate::compilers::x86_64::armv7::target().expect("target");
+        for (index, register) in target.registers.iter().enumerate() {
+            if register
+                .assembly_name
+                .to_ascii_lowercase()
+                .contains(&filter)
+                || register.record.to_ascii_lowercase().contains(&filter)
+            {
+                eprintln!(
+                    "{index} {} enc={} subs={:?}",
+                    register.assembly_name, register.encoding, register.sub_registers
+                );
+            }
+        }
+        if let Some(class) = target.register_classes.get(&filter) {
+            eprintln!("class {filter}: {:?}", class);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_classes() {
+        let filter = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let matcher = crate::compilers::x86_64::armv7::matcher();
+        for class in &matcher.classes {
+            if class.name.contains(&filter) {
+                eprintln!(
+                    "{}|{}|{}|{}",
+                    class.name, class.predicate, class.render, class.parser
+                );
+            }
+        }
     }
 
     #[test]

@@ -7053,7 +7053,7 @@ fn tokenize_assembly(isa: Isa, text: &str) -> Vec<(String, bool)> {
     let characters: Vec<char> = text.chars().collect();
     let (tokenizing, breaking): (&[char], &[char]) = match isa {
         Isa::X86 => (&['[', ']', '*', '!'], &[]),
-        Isa::Armv7 => (&['[', ']', '*', '!', '/'], &[]),
+        Isa::Armv7 => (&['[', ']', '*', '!', '/'], &['.']),
         Isa::Armv8 => (&['[', ']', '*', '!', '/'], &['.']),
     };
     let separators = [' ', '\t', ','];

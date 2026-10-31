@@ -661,6 +661,20 @@ pub enum Operand {
     MemoryBarrier(u32),
     InstructionBarrier(u32),
     ItMask(u32),
+    VectorList {
+        register: RegisterId,
+        count: u32,
+        spaced: bool,
+        lane: VectorLane,
+    },
+    VectorIndex(u32),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum VectorLane {
+    Whole,
+    All,
+    Index(u32),
 }
 
 impl Operand {
@@ -1213,8 +1227,220 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             _ => false,
         },
         "isSetEndImm" => constant.is_some_and(|value| value == 0 || value == 1),
-        "isRegList" => matches!(operand, Operand::RegisterList(_)),
-        "isRegListWithAPSR" => matches!(operand, Operand::RegisterList(_)),
+        "isRegList" | "isRegListWithAPSR" => match operand {
+            Operand::RegisterList(list) => list.iter().all(|held| {
+                in_class(target, "GPR", *held) || in_class(target, "GPRwithAPSRnosp", *held)
+            }),
+            _ => false,
+        },
+        "isDPRRegList" | "isDPR_VFP2RegList" | "isDPR_8RegList" => match operand {
+            Operand::RegisterList(list) => {
+                let class = match base.as_str() {
+                    "isDPR_VFP2RegList" => "DPR_VFP2",
+                    "isDPR_8RegList" => "DPR_8",
+                    _ => "DPR",
+                };
+                list.iter().all(|held| in_class(target, class, *held))
+            }
+            _ => false,
+        },
+        "isSPRRegList" => match operand {
+            Operand::RegisterList(list) => list.iter().all(|held| in_class(target, "SPR", *held)),
+            _ => false,
+        },
+        "isVecListOneD" => match operand {
+            Operand::Register(held) => in_class(target, "DPR", *held),
+            Operand::VectorList {
+                count,
+                spaced: false,
+                lane: VectorLane::Whole,
+                ..
+            } => *count == 1,
+            _ => false,
+        },
+        "isVecListDPair" => match operand {
+            Operand::Register(held) => in_class(target, "QPR", *held),
+            Operand::VectorList {
+                register,
+                spaced: false,
+                lane: VectorLane::Whole,
+                ..
+            } => double_pair(target, *register, 1),
+            _ => false,
+        },
+        "isVecListDPairSpaced" => match operand {
+            Operand::VectorList {
+                register,
+                spaced: true,
+                lane: VectorLane::Whole,
+                ..
+            } => double_pair(target, *register, 2),
+            _ => false,
+        },
+        "isVecListDPairAllLanes" => match operand {
+            Operand::VectorList {
+                register,
+                spaced: false,
+                lane: VectorLane::All,
+                ..
+            } => double_pair(target, *register, 1),
+            _ => false,
+        },
+        "isVecListThreeD"
+        | "isVecListFourD"
+        | "isVecListOneDAllLanes"
+        | "isVecListThreeDAllLanes"
+        | "isVecListFourDAllLanes"
+        | "isVecListThreeQ"
+        | "isVecListFourQ"
+        | "isVecListDPairSpacedAllLanes"
+        | "isVecListThreeQAllLanes"
+        | "isVecListFourQAllLanes" => {
+            let name = base.trim_start_matches("isVecList");
+            let all_lanes = name.ends_with("AllLanes");
+            let stem = name.trim_end_matches("AllLanes");
+            let (wanted, spaced) = match stem {
+                "OneD" => (1, false),
+                "ThreeD" => (3, false),
+                "FourD" => (4, false),
+                "ThreeQ" => (3, true),
+                "FourQ" => (4, true),
+                _ => (2, true),
+            };
+            matches!(operand, Operand::VectorList { count, spaced: held_spaced, lane, .. }
+                if *count == wanted
+                    && *held_spaced == spaced
+                    && *lane == if all_lanes { VectorLane::All } else { VectorLane::Whole })
+        }
+        name if name.starts_with("isVecList") && name.ends_with("Indexed") => {
+            let stem = &name["isVecList".len()..name.len() - "Indexed".len()];
+            let (count, spaced, limit) = match stem {
+                "OneDByte" => (1, false, 7),
+                "OneDHWord" => (1, false, 3),
+                "OneDWord" => (1, false, 1),
+                "TwoDByte" => (2, false, 7),
+                "TwoDHWord" => (2, false, 3),
+                "TwoQWord" => (2, true, 1),
+                "TwoQHWord" => (2, true, 3),
+                "TwoDWord" => (2, false, 1),
+                "ThreeDByte" => (3, false, 7),
+                "ThreeDHWord" => (3, false, 3),
+                "ThreeQWord" => (3, true, 1),
+                "ThreeQHWord" => (3, true, 3),
+                "ThreeDWord" => (3, false, 1),
+                "FourDByte" => (4, false, 7),
+                "FourDHWord" => (4, false, 3),
+                "FourQWord" => (4, true, 1),
+                "FourQHWord" => (4, true, 3),
+                _ => (4, false, 1),
+            };
+            matches!(operand, Operand::VectorList { count: held, spaced: held_spaced, lane: VectorLane::Index(index), .. }
+                if *held == count && *held_spaced == spaced && *index <= limit)
+        }
+        "isVectorIndex8" | "isVectorIndex16" | "isVectorIndex32" | "isVectorIndex64" => {
+            let limit = match base.as_str() {
+                "isVectorIndex8" => 8,
+                "isVectorIndex16" => 4,
+                "isVectorIndex32" => 2,
+                _ => 1,
+            };
+            matches!(operand, Operand::VectorIndex(index) if *index < limit)
+        }
+        name if name.starts_with("isAlignedMemory") || name.starts_with("isDupAlignedMemory") => {
+            let stem = name
+                .trim_start_matches("isDup")
+                .trim_start_matches("isAligned")
+                .trim_start_matches("Memory");
+            let stem = stem
+                .trim_start_matches("Aligned")
+                .trim_start_matches("Memory");
+            memory.is_some_and(|held| {
+                if held.offset_register != NO_REGISTER || held.offset_immediate.is_some() {
+                    return false;
+                }
+                match stem {
+                    "" => true,
+                    "None" => held.alignment == 0,
+                    other => {
+                        let allowed: Vec<u32> = other
+                            .split("or")
+                            .filter_map(|piece| piece.parse::<u32>().ok())
+                            .map(|bits| bits / 8)
+                            .collect();
+                        held.alignment == 0 || allowed.contains(&held.alignment)
+                    }
+                }
+            })
+        }
+        "isAddrMode5" | "isAddrMode5FP16" => {
+            let half = base == "isAddrMode5FP16";
+            match operand {
+                Operand::Immediate(Expression::Constant(_)) => false,
+                Operand::Immediate(_) => true,
+                _ => memory.is_some_and(|held| {
+                    if held.offset_register != NO_REGISTER || held.alignment != 0 {
+                        return false;
+                    }
+                    match &held.offset_immediate {
+                        None => true,
+                        Some(Expression::Constant(value)) => {
+                            let limit = if half { 510 } else { 1020 };
+                            let mask = if half { 1 } else { 3 };
+                            (*value >= -limit && *value <= limit && value & mask == 0)
+                                || *value == minimum
+                        }
+                        Some(_) => false,
+                    }
+                }),
+            }
+        }
+        "isFPImm" => constant.is_some_and(|value| {
+            u32::try_from(value).is_ok_and(|bits| floating_point_immediate(bits).is_some())
+        }),
+        "isNEONi8splat" => constant.is_some_and(|value| (0..256).contains(&value)),
+        "isNEONi16splat" => {
+            !neon_replicate(constant, 8, 2, false)
+                && constant.is_some_and(|value| neon_i16_splat(value as u32))
+        }
+        "isNEONi16splatNot" => {
+            constant.is_some_and(|value| neon_i16_splat(!(value as u32) & 0xffff))
+        }
+        "isNEONi32splat" => {
+            !neon_replicate(constant, 8, 4, false)
+                && constant.is_some_and(|value| neon_i32_splat(value as u32))
+        }
+        "isNEONi32splatNot" => constant.is_some_and(|value| neon_i32_splat(!(value as u32))),
+        "isNEONi32vmov" => {
+            !neon_replicate(constant, 8, 4, false) && constant.is_some_and(neon_valid_i32_vmov)
+        }
+        "isNEONi32vmovNeg" => constant.is_some_and(|value| neon_valid_i32_vmov(!value)),
+        "isNEONi64splat" => constant.is_some_and(|value| {
+            let mut rest = value as u64;
+            (0..8).all(|_| {
+                let byte = rest & 0xff;
+                rest >>= 8;
+                byte == 0 || byte == 0xff
+            })
+        }),
+        "isNEONmovReplicate" | "isNEONinvReplicate" => {
+            let from = number(0) as u32;
+            let to = number(1) as u32;
+            let inverse = base == "isNEONinvReplicate";
+            if !inverse
+                && to == 64
+                && constant.is_some_and(|value| {
+                    let mut rest = value as u64;
+                    (0..8).all(|_| {
+                        let byte = rest & 0xff;
+                        rest >>= 8;
+                        byte == 0 || byte == 0xff
+                    })
+                })
+            {
+                return false;
+            }
+            neon_replicate(constant, from, to / from.max(1), inverse)
+        }
         "isBitfield" => matches!(operand, Operand::Bitfield { .. }),
         "isShifterImm" => matches!(operand, Operand::ShifterImmediate { .. }),
         "isITMask" => matches!(operand, Operand::ItMask(_)),
@@ -1224,6 +1450,121 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isConstPoolAsmImm" | "isConstantPoolImm" => matches!(operand, Operand::ConstantPool(_)),
         _ => false,
     }
+}
+
+fn floating_point_immediate(bits: u32) -> Option<u32> {
+    let sign = (bits >> 31) & 1;
+    let exponent = ((bits >> 23) & 0xff) as i32 - 127;
+    let mantissa = bits & 0x7f_ffff;
+    if mantissa & 0x7_ffff != 0 {
+        return None;
+    }
+    let mantissa = mantissa >> 19;
+    if mantissa & 0xf != mantissa || !(-3..=4).contains(&exponent) {
+        return None;
+    }
+    let exponent = ((exponent + 3) & 7) ^ 4;
+    Some((sign << 7) | ((exponent as u32) << 4) | mantissa)
+}
+
+fn neon_byte_splat(value: u32, size: u32) -> bool {
+    let mut rest = value;
+    let mut count = 0;
+    for _ in 0..size {
+        if rest & 0xff != 0 {
+            count += 1;
+        }
+        rest >>= 8;
+    }
+    count == 1
+}
+
+fn neon_i16_splat(value: u32) -> bool {
+    value <= 0xffff && (value == 0 || neon_byte_splat(value, 2))
+}
+
+fn encode_neon_i16_splat(value: u32) -> u32 {
+    if value >= 0x100 {
+        (value >> 8) | 0xa00
+    } else {
+        value | 0x800
+    }
+}
+
+fn neon_i32_splat(value: u32) -> bool {
+    value == 0 || neon_byte_splat(value, 4)
+}
+
+fn encode_neon_i32_splat(value: u32) -> u32 {
+    if (0x100..=0xff00).contains(&value) {
+        (value >> 8) | 0x200
+    } else if value > 0xffff && value <= 0xff_0000 {
+        (value >> 16) | 0x400
+    } else if value > 0xff_ffff {
+        (value >> 24) | 0x600
+    } else {
+        value
+    }
+}
+
+fn neon_valid_i32_vmov(value: i64) -> bool {
+    (value as u64) & 0xffff_ffff_ffff_ff00 == 0
+        || (value as u64) & 0xffff_ffff_ffff_00ff == 0
+        || (value as u64) & 0xffff_ffff_ff00_ffff == 0
+        || (value as u64) & 0xffff_ffff_00ff_ffff == 0
+        || (value as u64) & 0xffff_ffff_ffff_00ff == 0xff
+        || (value as u64) & 0xffff_ffff_ff00_ffff == 0xffff
+}
+
+fn encode_neon_vmov_immediate(value: u32) -> u32 {
+    if (256..=0xffff).contains(&value) {
+        (value >> 8) | if value & 0xff != 0 { 0xc00 } else { 0x200 }
+    } else if value > 0xffff && value <= 0xff_ffff {
+        (value >> 16) | if value & 0xff != 0 { 0xd00 } else { 0x400 }
+    } else if value > 0xff_ffff {
+        (value >> 24) | 0x600
+    } else {
+        value
+    }
+}
+
+fn neon_replicate(constant: Option<i64>, width: u32, elements: u32, inverse: bool) -> bool {
+    let Some(mut value) = constant else {
+        return false;
+    };
+    if value == 0 {
+        return false;
+    }
+    if inverse {
+        value = !value;
+    }
+    let mask = (1u64 << width) - 1;
+    let element = (value as u64) & mask;
+    if width == 16 && element & 0x00ff != 0 && element & 0xff00 != 0 {
+        return false;
+    }
+    if width == 32 && !neon_valid_i32_vmov(element as i64) {
+        return false;
+    }
+    let mut rest = value as u64;
+    for _ in 1..elements {
+        rest >>= width;
+        if rest & mask != element {
+            return false;
+        }
+    }
+    true
+}
+
+fn double_pair(target: &Target, register: RegisterId, step: u32) -> bool {
+    let held = &target.registers[register as usize];
+    held.sub_registers.len() == 2
+        && held
+            .sub_registers
+            .iter()
+            .all(|member| in_class(target, "DPR", *member))
+        && register_encoding(target, held.sub_registers[1])
+            == register_encoding(target, held.sub_registers[0]) + step
 }
 
 fn register_encoding(target: &Target, register: RegisterId) -> u32 {
@@ -1689,9 +2030,21 @@ impl<'s> Assembler<'s> {
         let Some(mut register) = self.arm32_try_register() else {
             return self.error(location, "register expected");
         };
-        if !in_class(self.target, "GPR", register)
-            && !in_class(self.target, "GPRwithAPSRnosp", register)
-        {
+        let family = if in_class(self.target, "DPR", register) {
+            "DPR"
+        } else if in_class(self.target, "SPR", register) {
+            "SPR"
+        } else {
+            "GPR"
+        };
+        let belongs = |target: &Target, held: RegisterId| -> bool {
+            if family == "GPR" {
+                in_class(target, "GPR", held) || in_class(target, "GPRwithAPSRnosp", held)
+            } else {
+                in_class(target, family, held)
+            }
+        };
+        if !belongs(self.target, register) {
             return self.error(location, "invalid register in register list");
         }
         let mut registers: Vec<RegisterId> = vec![register];
@@ -1705,23 +2058,27 @@ impl<'s> Assembler<'s> {
                 if register == end {
                     continue;
                 }
+                if !belongs(self.target, end) {
+                    return self.error(after, "invalid register in register list");
+                }
                 let first = register_encoding(self.target, register);
                 let last = register_encoding(self.target, end);
                 if first > last {
                     return self.error(after, "bad range in register list");
                 }
                 for encoding in first + 1..=last {
-                    let Some(next) = register_named(self.target, &format!("r{encoding}")) else {
-                        return self.error(after, "invalid register in register list");
+                    let name = match family {
+                        "DPR" => format!("d{encoding}"),
+                        "SPR" => format!("s{encoding}"),
+                        _ => match encoding {
+                            13 => "sp".to_string(),
+                            14 => "lr".to_string(),
+                            15 => "pc".to_string(),
+                            _ => format!("r{encoding}"),
+                        },
                     };
-                    let next = if encoding == 13 {
-                        register_named(self.target, "sp").unwrap_or(next)
-                    } else if encoding == 14 {
-                        register_named(self.target, "lr").unwrap_or(next)
-                    } else if encoding == 15 {
-                        register_named(self.target, "pc").unwrap_or(next)
-                    } else {
-                        next
+                    let Some(next) = register_named(self.target, &name) else {
+                        return self.error(after, "invalid register in register list");
                     };
                     if !registers.contains(&next) {
                         registers.push(next);
@@ -1735,12 +2092,13 @@ impl<'s> Assembler<'s> {
             let Some(next) = self.arm32_try_register() else {
                 return self.error(location, "register expected");
             };
-            if !in_class(self.target, "GPR", next)
-                && !in_class(self.target, "GPRwithAPSRnosp", next)
-            {
+            if !belongs(self.target, next) {
                 return self.error(location, "invalid register in register list");
             }
             if register_encoding(self.target, next) < register_encoding(self.target, register) {
+                if family != "GPR" {
+                    return self.error(location, "register list not in ascending order");
+                }
                 self.message(
                     MessageKind::Warning,
                     location,
@@ -2276,6 +2634,9 @@ impl<'s> Assembler<'s> {
                 if class.optional {
                     continue;
                 }
+                if class.kind == ClassKind::Token && class.value_name.starts_with('.') {
+                    continue;
+                }
                 if index == operand_count {
                     if !class.parser.is_empty() && !found.contains(&class.name) {
                         found.push(class.name.clone());
@@ -2299,6 +2660,8 @@ impl<'s> Assembler<'s> {
         for class in self.arm32_class_parsers(count, mnemonic) {
             let status = match class.as_str() {
                 "ModImm" => self.arm32_parse_modified_immediate(operands),
+                "FPImm" => self.arm32_parse_fp_immediate(operands, mnemonic),
+                name if name.starts_with("VecList") => self.arm32_parse_vector_list(operands),
                 "AM3Offset" => self.arm32_parse_am3_offset(operands),
                 "ITCondCode" | "CondCodeNoAL" | "CondCodeNoALInv" => {
                     self.arm32_parse_it_condition(operands)
@@ -2401,6 +2764,318 @@ impl<'s> Assembler<'s> {
             }
             _ => self.token_error("unexpected token in operand"),
         }
+    }
+
+    fn arm32_vector_lane(&mut self) -> Result<VectorLane, ()> {
+        if !self.is(TokenKind::LeftBracket) {
+            return Ok(VectorLane::Whole);
+        }
+        self.lex();
+        if self.is(TokenKind::RightBracket) {
+            self.lex();
+            return Ok(VectorLane::All);
+        }
+        if self.is(TokenKind::Hash) {
+            self.lex();
+        }
+        let location = self.location();
+        let Ok((expression, _)) = self.parse_expression() else {
+            self.error(location, "illegal expression");
+            return Err(());
+        };
+        let Expression::Constant(value) = expression else {
+            self.error(location, "lane index must be empty or an integer");
+            return Err(());
+        };
+        if !self.is(TokenKind::RightBracket) {
+            self.token_error("']' expected");
+            return Err(());
+        }
+        self.lex();
+        if !(0..=7).contains(&value) {
+            let at = self.location();
+            self.error(at, "lane index out of range");
+            return Err(());
+        }
+        Ok(VectorLane::Index(value as u32))
+    }
+
+    fn arm32_double_register(&self, number: u32) -> Option<RegisterId> {
+        register_named(self.target, &format!("d{number}"))
+    }
+
+    fn arm32_double_of_quad(&self, register: RegisterId) -> u32 {
+        let held = &self.target.registers[register as usize];
+        held.sub_registers
+            .first()
+            .map_or(0, |first| register_encoding(self.target, *first))
+    }
+
+    fn arm32_register_pair(&self, first: u32, step: u32) -> Option<RegisterId> {
+        let low = self.arm32_double_register(first)?;
+        let high = self.arm32_double_register(first + step)?;
+        self.target
+            .registers
+            .iter()
+            .position(|held| held.sub_registers == [low, high])
+            .map(|index| index as RegisterId)
+    }
+
+    fn arm32_parse_vector_list(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        let start = self.lexer.token.start;
+        if self.is(TokenKind::Identifier) {
+            let Some(register) = self.arm32_try_register() else {
+                return Parse::NoMatch;
+            };
+            let end = self.lexer.token.start;
+            let quad = in_class(self.target, "QPR", register);
+            let double = in_class(self.target, "DPR", register);
+            if !quad && !double {
+                operands.push(parsed(Operand::Register(register), start, end));
+                return Parse::Success;
+            }
+            let first = if quad {
+                self.arm32_double_of_quad(register)
+            } else {
+                register_encoding(self.target, register)
+            };
+            let Ok(lane) = self.arm32_vector_lane() else {
+                return Parse::Failure;
+            };
+            let end = self.lexer.token.start;
+            let held = if quad {
+                self.arm32_double_register(first).unwrap_or(register)
+            } else {
+                register
+            };
+            let operand = match lane {
+                VectorLane::Whole => Operand::Register(held),
+                other => Operand::VectorList {
+                    register: if quad && other == VectorLane::All {
+                        self.arm32_register_pair(first, 1).unwrap_or(held)
+                    } else {
+                        held
+                    },
+                    count: if quad { 2 } else { 1 },
+                    spaced: false,
+                    lane: other,
+                },
+            };
+            operands.push(parsed(operand, start, end));
+            return Parse::Success;
+        }
+        if !self.is(TokenKind::LeftBrace) {
+            return Parse::NoMatch;
+        }
+        self.lex();
+        let location = self.location();
+        let Some(register) = self.arm32_try_register() else {
+            self.error(location, "register expected");
+            return Parse::Failure;
+        };
+        let mut count = 1u32;
+        let mut spacing = 0u32;
+        let mut first_register = if in_class(self.target, "QPR", register) {
+            self.arm32_double_of_quad(register)
+        } else {
+            register_encoding(self.target, register)
+        };
+        let first = first_register;
+        let mut last = first_register;
+        if in_class(self.target, "QPR", register) {
+            spacing = 1;
+            last = first_register + 1;
+            count += 1;
+        } else if !in_class(self.target, "DPR", register) {
+            self.error(location, "invalid register in register list");
+            return Parse::Failure;
+        }
+        let Ok(lane) = self.arm32_vector_lane() else {
+            return Parse::Failure;
+        };
+        while self.is(TokenKind::Comma) || self.is(TokenKind::Minus) {
+            if self.is(TokenKind::Minus) {
+                if spacing == 0 {
+                    spacing = 1;
+                } else if spacing == 2 {
+                    self.token_error("sequential registers in double spaced list");
+                    return Parse::Failure;
+                }
+                self.lex();
+                let after = self.location();
+                let Some(end_register) = self.arm32_try_register() else {
+                    self.error(after, "register expected");
+                    return Parse::Failure;
+                };
+                let end_number = if in_class(self.target, "QPR", end_register) {
+                    self.arm32_double_of_quad(end_register) + 1
+                } else if in_class(self.target, "DPR", end_register) {
+                    register_encoding(self.target, end_register)
+                } else {
+                    self.error(after, "invalid register in register list");
+                    return Parse::Failure;
+                };
+                if last == end_number {
+                    continue;
+                }
+                if last > end_number {
+                    self.error(after, "bad range in register list");
+                    return Parse::Failure;
+                }
+                let Ok(next_lane) = self.arm32_vector_lane() else {
+                    return Parse::Failure;
+                };
+                if next_lane != lane {
+                    self.error(after, "mismatched lane index in register list");
+                    return Parse::Failure;
+                }
+                count += end_number - last;
+                last = end_number;
+                continue;
+            }
+            self.lex();
+            let location = self.location();
+            let old = last;
+            let Some(next) = self.arm32_try_register() else {
+                self.error(location, "register expected");
+                return Parse::Failure;
+            };
+            if in_class(self.target, "QPR", next) {
+                if spacing == 0 {
+                    spacing = 1;
+                } else if spacing == 2 {
+                    self.error(
+                        location,
+                        "invalid register in double-spaced list (must be 'D' register')",
+                    );
+                    return Parse::Failure;
+                }
+                let number = self.arm32_double_of_quad(next);
+                if number != old + 1 {
+                    self.error(location, "non-contiguous register range");
+                    return Parse::Failure;
+                }
+                last = number + 1;
+                count += 2;
+                let at = self.location();
+                let Ok(next_lane) = self.arm32_vector_lane() else {
+                    return Parse::Failure;
+                };
+                if next_lane != lane {
+                    self.error(at, "mismatched lane index in register list");
+                    return Parse::Failure;
+                }
+                continue;
+            }
+            if !in_class(self.target, "DPR", next) {
+                self.error(location, "invalid register in register list");
+                return Parse::Failure;
+            }
+            let number = register_encoding(self.target, next);
+            if spacing == 0 {
+                spacing = 1 + u32::from(number == old + 2);
+            }
+            if number != old + spacing {
+                self.error(location, "non-contiguous register range");
+                return Parse::Failure;
+            }
+            last = number;
+            count += 1;
+            let at = self.location();
+            let Ok(next_lane) = self.arm32_vector_lane() else {
+                return Parse::Failure;
+            };
+            if next_lane != lane {
+                self.error(at, "mismatched lane index in register list");
+                return Parse::Failure;
+            }
+        }
+        if !self.is(TokenKind::RightBrace) {
+            self.token_error("'}' expected");
+            return Parse::Failure;
+        }
+        let end = self.lexer.token.end;
+        self.lex();
+        first_register = first;
+        let Some(first_double) = self.arm32_double_register(first_register) else {
+            self.error(location, "invalid register in register list");
+            return Parse::Failure;
+        };
+        let held = match lane {
+            VectorLane::Index(_) => first_double,
+            _ if count == 2 => self
+                .arm32_register_pair(first_register, if spacing == 2 { 2 } else { 1 })
+                .unwrap_or(first_double),
+            _ => first_double,
+        };
+        operands.push(parsed(
+            Operand::VectorList {
+                register: held,
+                count,
+                spaced: spacing == 2,
+                lane,
+            },
+            start,
+            end,
+        ));
+        Parse::Success
+    }
+
+    fn arm32_parse_fp_immediate(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        mnemonic: &str,
+    ) -> Parse {
+        if !self.is(TokenKind::Hash) && !self.is(TokenKind::Dollar) {
+            return Parse::NoMatch;
+        }
+        let start = self.lexer.token.start;
+        let floating = operands
+            .iter()
+            .any(|held| matches!(held.token_text(), ".f32" | ".f64" | ".f16"));
+        let constant = mnemonic == "fconstd" || mnemonic == "fconsts";
+        if !floating && !constant {
+            return Parse::NoMatch;
+        }
+        self.lex();
+        let negative = self.is(TokenKind::Minus);
+        if negative {
+            self.lex();
+        }
+        let location = self.location();
+        let bits = if self.is(TokenKind::Real) && floating {
+            let value = self.lexer.token.text.parse::<f32>().unwrap_or(0.0);
+            let mut bits = u64::from(value.to_bits());
+            bits ^= u64::from(negative) << 31;
+            self.lex();
+            bits as i64
+        } else if self.is(TokenKind::Integer) && constant {
+            let value = self.lexer.token.text.parse::<i64>().unwrap_or(0);
+            self.lex();
+            if !(0..=255).contains(&value) {
+                self.error(location, "encoded floating point value out of range");
+                return Parse::Failure;
+            }
+            let sign = (value >> 7) & 1;
+            let exponent = (value >> 4) & 7;
+            let mantissa = value & 15;
+            let mut word = sign << 31;
+            word |= i64::from(exponent & 4 == 0) << 30;
+            word |= (if exponent & 4 != 0 { 0x1f } else { 0 }) << 25;
+            word |= (exponent & 3) << 23;
+            word |= mantissa << 19;
+            word
+        } else {
+            self.error(location, "invalid floating point immediate");
+            return Parse::Failure;
+        };
+        let end = self.lexer.token.start;
+        operands.push(parsed(
+            Operand::Immediate(Expression::Constant(bits)),
+            start,
+            end,
+        ));
+        Parse::Success
     }
 
     fn arm32_parse_prefixed(&mut self) -> Result<Expression, ()> {
@@ -2794,7 +3469,15 @@ impl<'s> Assembler<'s> {
                 let (add, amount) = split_offset(value);
                 immediate(into, i64::from(amount | (u32::from(add) << 8)));
             }
-            ("addRegListOperands" | "addRegListWithAPSROperands", Operand::RegisterList(list)) => {
+            (
+                "addRegListOperands"
+                | "addRegListWithAPSROperands"
+                | "addDPRRegListOperands"
+                | "addSPRRegListOperands"
+                | "addDPR_VFP2RegListOperands"
+                | "addDPR_8RegListOperands",
+                Operand::RegisterList(list),
+            ) => {
                 for register in list {
                     into.push(MachineOperand::Register(*register));
                 }
@@ -2917,6 +3600,129 @@ impl<'s> Assembler<'s> {
             ("addShifterImmOperands", Operand::ShifterImmediate { arithmetic, amount }) => {
                 immediate(into, i64::from((u32::from(*arithmetic) << 5) | amount))
             }
+            ("addVecListOperands", Operand::Register(held)) => {
+                into.push(MachineOperand::Register(*held))
+            }
+            ("addVecListOperands", Operand::VectorList { register, .. }) => {
+                into.push(MachineOperand::Register(*register))
+            }
+            ("addVecListIndexedOperands", Operand::VectorList { register, lane, .. }) => {
+                into.push(MachineOperand::Register(*register));
+                immediate(
+                    into,
+                    match lane {
+                        VectorLane::Index(index) => i64::from(*index),
+                        _ => 0,
+                    },
+                );
+            }
+            (
+                "addVectorIndex8Operands"
+                | "addVectorIndex16Operands"
+                | "addVectorIndex32Operands"
+                | "addVectorIndex64Operands",
+                Operand::VectorIndex(index),
+            ) => immediate(into, i64::from(*index)),
+            (method_name, Operand::Memory(memory))
+                if method_name.starts_with("addAlignedMemory")
+                    || method_name.starts_with("addDupAlignedMemory") =>
+            {
+                into.push(MachineOperand::Register(memory.base));
+                immediate(into, i64::from(memory.alignment));
+            }
+            ("addFPImmOperands", _) => immediate(
+                into,
+                i64::from(
+                    floating_point_immediate(operand.constant().unwrap_or(0) as u32).unwrap_or(0),
+                ),
+            ),
+            ("addNEONi8splatOperands", _) => {
+                immediate(into, operand.constant().unwrap_or(0) | 0xe00)
+            }
+            ("addNEONi16splatOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_i16_splat(operand.constant().unwrap_or(0) as u32)),
+            ),
+            ("addNEONi16splatNotOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_i16_splat(
+                    !(operand.constant().unwrap_or(0) as u32) & 0xffff,
+                )),
+            ),
+            ("addNEONi32splatOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_i32_splat(operand.constant().unwrap_or(0) as u32)),
+            ),
+            ("addNEONi32splatNotOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_i32_splat(
+                    !(operand.constant().unwrap_or(0) as u32),
+                )),
+            ),
+            ("addNEONi32vmovOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_vmov_immediate(
+                    operand.constant().unwrap_or(0) as u32
+                )),
+            ),
+            ("addNEONi32vmovNegOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_vmov_immediate(
+                    !(operand.constant().unwrap_or(0) as u32),
+                )),
+            ),
+            ("addNEONvmovi8ReplicateOperands", _) => {
+                immediate(into, (operand.constant().unwrap_or(0) & 0xff) | 0xe00)
+            }
+            ("addNEONinvi8ReplicateOperands", _) => {
+                immediate(into, (!operand.constant().unwrap_or(0) & 0xff) | 0xe00)
+            }
+            ("addNEONvmovi16ReplicateOperands", _) => {
+                let element = (operand.constant().unwrap_or(0) & 0xffff) as u32;
+                immediate(
+                    into,
+                    i64::from(if element >= 256 {
+                        (element >> 8) | 0x200
+                    } else {
+                        element
+                    }),
+                )
+            }
+            ("addNEONvmovi32ReplicateOperands", _) => immediate(
+                into,
+                i64::from(encode_neon_vmov_immediate(
+                    (operand.constant().unwrap_or(0) & 0xffff_ffff) as u32,
+                )),
+            ),
+            ("addNEONi64splatOperands", _) => {
+                let mut value = operand.constant().unwrap_or(0) as u64;
+                let mut bits = 0i64;
+                for index in 0..8 {
+                    bits |= ((value & 1) as i64) << index;
+                    value >>= 8;
+                }
+                immediate(into, bits | 0x1e00)
+            }
+            ("addAddrMode5Operands" | "addAddrMode5FP16Operands", Operand::Immediate(held)) => {
+                expression(into, held);
+                immediate(into, 0);
+            }
+            ("addAddrMode5Operands" | "addAddrMode5FP16Operands", Operand::Memory(memory)) => {
+                let divisor = if name == "addAddrMode5Operands" { 4 } else { 2 };
+                let mut value = match &memory.offset_immediate {
+                    Some(Expression::Constant(value)) => *value / divisor,
+                    _ => 0,
+                };
+                let subtract = value < 0;
+                if value == i64::from(i32::MIN) / divisor || value == i64::from(i32::MIN) {
+                    value = 0;
+                }
+                if value < 0 {
+                    value = -value;
+                }
+                into.push(MachineOperand::Register(memory.base));
+                immediate(into, value | (i64::from(subtract) << 8));
+            }
             ("addRotImmOperands", Operand::RotateImmediate(amount)) => {
                 immediate(into, i64::from(amount >> 3))
             }
@@ -2948,6 +3754,13 @@ impl<'s> Assembler<'s> {
                             && candidate.value_name.eq_ignore_ascii_case(text)
                     }) {
                         return matcher.is_subclass(found, class);
+                    }
+                }
+                if let Some(literal) = held.value_name.strip_prefix('#') {
+                    if let (Some(Operand::Immediate(Expression::Constant(value))), Ok(wanted)) =
+                        (operand_of(operand), literal.parse::<i64>())
+                    {
+                        return *value == wanted;
                     }
                 }
                 false
@@ -3893,6 +4706,9 @@ enum OperandEncoder {
     ThumbWideAdrLabel,
     AdrLabel,
     ItMask,
+    ShiftRight(u32),
+    AddressMode6(u32),
+    AddressMode6Offset,
 }
 
 fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
@@ -3967,6 +4783,14 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
         "getT2AdrLabelOpValue" => OperandEncoder::ThumbWideAdrLabel,
         "getAdrLabelOpValue" => OperandEncoder::AdrLabel,
         "getITMaskOpValue" => OperandEncoder::ItMask,
+        "getAddrMode6AddressOpValue" => OperandEncoder::AddressMode6(0),
+        "getAddrMode6OneLane32AddressOpValue" => OperandEncoder::AddressMode6(1),
+        "getAddrMode6DupAddressOpValue" => OperandEncoder::AddressMode6(2),
+        "getAddrMode6OffsetOpValue" => OperandEncoder::AddressMode6Offset,
+        "getShiftRight8Imm" => OperandEncoder::ShiftRight(8),
+        "getShiftRight16Imm" => OperandEncoder::ShiftRight(16),
+        "getShiftRight32Imm" => OperandEncoder::ShiftRight(32),
+        "getShiftRight64Imm" | "getNEONVcvtImm32OpValue" => OperandEncoder::ShiftRight(64),
         _ => return Err(format!("operand encoder {text}")),
     })
 }
@@ -4141,11 +4965,40 @@ fn operand_value(
     let operand = instruction.operand(first);
     Ok(match encoder {
         OperandEncoder::Machine => match operand {
-            MachineOperand::Register(register) => u64::from(register_encoding(target, *register)),
+            MachineOperand::Register(register) => {
+                let number = u64::from(register_encoding(target, *register));
+                if in_class(target, "QPR", *register) || in_class(target, "QQPR", *register) {
+                    number * 2
+                } else {
+                    number
+                }
+            }
             MachineOperand::Immediate(value) => *value as u64,
             MachineOperand::Expression(_) => return Err(unencodable("an expression operand")),
         },
         OperandEncoder::CarryOut => u64::from(instruction.register_at(first) != NO_REGISTER),
+        OperandEncoder::AddressMode6(kind) => {
+            let alignment = immediate(first + 1);
+            let align = match (kind, alignment) {
+                (0, 2 | 4 | 8) | (2, 2 | 4 | 8) => 1,
+                (0, 16) => 2,
+                (0, 32) => 3,
+                (2, 16) => 3,
+                (1, 4) => 3,
+                _ => 0,
+            };
+            register(first) | (align << 4)
+        }
+        OperandEncoder::AddressMode6Offset => {
+            if instruction.register_at(first) == NO_REGISTER {
+                0x0d
+            } else {
+                register(first)
+            }
+        }
+        OperandEncoder::ShiftRight(width) => {
+            u64::from(*width).wrapping_sub(immediate(first) as u64)
+        }
         OperandEncoder::ModifiedImmediate => match operand {
             MachineOperand::Expression(expression) => {
                 add_fixup(expression, Fixup32::ModImm);
@@ -4297,11 +5150,20 @@ fn operand_value(
             register(first) | (u64::from(immediate(first + 1) != 0) << 4)
         }
         OperandEncoder::RegisterList => {
-            let mut binary = 0u64;
-            for index in first..instruction.operands.len() {
-                binary |= 1 << register(index);
+            let leading = instruction.register_at(first);
+            let singles = in_class(target, "SPR", leading);
+            let doubles = in_class(target, "DPR", leading);
+            if singles || doubles {
+                let count = (instruction.operands.len() - first) as u64 & 0xff;
+                let binary = (register(first) & 0x1f) << 8;
+                binary | if singles { count } else { count * 2 }
+            } else {
+                let mut binary = 0u64;
+                for index in first..instruction.operands.len() {
+                    binary |= 1 << register(index);
+                }
+                binary
             }
-            binary
         }
         OperandEncoder::BitfieldMask => {
             let inverted = !(immediate(first) as u32);
@@ -5481,6 +6343,28 @@ impl<'t> Printer<'t> {
                 out.push_str(&format!("#{}", floating_text(held)));
             }
             "printImmPlusOneOperand" => out.push_str(&format!("#{}", value(0) + 1)),
+            "printVMOVModImmOperand" => {
+                let encoded = value(0) as u64;
+                let command = (encoded >> 8) & 0x1f;
+                let immediate = encoded & 0xff;
+                let held: u64 = if command == 0xe {
+                    immediate
+                } else if command & 0xc == 0x8 || command & 0x8 == 0 {
+                    immediate << (8 * ((command & 0x6) >> 1))
+                } else if command & 0xe == 0xc {
+                    let byte = 1 + (command & 1);
+                    (immediate << (8 * byte)) | (0xffff >> (8 * (2 - byte)))
+                } else {
+                    let mut held = 0u64;
+                    for byte in 0..8 {
+                        if (encoded >> byte) & 1 == 1 {
+                            held |= 0xff << (8 * byte);
+                        }
+                    }
+                    held
+                };
+                out.push_str(&format!("#0x{held:x}"));
+            }
             "printRotImmOperand" => {
                 if value(0) != 0 {
                     out.push_str(&format!(", ror #{}", 8 * value(0)));
