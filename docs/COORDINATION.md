@@ -166,7 +166,7 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
   Eşleme sembolleri ($x/$d, `-implicit-mapsyms`), CFI kayıt adları ve yazım denetimi önerileri tamam.
   Omni IR → arm64 arka ucu ilk sürümde (`Armv8.rs` içinde `native`: derleme, bağlama ve host llvm-objdump ile çözme
   doğrulandı; test içinde yazılan AArch64 emülatörü (`mod arm_emulator`, disassembler çıktısını yorumlar) arm64 programlarını çalıştırıp
-  yorumlayıcıyla aynı çıktıyı ve çıkış kodunu verdiğini doğruluyor). İki yerel arka uç da paylaşımlı kütüphane (`.so`, ET_DYN) üretiyor: x86_64 çıktısı `dlopen`/`dlsym` ile, arm64 çıktısı emülatörle çalıştırılıp doğrulandı. Sırada: SVE/SME ve big-endian/ILP32. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
+  yorumlayıcıyla aynı çıktıyı ve çıkış kodunu verdiğini doğruluyor). İki yerel arka uç da paylaşımlı kütüphane (`.so`, ET_DYN) üretiyor: x86_64 çıktısı `dlopen`/`dlsym` ile, arm64 çıktısı emülatörle çalıştırılıp doğrulandı. ARMv7 (`Armv7.rs`): A32 ayrıştırıcı, eşleyici ve kodlayıcı ilk sürümde (79 komut host llvm-mc ile bayt bayt aynı); sırada Thumb, VFP/NEON, yazıcı, etiket/fixup ve ELF32 REL. Sırada: SVE/SME ve big-endian/ILP32. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.
