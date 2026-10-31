@@ -73434,6 +73434,25 @@ mod armv8_assembly {
 
     #[test]
     #[ignore]
+    fn armv7_classes_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        for class in &target.assembly_operand_classes {
+            eprintln!(
+                "C {} | pred={} | render={} | parser={} | supers={:?} | diag={} | opt={} | def={}",
+                class.name,
+                class.predicate_method,
+                class.render_method,
+                class.parser_method,
+                class.super_classes,
+                class.diagnostic_type,
+                class.optional,
+                class.default_method
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
     fn armv7_methods_debug() {
         let table = armv7::table().expect("the table reads");
         let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
