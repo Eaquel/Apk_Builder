@@ -74981,14 +74981,24 @@ mod armv8_assembly {
 
     fn armv7_expected(source: &str, triple: &str) -> Option<Vec<u8>> {
         use std::io::Write;
+        let folder = std::env::temp_dir().join(format!(
+            "apk_builder_armv7_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&folder).ok()?;
+        let object = folder.join("expected.o");
+        let binary = folder.join("expected.bin");
         let mut child = std::process::Command::new("llvm-mc-18")
             .args([
                 &format!("-triple={triple}"),
                 "-mcpu=cortex-a15",
-                "-show-encoding",
+                "-filetype=obj",
+                "-o",
             ])
+            .arg(&object)
             .stdin(std::process::Stdio::piped())
-            .stdout(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
             .stderr(std::process::Stdio::null())
             .spawn()
             .ok()?;
@@ -74997,14 +75007,23 @@ mod armv8_assembly {
             .take()?
             .write_all(format!("{source}\n").as_bytes())
             .ok()?;
-        let output = child.wait_with_output().ok()?;
-        let text = String::from_utf8_lossy(&output.stdout).to_string();
-        let line = text.lines().find(|line| line.contains("encoding: ["))?;
-        let inside = line.split("encoding: [").nth(1)?.split(']').next()?;
-        inside
-            .split(',')
-            .map(|piece| u8::from_str_radix(piece.trim().trim_start_matches("0x"), 16).ok())
-            .collect()
+        if !child.wait().ok()?.success() {
+            let _ = std::fs::remove_dir_all(&folder);
+            return None;
+        }
+        let status = std::process::Command::new("llvm-objcopy-18")
+            .args(["-O", "binary", "--only-section=.text"])
+            .arg(&object)
+            .arg(&binary)
+            .status()
+            .ok()?;
+        let bytes = if status.success() {
+            std::fs::read(&binary).ok()
+        } else {
+            None
+        };
+        let _ = std::fs::remove_dir_all(&folder);
+        bytes
     }
 
     fn armv7_text_expected(source: &str, triple: &str) -> Option<String> {
@@ -75180,6 +75199,16 @@ mod armv8_assembly {
             "clz r0, r1",
             "bfc r0, #4, #8",
             "bfi r0, r1, #4, #8",
+            "bl foo",
+            "b foo",
+            "beq foo",
+            "blx foo",
+            "adr r0, foo",
+            "ldr r0, foo",
+            "ldrh r0, foo",
+            "movw r0, #:lower16:foo",
+            "movt r0, #:upper16:foo",
+            "ldr r0, [pc, #8]",
             "ubfx r0, r1, #3, #5",
             "ssat r0, #8, r1",
             "ssat r0, #8, r1, lsl #4",
@@ -75285,6 +75314,11 @@ mod armv8_assembly {
             "it eq",
             "cbz r0, #8",
             "wfi",
+            "bl foo",
+            "b.w foo",
+            "blx foo",
+            "movw r0, #:lower16:foo",
+            "movt r0, #:upper16:foo",
         ];
         compare_armv7(cases, "thumbv7a-linux-gnueabihf");
     }

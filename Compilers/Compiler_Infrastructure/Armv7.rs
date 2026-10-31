@@ -29,6 +29,525 @@ pub fn matcher() -> &'static Matcher {
 
 pub const THUMB_MODE: u32 = 1 << 30;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, PartialOrd, Ord)]
+pub enum Fixup32 {
+    LdstPcrel12,
+    T2LdstPcrel12,
+    PcrelTenUnscaled,
+    PcrelTen,
+    T2PcrelTen,
+    PcrelNine,
+    T2PcrelNine,
+    LdstAbs12,
+    ThumbAdrPcrel10,
+    AdrPcrel12,
+    T2AdrPcrel12,
+    CondBranch,
+    UncondBranch,
+    T2CondBranch,
+    T2UncondBranch,
+    ThumbBr,
+    UncondBl,
+    CondBl,
+    Blx,
+    ThumbBl,
+    ThumbBlx,
+    ThumbCb,
+    ThumbCp,
+    ThumbBcc,
+    MovtHi16,
+    MovwLo16,
+    T2MovtHi16,
+    T2MovwLo16,
+    ThumbUpper815,
+    ThumbUpper07,
+    ThumbLower815,
+    ThumbLower07,
+    ModImm,
+    T2SoImm,
+}
+
+impl Fixup32 {
+    pub fn name(self) -> &'static str {
+        match self {
+            Fixup32::LdstPcrel12 => "fixup_arm_ldst_pcrel_12",
+            Fixup32::T2LdstPcrel12 => "fixup_t2_ldst_pcrel_12",
+            Fixup32::PcrelTenUnscaled => "fixup_arm_pcrel_10_unscaled",
+            Fixup32::PcrelTen => "fixup_arm_pcrel_10",
+            Fixup32::T2PcrelTen => "fixup_t2_pcrel_10",
+            Fixup32::PcrelNine => "fixup_arm_pcrel_9",
+            Fixup32::T2PcrelNine => "fixup_t2_pcrel_9",
+            Fixup32::LdstAbs12 => "fixup_arm_ldst_abs_12",
+            Fixup32::ThumbAdrPcrel10 => "fixup_thumb_adr_pcrel_10",
+            Fixup32::AdrPcrel12 => "fixup_arm_adr_pcrel_12",
+            Fixup32::T2AdrPcrel12 => "fixup_t2_adr_pcrel_12",
+            Fixup32::CondBranch => "fixup_arm_condbranch",
+            Fixup32::UncondBranch => "fixup_arm_uncondbranch",
+            Fixup32::T2CondBranch => "fixup_t2_condbranch",
+            Fixup32::T2UncondBranch => "fixup_t2_uncondbranch",
+            Fixup32::ThumbBr => "fixup_arm_thumb_br",
+            Fixup32::UncondBl => "fixup_arm_uncondbl",
+            Fixup32::CondBl => "fixup_arm_condbl",
+            Fixup32::Blx => "fixup_arm_blx",
+            Fixup32::ThumbBl => "fixup_arm_thumb_bl",
+            Fixup32::ThumbBlx => "fixup_arm_thumb_blx",
+            Fixup32::ThumbCb => "fixup_arm_thumb_cb",
+            Fixup32::ThumbCp => "fixup_arm_thumb_cp",
+            Fixup32::ThumbBcc => "fixup_arm_thumb_bcc",
+            Fixup32::MovtHi16 => "fixup_arm_movt_hi16",
+            Fixup32::MovwLo16 => "fixup_arm_movw_lo16",
+            Fixup32::T2MovtHi16 => "fixup_t2_movt_hi16",
+            Fixup32::T2MovwLo16 => "fixup_t2_movw_lo16",
+            Fixup32::ThumbUpper815 => "fixup_arm_thumb_upper_8_15",
+            Fixup32::ThumbUpper07 => "fixup_arm_thumb_upper_0_7",
+            Fixup32::ThumbLower815 => "fixup_arm_thumb_lower_8_15",
+            Fixup32::ThumbLower07 => "fixup_arm_thumb_lower_0_7",
+            Fixup32::ModImm => "fixup_arm_mod_imm",
+            Fixup32::T2SoImm => "fixup_t2_so_imm",
+        }
+    }
+
+    pub fn bits(self) -> usize {
+        match self {
+            Fixup32::ThumbAdrPcrel10
+            | Fixup32::ThumbCp
+            | Fixup32::ThumbBcc
+            | Fixup32::ThumbUpper815
+            | Fixup32::ThumbUpper07
+            | Fixup32::ThumbLower815
+            | Fixup32::ThumbLower07 => 8,
+            Fixup32::CondBranch
+            | Fixup32::UncondBranch
+            | Fixup32::UncondBl
+            | Fixup32::CondBl
+            | Fixup32::Blx => 24,
+            Fixup32::ThumbBr | Fixup32::ThumbCb => 16,
+            Fixup32::MovtHi16 | Fixup32::MovwLo16 | Fixup32::T2MovtHi16 | Fixup32::T2MovwLo16 => 20,
+            Fixup32::ModImm => 12,
+            Fixup32::T2SoImm => 26,
+            _ => 32,
+        }
+    }
+
+    pub fn pc_relative(self) -> bool {
+        !matches!(
+            self,
+            Fixup32::LdstAbs12
+                | Fixup32::MovtHi16
+                | Fixup32::MovwLo16
+                | Fixup32::T2MovtHi16
+                | Fixup32::T2MovwLo16
+                | Fixup32::ThumbUpper815
+                | Fixup32::ThumbUpper07
+                | Fixup32::ThumbLower815
+                | Fixup32::ThumbLower07
+                | Fixup32::ModImm
+                | Fixup32::T2SoImm
+        )
+    }
+}
+
+fn swap_half_words(value: u32) -> u32 {
+    value.rotate_right(16)
+}
+
+pub fn adjust_fixup_value(
+    kind: Fixup32,
+    value: u64,
+    resolved: bool,
+    thumb_two: bool,
+) -> Result<u32, &'static str> {
+    let range_error = "out of range pc-relative fixup value";
+    let signed = |held: u64, bits: u32| -> bool {
+        let shifted = (held as i64) << (64 - bits) >> (64 - bits);
+        shifted == held as i64
+    };
+    Ok(match kind {
+        Fixup32::MovtHi16 | Fixup32::MovwLo16 => {
+            let mut held = value as u32;
+            if kind == Fixup32::MovtHi16 && resolved {
+                held >>= 16;
+            }
+            (((held & 0xf000) >> 12) << 16) | (held & 0xfff)
+        }
+        Fixup32::T2MovtHi16 | Fixup32::T2MovwLo16 => {
+            let mut held = value as u32;
+            if kind == Fixup32::T2MovtHi16 && resolved {
+                held >>= 16;
+            }
+            let high4 = (held & 0xf000) >> 12;
+            let i = (held & 0x800) >> 11;
+            let mid3 = (held & 0x700) >> 8;
+            let low8 = held & 0xff;
+            swap_half_words((high4 << 16) | (i << 26) | (mid3 << 12) | low8)
+        }
+        Fixup32::ThumbUpper815 => {
+            if resolved {
+                (value as u32 & 0xff00_0000) >> 24
+            } else {
+                value as u32 & 0xff
+            }
+        }
+        Fixup32::ThumbUpper07 => {
+            if resolved {
+                (value as u32 & 0x00ff_0000) >> 16
+            } else {
+                value as u32 & 0xff
+            }
+        }
+        Fixup32::ThumbLower815 => {
+            if resolved {
+                (value as u32 & 0xff00) >> 8
+            } else {
+                value as u32 & 0xff
+            }
+        }
+        Fixup32::ThumbLower07 => value as u32 & 0xff,
+        Fixup32::LdstPcrel12 | Fixup32::T2LdstPcrel12 | Fixup32::LdstAbs12 => {
+            let mut held = value as i64;
+            if kind == Fixup32::LdstPcrel12 {
+                held -= 4;
+            }
+            if kind != Fixup32::LdstAbs12 {
+                held -= 4;
+            }
+            let add = held >= 0;
+            let magnitude = held.unsigned_abs();
+            if magnitude >= 4096 {
+                return Err(range_error);
+            }
+            let result = magnitude as u32 | (u32::from(add) << 23);
+            if kind == Fixup32::T2LdstPcrel12 {
+                swap_half_words(result)
+            } else {
+                result
+            }
+        }
+        Fixup32::AdrPcrel12 => {
+            let mut held = (value as i64) - 8;
+            let mut opcode = 4u32;
+            if held < 0 {
+                held = -held;
+                opcode = 2;
+            }
+            match so_immediate(held as u32) {
+                Some(encoded) => encoded | (opcode << 21),
+                None => return Err(range_error),
+            }
+        }
+        Fixup32::T2AdrPcrel12 => {
+            let mut held = (value as i64) - 4;
+            let mut opcode = 0u32;
+            if held < 0 {
+                held = -held;
+                opcode = 5;
+            }
+            let held = held as u32;
+            let mut out = opcode << 21;
+            out |= (held & 0x800) << 15;
+            out |= (held & 0x700) << 4;
+            out |= held & 0xff;
+            swap_half_words(out)
+        }
+        Fixup32::CondBranch
+        | Fixup32::UncondBranch
+        | Fixup32::UncondBl
+        | Fixup32::CondBl
+        | Fixup32::Blx => {
+            let held = (value as i64) - 8;
+            if !signed(held as u64, 26) {
+                return Err("Relocation out of range");
+            }
+            if (kind == Fixup32::Blx && held % 2 != 0) || (kind != Fixup32::Blx && held % 4 != 0) {
+                return Err("Relocation not aligned");
+            }
+            (0xff_ffff & (held >> 2)) as u32
+        }
+        Fixup32::T2UncondBranch => {
+            let held = (value as i64) - 4;
+            if !signed(held as u64, 25) {
+                return Err("Relocation out of range");
+            }
+            let held = (held >> 1) as u32;
+            let i = held & 0x80_0000 != 0;
+            let mut j1 = held & 0x40_0000 != 0;
+            let mut j2 = held & 0x20_0000 != 0;
+            j1 ^= i;
+            j2 ^= i;
+            let mut out = 0u32;
+            out |= u32::from(i) << 26;
+            out |= u32::from(!j1) << 13;
+            out |= u32::from(!j2) << 11;
+            out |= (held & 0x1f_f800) << 5;
+            out |= held & 0x7ff;
+            swap_half_words(out)
+        }
+        Fixup32::T2CondBranch => {
+            let held = (value as i64) - 4;
+            if !signed(held as u64, 21) {
+                return Err("Relocation out of range");
+            }
+            let held = (held >> 1) as u32;
+            let mut out = 0u32;
+            out |= (held & 0x8_0000) << 7;
+            out |= (held & 0x4_0000) >> 7;
+            out |= (held & 0x2_0000) >> 4;
+            out |= (held & 0x1_f800) << 5;
+            out |= held & 0x7ff;
+            swap_half_words(out)
+        }
+        Fixup32::ThumbBl => {
+            let held = (value as i64) - 4;
+            if !signed(held as u64, 25) || (!thumb_two && !signed(held as u64, 23)) {
+                return Err("Relocation out of range");
+            }
+            let offset = (held >> 1) as u32;
+            let sign = (offset & 0x80_0000) >> 23;
+            let i1 = (offset & 0x40_0000) >> 22;
+            let j1 = (i1 ^ 1) ^ sign;
+            let i2 = (offset & 0x20_0000) >> 21;
+            let j2 = (i2 ^ 1) ^ sign;
+            let imm10 = (offset & 0x1f_f800) >> 11;
+            let imm11 = offset & 0x7ff;
+            let first = (sign << 10) | imm10;
+            let second = (j1 << 13) | (j2 << 11) | imm11;
+            (second << 16) | first
+        }
+        Fixup32::ThumbBlx => {
+            if !value.is_multiple_of(4) {
+                return Err("misaligned ARM call destination");
+            }
+            let offset = ((value as i64) - 4) as u32 >> 2;
+            let sign = (offset & 0x40_0000) >> 22;
+            let i1 = (offset & 0x20_0000) >> 21;
+            let j1 = (i1 ^ 1) ^ sign;
+            let i2 = (offset & 0x10_0000) >> 20;
+            let j2 = (i2 ^ 1) ^ sign;
+            let imm10_high = (offset & 0xf_fc00) >> 10;
+            let imm10_low = offset & 0x3ff;
+            let first = (sign << 10) | imm10_high;
+            let second = (j1 << 13) | (j2 << 11) | (imm10_low << 1);
+            (second << 16) | first
+        }
+        Fixup32::ThumbAdrPcrel10 | Fixup32::ThumbCp => {
+            if !thumb_two && resolved {
+                let offset = (value as i64) - 4;
+                if offset & 3 != 0 {
+                    return Err("misaligned pc-relative fixup value");
+                }
+                if !(0..=1020).contains(&offset) {
+                    return Err(range_error);
+                }
+            }
+            (((value as i64) - 4) >> 2) as u32 & 0xff
+        }
+        Fixup32::ThumbCb => {
+            if (value as i64) < 2 || value > 0x82 || value & 1 != 0 {
+                return Err(range_error);
+            }
+            let binary = ((value - 4) >> 1) as u32;
+            ((binary & 0x20) << 4) | ((binary & 0x1f) << 3)
+        }
+        Fixup32::ThumbBr => {
+            if !thumb_two {
+                let offset = (value as i64) - 4;
+                if !(-2048..=2046).contains(&offset) {
+                    return Err(range_error);
+                }
+            }
+            ((((value as i64) - 4) >> 1) & 0x7ff) as u32
+        }
+        Fixup32::ThumbBcc => {
+            if !thumb_two {
+                let offset = (value as i64) - 4;
+                if !(-256..=254).contains(&offset) {
+                    return Err(range_error);
+                }
+            }
+            ((((value as i64) - 4) >> 1) & 0xff) as u32
+        }
+        Fixup32::PcrelTenUnscaled => {
+            let mut held = (value as i64) - 8;
+            let add = held >= 0;
+            if held < 0 {
+                held = -held;
+            }
+            if held >= 256 {
+                return Err(range_error);
+            }
+            let held = held as u32;
+            ((held & 0xf) | ((held & 0xf0) << 4)) | (u32::from(add) << 23)
+        }
+        Fixup32::PcrelTen | Fixup32::T2PcrelTen => {
+            let mut held = value as i64 - 4;
+            if kind == Fixup32::PcrelTen {
+                held -= 4;
+            }
+            let add = held >= 0;
+            if held < 0 {
+                held = -held;
+            }
+            held >>= 2;
+            if held >= 256 {
+                return Err(range_error);
+            }
+            let result = held as u32 | (u32::from(add) << 23);
+            if kind == Fixup32::T2PcrelTen {
+                swap_half_words(result)
+            } else {
+                result
+            }
+        }
+        Fixup32::PcrelNine | Fixup32::T2PcrelNine => {
+            let mut held = value as i64 - 4;
+            if kind == Fixup32::PcrelNine {
+                held -= 4;
+            }
+            let add = held >= 0;
+            if held < 0 {
+                held = -held;
+            }
+            if held & 1 != 0 {
+                return Err("invalid value for this fixup");
+            }
+            held >>= 1;
+            if held >= 256 {
+                return Err(range_error);
+            }
+            let result = held as u32 | (u32::from(add) << 23);
+            if kind == Fixup32::T2PcrelNine {
+                swap_half_words(result)
+            } else {
+                result
+            }
+        }
+        Fixup32::ModImm => match so_immediate(value as u32) {
+            Some(encoded) if encoded >> 12 == 0 => encoded,
+            _ => return Err("out of range immediate fixup value"),
+        },
+        Fixup32::T2SoImm => match thumb_so_immediate(value as u32) {
+            Some(encoded) => {
+                let mut result = 0u32;
+                result |= (encoded & 0x800) << 15;
+                result |= (encoded & 0x700) << 4;
+                result |= encoded & 0xff;
+                swap_half_words(result)
+            }
+            None => return Err("out of range immediate fixup value"),
+        },
+    })
+}
+
+pub fn elf_relocation(
+    kind: Option<Fixup32>,
+    size: usize,
+    specifier: &str,
+    pc_relative: bool,
+) -> Result<u32, &'static str> {
+    let specifier = specifier.to_ascii_lowercase();
+    let spec = match specifier.as_str() {
+        "lower16" | "upper16" | "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15" => "",
+        other => other,
+    };
+    if pc_relative {
+        return Ok(match kind {
+            None if size == 4 => match spec {
+                "" => 3,
+                "gottpoff" => 107,
+                "got_prel" => 96,
+                "prel31" => 42,
+                _ => return Err("invalid fixup for 4-byte pc-relative data relocation"),
+            },
+            None => return Err("unsupported relocation type"),
+            Some(Fixup32::Blx) | Some(Fixup32::UncondBl) => {
+                if spec == "tlscall" {
+                    91
+                } else {
+                    28
+                }
+            }
+            Some(Fixup32::CondBl) | Some(Fixup32::CondBranch) | Some(Fixup32::UncondBranch) => 29,
+            Some(Fixup32::T2CondBranch) => 51,
+            Some(Fixup32::T2UncondBranch) => 30,
+            Some(Fixup32::MovtHi16) => 46,
+            Some(Fixup32::MovwLo16) => 45,
+            Some(Fixup32::T2MovtHi16) => 50,
+            Some(Fixup32::T2MovwLo16) => 49,
+            Some(Fixup32::ThumbUpper815) => 135,
+            Some(Fixup32::ThumbUpper07) => 134,
+            Some(Fixup32::ThumbLower815) => 133,
+            Some(Fixup32::ThumbLower07) => 132,
+            Some(Fixup32::ThumbBr) => 102,
+            Some(Fixup32::ThumbBcc) => 103,
+            Some(Fixup32::ThumbBl) | Some(Fixup32::ThumbBlx) => {
+                if spec == "tlscall" {
+                    93
+                } else {
+                    10
+                }
+            }
+            Some(Fixup32::LdstPcrel12) => 4,
+            Some(Fixup32::PcrelTenUnscaled) => 64,
+            Some(Fixup32::T2LdstPcrel12) => 54,
+            Some(Fixup32::AdrPcrel12) => 58,
+            Some(Fixup32::ThumbAdrPcrel10) => 11,
+            Some(Fixup32::T2AdrPcrel12) => 53,
+            Some(_) => return Err("unsupported relocation type"),
+        });
+    }
+    Ok(match kind {
+        None => match (size, spec) {
+            (1, "") => 8,
+            (2, "") => 5,
+            (4, "") => 2,
+            (4, "got") => 26,
+            (4, "tlsgd") => 104,
+            (4, "tpoff") => 108,
+            (4, "gottpoff") => 107,
+            (4, "gotoff") => 24,
+            (4, "got_prel") => 96,
+            (4, "target1") => 38,
+            (4, "target2") => 41,
+            (4, "prel31") => 42,
+            (4, "sbrel") => 9,
+            (4, "tlsldo") => 106,
+            (4, "tlscall") => 91,
+            (4, "tlsdesc") => 90,
+            (4, "tlsldm") => 105,
+            (4, "tlsdescseq") => 92,
+            (1, _) => return Err("invalid fixup for 1-byte data relocation"),
+            (2, _) => return Err("invalid fixup for 2-byte data relocation"),
+            _ => return Err("invalid fixup for 4-byte data relocation"),
+        },
+        Some(Fixup32::CondBranch) | Some(Fixup32::UncondBranch) => 29,
+        Some(Fixup32::MovtHi16) => match spec {
+            "" => 44,
+            "sbrel" => 79,
+            _ => return Err("invalid fixup for ARM MOVT instruction"),
+        },
+        Some(Fixup32::MovwLo16) => match spec {
+            "" => 43,
+            "sbrel" => 78,
+            _ => return Err("invalid fixup for ARM MOVW instruction"),
+        },
+        Some(Fixup32::T2MovtHi16) => match spec {
+            "" => 48,
+            "sbrel" => 82,
+            _ => return Err("invalid fixup for Thumb MOVT instruction"),
+        },
+        Some(Fixup32::T2MovwLo16) => match spec {
+            "" => 47,
+            "sbrel" => 81,
+            _ => return Err("invalid fixup for Thumb MOVW instruction"),
+        },
+        Some(Fixup32::ThumbUpper815) => 135,
+        Some(Fixup32::ThumbUpper07) => 134,
+        Some(Fixup32::ThumbLower815) => 133,
+        Some(Fixup32::ThumbLower07) => 132,
+        Some(_) => return Err("unsupported relocation type"),
+    })
+}
+
 const CONDITION_AL: u32 = 14;
 
 pub fn condition_code(text: &str) -> Option<u32> {
@@ -1831,8 +2350,24 @@ impl<'s> Assembler<'s> {
             | TokenKind::Plus => self.arm32_parse_expression_operand(operands),
             TokenKind::LeftBracket => self.arm32_parse_memory(operands),
             TokenKind::LeftBrace => self.arm32_parse_register_list(operands),
+            TokenKind::Colon => {
+                let Ok(expression) = self.arm32_parse_prefixed() else {
+                    return true;
+                };
+                let end = self.lexer.token.start;
+                operands.push(parsed(Operand::Immediate(expression), start, end));
+                false
+            }
             TokenKind::Hash | TokenKind::Dollar => {
                 self.lex();
+                if self.is(TokenKind::Colon) {
+                    let Ok(expression) = self.arm32_parse_prefixed() else {
+                        return true;
+                    };
+                    let end = self.lexer.token.start;
+                    operands.push(parsed(Operand::Immediate(expression), start, end));
+                    return false;
+                }
                 let negative = self.is(TokenKind::Minus);
                 let Ok((expression, _)) = self.parse_expression() else {
                     return true;
@@ -1865,6 +2400,46 @@ impl<'s> Assembler<'s> {
                 false
             }
             _ => self.token_error("unexpected token in operand"),
+        }
+    }
+
+    fn arm32_parse_prefixed(&mut self) -> Result<Expression, ()> {
+        self.lex();
+        if !self.is(TokenKind::Identifier) {
+            self.token_error("expected prefix identifier in operand");
+            return Err(());
+        }
+        let name = self.lexer.token.text.to_ascii_lowercase();
+        if !matches!(
+            name.as_str(),
+            "lower16" | "upper16" | "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15"
+        ) {
+            self.token_error(&format!("invalid prefix identifier '{name}' in operand"));
+            return Err(());
+        }
+        self.lex();
+        if self.parse_token(TokenKind::Colon, "unexpected token in operand") {
+            return Err(());
+        }
+        let (expression, _) = self.parse_expression()?;
+        if let Expression::Constant(value) = expression {
+            let value = value as i32;
+            let folded = match name.as_str() {
+                "upper16" => (value & !0xffff) >> 16,
+                "lower16" => value & 0xffff,
+                "upper8_15" => (value & !0x00ff_ffff) >> 24,
+                "upper0_7" => (value & 0x00ff_0000) >> 16,
+                "lower8_15" => (value & 0xff00) >> 8,
+                _ => value & 0xff,
+            };
+            return Ok(Expression::Constant(i64::from(folded)));
+        }
+        match self.apply_specifier(&expression, &name) {
+            Some(applied) => Ok(applied),
+            None => {
+                self.token_error("expected relocatable expression");
+                Err(())
+            }
         }
     }
 
@@ -3293,9 +3868,14 @@ enum OperandEncoder {
     LoadStoreMultipleMode,
     PowerTwo,
     HighLowImmediate,
-    ThumbBranch { shift: u32 },
-    ThumbLongBranch,
+    ThumbBranch(Fixup32),
+    ThumbLongBranch(Fixup32),
     ThumbWideBranch,
+    ArmBranch,
+    ArmLink,
+    ArmExchange,
+    AddressMode5,
+    AddressMode5Half,
     ThumbShiftedImmediate,
     ThumbShiftedRegister,
     ThumbImmediateAddress { bits: u32, shift: u32 },
@@ -3331,18 +3911,21 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
         "getPostIdxRegOpValue" => OperandEncoder::PostIndexRegister,
         "getRegisterListOpValue" => OperandEncoder::RegisterList,
         "getBitfieldInvertedMaskOpValue" => OperandEncoder::BitfieldMask,
-        "getARMBranchTargetOpValue" | "getARMBLTargetOpValue" | "getBranchTargetOpValue" => {
-            OperandEncoder::BranchTarget
-        }
+        "getARMBranchTargetOpValue" => OperandEncoder::ArmBranch,
+        "getARMBLTargetOpValue" => OperandEncoder::ArmLink,
+        "getARMBLXTargetOpValue" => OperandEncoder::ArmExchange,
+        "getBranchTargetOpValue" => OperandEncoder::BranchTarget,
+        "getAddrMode5OpValue" => OperandEncoder::AddressMode5,
+        "getAddrMode5FP16OpValue" => OperandEncoder::AddressMode5Half,
         "getLdStmModeOpValue" => OperandEncoder::LoadStoreMultipleMode,
         "getPowerTwoOpValue" => OperandEncoder::PowerTwo,
         "getHiLoImmOpValue" => OperandEncoder::HighLowImmediate,
-        "getThumbBRTargetOpValue" | "getThumbBCCTargetOpValue" | "getThumbCBTargetOpValue" => {
-            OperandEncoder::ThumbBranch { shift: 1 }
-        }
-        "getThumbBLTargetOpValue" | "getThumbBLXTargetOpValue" => OperandEncoder::ThumbLongBranch,
+        "getThumbBRTargetOpValue" => OperandEncoder::ThumbBranch(Fixup32::ThumbBr),
+        "getThumbBCCTargetOpValue" => OperandEncoder::ThumbBranch(Fixup32::ThumbBcc),
+        "getThumbCBTargetOpValue" => OperandEncoder::ThumbBranch(Fixup32::ThumbCb),
+        "getThumbBLTargetOpValue" => OperandEncoder::ThumbLongBranch(Fixup32::ThumbBl),
+        "getThumbBLXTargetOpValue" => OperandEncoder::ThumbLongBranch(Fixup32::ThumbBlx),
         "getThumbBranchTargetOpValue" => OperandEncoder::ThumbWideBranch,
-        "getARMBLXTargetOpValue" => OperandEncoder::ThumbBranch { shift: 1 },
         "getT2SOImmOpValue" => OperandEncoder::ThumbShiftedImmediate,
         "getT2SORegOpValue" => OperandEncoder::ThumbShiftedRegister,
         "getT2AddrModeImmOpValue" => {
@@ -3524,24 +4107,38 @@ fn unencodable(cause: &str) -> Diagnostic {
     .with_context(format!("Cause: {cause}"))
 }
 
+fn has_conditional_branch(instruction: &MachineInstruction) -> bool {
+    let count = instruction.operands.len();
+    (0..count.saturating_sub(1)).any(|index| {
+        matches!(
+            (instruction.operand(index), instruction.operand(index + 1)),
+            (MachineOperand::Immediate(code), MachineOperand::Register(_)) if *code != 14
+        ) && instruction.register_at(index + 1) != 0
+    })
+}
+
 fn operand_value(
     target: &Target,
     instruction: &MachineInstruction,
     first: usize,
     encoder: &OperandEncoder,
     thumb: bool,
+    fixups: &mut Vec<Fixup>,
 ) -> Result<u64, Diagnostic> {
+    let mut add_fixup = |expression: &Expression, kind: Fixup32| {
+        fixups.push(Fixup {
+            offset: 0,
+            expression: expression.clone(),
+            kind: FixupKind::Arm32(kind),
+            pc_relative: kind.pc_relative(),
+        });
+    };
+    let conditional = has_conditional_branch(instruction);
     let register = |index: usize| -> u64 {
         u64::from(register_encoding(target, instruction.register_at(index)))
     };
     let immediate = |index: usize| instruction.immediate_at(index);
     let operand = instruction.operand(first);
-    let needs_constant = |operand: &MachineOperand| -> Result<(), Diagnostic> {
-        match operand {
-            MachineOperand::Expression(_) => Err(unencodable("a relocatable expression operand")),
-            _ => Ok(()),
-        }
-    };
     Ok(match encoder {
         OperandEncoder::Machine => match operand {
             MachineOperand::Register(register) => u64::from(register_encoding(target, *register)),
@@ -3549,10 +4146,13 @@ fn operand_value(
             MachineOperand::Expression(_) => return Err(unencodable("an expression operand")),
         },
         OperandEncoder::CarryOut => u64::from(instruction.register_at(first) != NO_REGISTER),
-        OperandEncoder::ModifiedImmediate => {
-            needs_constant(operand)?;
-            immediate(first) as u64
-        }
+        OperandEncoder::ModifiedImmediate => match operand {
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::ModImm);
+                0
+            }
+            _ => immediate(first) as u64,
+        },
         OperandEncoder::ShiftedImmediate => {
             let opcode = immediate(first + 1) as u32;
             let shift = opcode & 7;
@@ -3612,23 +4212,39 @@ fn operand_value(
             binary
         }
         OperandEncoder::AddressImmediate12 => match operand {
-            MachineOperand::Register(_) => {
-                let second = instruction.operand(first + 1);
-                if matches!(second, MachineOperand::Expression(_)) {
-                    return Err(unencodable("a relocatable expression operand"));
+            MachineOperand::Register(_) => match instruction.operand(first + 1) {
+                MachineOperand::Expression(expression) => {
+                    add_fixup(expression, Fixup32::LdstAbs12);
+                    register(first) << 13
                 }
-                let value = second.immediate();
-                let (add, amount) = split_offset(value);
+                second => {
+                    let (add, amount) = split_offset(second.immediate());
+                    let mut binary = u64::from(amount & 0xfff);
+                    if add {
+                        binary |= 1 << 12;
+                    }
+                    binary | (register(first) << 13)
+                }
+            },
+            MachineOperand::Expression(expression) => {
+                add_fixup(
+                    expression,
+                    if thumb {
+                        Fixup32::T2LdstPcrel12
+                    } else {
+                        Fixup32::LdstPcrel12
+                    },
+                );
+                15 << 13
+            }
+            MachineOperand::Immediate(value) => {
+                let (add, amount) = split_offset(*value);
                 let mut binary = u64::from(amount & 0xfff);
                 if add {
                     binary |= 1 << 12;
                 }
-                binary | (register(first) << 13)
+                binary | (15 << 13)
             }
-            MachineOperand::Expression(_) => {
-                return Err(unencodable("a relocatable expression operand"))
-            }
-            MachineOperand::Immediate(_) => unreachable!(),
         },
         OperandEncoder::AddressMode2Offset => {
             let packed = immediate(first + 1) as u32;
@@ -3651,8 +4267,9 @@ fn operand_value(
             binary | (u64::from(add) << 12) | (u64::from(has_register) << 13)
         }
         OperandEncoder::AddressMode3 => {
-            if matches!(operand, MachineOperand::Expression(_)) {
-                return Err(unencodable("a relocatable expression operand"));
+            if let MachineOperand::Expression(expression) = operand {
+                add_fixup(expression, Fixup32::PcrelTenUnscaled);
+                return Ok((15 << 9) | (1 << 13));
             }
             let packed = immediate(first + 2) as u32;
             let add = (packed >> 8) & 1 == 0;
@@ -3703,13 +4320,57 @@ fn operand_value(
                     (*value >> 2) as u64
                 }
             }
-            _ => return Err(unencodable("a relocatable branch target")),
+            MachineOperand::Expression(expression) => {
+                if thumb {
+                    add_fixup(expression, Fixup32::T2CondBranch);
+                } else {
+                    add_fixup(
+                        expression,
+                        if conditional {
+                            Fixup32::CondBranch
+                        } else {
+                            Fixup32::UncondBranch
+                        },
+                    );
+                }
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
         },
-        OperandEncoder::ThumbBranch { shift } => match operand {
-            MachineOperand::Immediate(value) => (*value >> shift) as u64,
-            _ => return Err(unencodable("a relocatable branch target")),
+        OperandEncoder::ArmBranch | OperandEncoder::ArmLink => match operand {
+            MachineOperand::Immediate(value) => (*value >> 2) as u64,
+            MachineOperand::Expression(expression) => {
+                let link = matches!(encoder, OperandEncoder::ArmLink);
+                add_fixup(
+                    expression,
+                    match (link, conditional) {
+                        (false, true) => Fixup32::CondBranch,
+                        (false, false) => Fixup32::UncondBranch,
+                        (true, true) => Fixup32::CondBl,
+                        (true, false) => Fixup32::UncondBl,
+                    },
+                );
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
         },
-        OperandEncoder::ThumbLongBranch => match operand {
+        OperandEncoder::ArmExchange => match operand {
+            MachineOperand::Immediate(value) => (*value >> 1) as u64,
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::Blx);
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
+        },
+        OperandEncoder::ThumbBranch(kind) => match operand {
+            MachineOperand::Immediate(value) => (*value >> 1) as u64,
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, *kind);
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
+        },
+        OperandEncoder::ThumbLongBranch(kind) => match operand {
             MachineOperand::Immediate(value) => {
                 let offset = (*value as i32) >> 1;
                 let sign = (offset & 0x80_0000) >> 23;
@@ -3724,7 +4385,11 @@ fn operand_value(
                 result |= (second as i32) << 21;
                 u64::from(result as u32)
             }
-            _ => return Err(unencodable("a relocatable branch target")),
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, *kind);
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
         },
         OperandEncoder::ThumbWideBranch => match operand {
             MachineOperand::Immediate(value) => {
@@ -3744,15 +4409,22 @@ fn operand_value(
                 }
                 u64::from(held)
             }
-            _ => return Err(unencodable("a relocatable branch target")),
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::T2UncondBranch);
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
         },
-        OperandEncoder::ThumbShiftedImmediate => {
-            needs_constant(operand)?;
-            match thumb_so_immediate(immediate(first) as u32) {
+        OperandEncoder::ThumbShiftedImmediate => match operand {
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::T2SoImm);
+                0
+            }
+            _ => match thumb_so_immediate(immediate(first) as u32) {
                 Some(encoded) => u64::from(encoded),
                 None => return Err(unencodable("not a Thumb-2 modified immediate")),
-            }
-        }
+            },
+        },
         OperandEncoder::ThumbShiftedRegister => {
             let packed = immediate(first + 1) as u32;
             let shift = packed & 7;
@@ -3804,8 +4476,9 @@ fn operand_value(
             binary | u64::from(magnitude & 255)
         }
         OperandEncoder::ThumbImmediate8s4 => {
-            if !matches!(operand, MachineOperand::Register(_)) {
-                return Err(unencodable("a relocatable expression operand"));
+            if let MachineOperand::Expression(expression) = operand {
+                add_fixup(expression, Fixup32::T2PcrelTen);
+                return Ok(15 << 9);
             }
             let (add, amount) = split_offset(immediate(first + 1));
             let mut binary = u64::from((amount >> 2) & 0xff);
@@ -3839,10 +4512,18 @@ fn operand_value(
         OperandEncoder::ThumbStackAddress => immediate(first + 1) as u64 & 0xff,
         OperandEncoder::ThumbPcAddress => match operand {
             MachineOperand::Immediate(value) => (*value >> 2) as u64,
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::ThumbCp);
+                0
+            }
             _ => return Err(unencodable("a relocatable branch target")),
         },
         OperandEncoder::ThumbAdrLabel => match operand {
             MachineOperand::Immediate(value) => *value as u64,
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::ThumbAdrPcrel10);
+                0
+            }
             _ => return Err(unencodable("a relocatable branch target")),
         },
         OperandEncoder::ThumbWideAdrLabel => match operand {
@@ -3856,9 +4537,17 @@ fn operand_value(
                     held as u64
                 }
             }
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::T2AdrPcrel12);
+                0
+            }
             _ => return Err(unencodable("a relocatable branch target")),
         },
         OperandEncoder::AdrLabel => match operand {
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, Fixup32::AdrPcrel12);
+                0
+            }
             MachineOperand::Immediate(value) => {
                 let mut binary = 0x2000u64;
                 let mut offset = *value;
@@ -3908,9 +4597,51 @@ fn operand_value(
             _ => return Err(unencodable("an unknown addressing sub-mode")),
         },
         OperandEncoder::PowerTwo => (immediate(first) as u64).trailing_zeros() as u64,
-        OperandEncoder::HighLowImmediate => {
-            needs_constant(operand)?;
-            immediate(first) as u64
+        OperandEncoder::HighLowImmediate => match operand {
+            MachineOperand::Expression(expression) => {
+                let specifier = match expression {
+                    Expression::Symbol { specifier, .. } => specifier.clone().unwrap_or_default(),
+                    _ => String::new(),
+                };
+                let kind = match (specifier.as_str(), thumb) {
+                    ("upper16", false) => Fixup32::MovtHi16,
+                    ("upper16", true) => Fixup32::T2MovtHi16,
+                    ("lower16", false) => Fixup32::MovwLo16,
+                    ("lower16", true) => Fixup32::T2MovwLo16,
+                    ("upper8_15", true) => Fixup32::ThumbUpper815,
+                    ("upper0_7", true) => Fixup32::ThumbUpper07,
+                    ("lower8_15", true) => Fixup32::ThumbLower815,
+                    ("lower0_7", true) => Fixup32::ThumbLower07,
+                    _ => return Err(unencodable("an unsupported relocation specifier")),
+                };
+                add_fixup(expression, kind);
+                0
+            }
+            _ => immediate(first) as u64,
+        },
+        OperandEncoder::AddressMode5 | OperandEncoder::AddressMode5Half => {
+            let half = matches!(encoder, OperandEncoder::AddressMode5Half);
+            match operand {
+                MachineOperand::Expression(expression) => {
+                    let kind = match (half, thumb) {
+                        (false, false) => Fixup32::PcrelTen,
+                        (false, true) => Fixup32::T2PcrelTen,
+                        (true, false) => Fixup32::PcrelNine,
+                        (true, true) => Fixup32::T2PcrelNine,
+                    };
+                    add_fixup(expression, kind);
+                    15 << 9
+                }
+                _ => {
+                    let packed = immediate(first + 1) as u32;
+                    let add = (packed >> 8) & 1 == 0;
+                    let mut binary = u64::from(packed & 0xff);
+                    if add {
+                        binary |= 1 << 8;
+                    }
+                    binary | (register(first) << 9)
+                }
+            }
         }
     })
 }
@@ -3928,6 +4659,7 @@ pub fn encode(
         }
     };
     let mut value = plan.constant;
+    let mut fixups: Vec<Fixup> = Vec::new();
     for variable in &plan.variables {
         let encoded = operand_value(
             target,
@@ -3935,6 +4667,7 @@ pub fn encode(
             variable.first_operand,
             &variable.encoder,
             thumb,
+            &mut fixups,
         )?;
         for (source, destination) in &variable.bits {
             if (encoded >> source) & 1 == 1 {
@@ -3954,10 +4687,7 @@ pub fn encode(
     } else {
         value.to_le_bytes().to_vec()
     };
-    Ok(Encoded {
-        bytes,
-        fixups: Vec::new(),
-    })
+    Ok(Encoded { bytes, fixups })
 }
 
 fn thumb_post_encode(post: &PostEncoder, value: u32) -> u32 {

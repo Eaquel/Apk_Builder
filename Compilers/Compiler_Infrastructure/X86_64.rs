@@ -1584,6 +1584,7 @@ pub enum FixupKind {
     Branch4PcRelative,
     Literal(u32),
     Arm(armv8::ArmFixup),
+    Arm32(armv7::Fixup32),
 }
 
 impl FixupKind {
@@ -1594,6 +1595,7 @@ impl FixupKind {
             FixupKind::Data2 => 2,
             FixupKind::Data8 => 8,
             FixupKind::Literal(42) => 8,
+            FixupKind::Arm32(kind) => kind.bits().div_ceil(8),
             _ => 4,
         }
     }
@@ -1619,6 +1621,7 @@ impl FixupKind {
             FixupKind::Branch4PcRelative => "reloc_branch_4byte_pcrel".to_string(),
             FixupKind::Literal(number) => format!("fixup_{number}"),
             FixupKind::Arm(kind) => kind.name().to_string(),
+            FixupKind::Arm32(kind) => kind.name().to_string(),
         }
     }
 }
@@ -4310,6 +4313,13 @@ pub fn expression_text(
                     if !matches!(specifier.as_str(), "abs" | "pg_hi21") {
                         out = format!(":{specifier}:{out}");
                     }
+                } else if target.isa == Isa::Armv7
+                    && matches!(
+                        specifier.as_str(),
+                        "lower16" | "upper16" | "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15"
+                    )
+                {
+                    out = format!(":{specifier}:{out}");
                 } else {
                     out.push('@');
                     out.push_str(specifier);
@@ -19018,6 +19028,8 @@ impl TextStreamer {
         for (index, fixup) in encoded.fixups.iter().enumerate() {
             let (first_bit, size) = if self.target.isa == Isa::Armv8 {
                 armv8::fixup_bits(fixup.kind)
+            } else if let FixupKind::Arm32(kind) = fixup.kind {
+                (0, kind.bits())
             } else {
                 (0, fixup.kind.size() * 8)
             };
@@ -25768,6 +25780,7 @@ pub mod object {
         arm_mapping_state: BTreeMap<usize, bool>,
         implicit_mapping_symbols: bool,
         arm_attributes: armv8::AttributeSet,
+        thumb_two_features: bool,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
         has_layout: bool,
@@ -25956,6 +25969,9 @@ pub mod object {
                 arm_mapping_state: BTreeMap::new(),
                 implicit_mapping_symbols: options.implicit_mapping_symbols,
                 arm_attributes: armv8::AttributeSet::default(),
+                thumb_two_features: triple.isa == Isa::Armv7
+                    && armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                        .contains("FeatureThumb2"),
                 current_fragment: None,
                 symbols_in_order: Vec::new(),
                 has_layout: false,
@@ -27826,6 +27842,32 @@ pub mod object {
             if literal {
                 return;
             }
+            if let FixupKind::Arm32(kind) = fixup.fixup.kind {
+                let thumb_two = self.target.isa == Isa::Armv7 && self.thumb_two_features;
+                let adjusted = match armv7::adjust_fixup_value(kind, value, resolved, thumb_two) {
+                    Ok(adjusted) => adjusted,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        return;
+                    }
+                };
+                if adjusted == 0 {
+                    return;
+                }
+                let held = &mut self.fragments[fragment];
+                let (buffer, start) = if variable {
+                    let base = held.fixed.len();
+                    (&mut held.variable, fixup.fixup.offset - base)
+                } else {
+                    (&mut held.fixed, fixup.fixup.offset)
+                };
+                for byte in 0..kind.bits().div_ceil(8) {
+                    if let Some(slot) = buffer.get_mut(start + byte) {
+                        *slot |= (adjusted >> (byte * 8)) as u8;
+                    }
+                }
+                return;
+            }
             if let FixupKind::Arm(_) = fixup.fixup.kind {
                 if value == 0 {
                     return;
@@ -27917,6 +27959,20 @@ pub mod object {
             pc_relative: bool,
         ) -> u32 {
             let kind = fixup.fixup.kind;
+            if context.triple.isa == Isa::Armv7 {
+                let specifier = target.specifier.clone().unwrap_or_default();
+                let arm_kind = match kind {
+                    FixupKind::Arm32(held) => Some(held),
+                    _ => None,
+                };
+                return match armv7::elf_relocation(arm_kind, kind.size(), &specifier, pc_relative) {
+                    Ok(number) => number,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        0
+                    }
+                };
+            }
             if context.triple.isa == Isa::Armv8 {
                 let specifier = target.specifier.clone().unwrap_or_default();
                 return match armv8::elf_relocation(kind, &specifier, pc_relative) {
@@ -30128,6 +30184,10 @@ pub mod object {
     impl Streamer for ObjectStreamer {
         fn symbol_layout(&self) -> Option<&dyn SymbolLayout> {
             Some(self)
+        }
+
+        fn set_arm_features(&mut self, features: &BTreeSet<String>) {
+            self.thumb_two_features = features.contains("FeatureThumb2");
         }
 
         fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
