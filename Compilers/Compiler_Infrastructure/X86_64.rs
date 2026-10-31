@@ -7952,6 +7952,7 @@ pub enum ParsedKind {
     Memory(MemoryOperand),
     Prefix(u32),
     Arm(Box<armv8::ArmOperand>),
+    Arm32(Box<armv7::Operand>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8709,6 +8710,7 @@ pub struct Lexer {
     end_statement_at_end: bool,
     pub masm_integers: bool,
     pub hash_token: bool,
+    pub at_comment: bool,
     consumed_end_of_statement: bool,
 }
 
@@ -8788,6 +8790,7 @@ impl Lexer {
             end_statement_at_end: true,
             masm_integers: false,
             hash_token: false,
+            at_comment: false,
             consumed_end_of_statement: false,
         }
     }
@@ -9350,6 +9353,9 @@ impl Lexer {
         if character == Some(b'#') {
             return self.lex_line_comment(start);
         }
+        if self.at_comment && character == Some(b'@') {
+            return self.lex_line_comment(start);
+        }
         if character == Some(b';') {
             self.state.at_start_of_line = true;
             self.state.at_start_of_statement = true;
@@ -9527,6 +9533,8 @@ impl TargetTriple {
             || architecture.starts_with("x86_64");
         let isa = if architecture.starts_with("aarch64") || architecture.starts_with("arm64") {
             Isa::Armv8
+        } else if architecture.starts_with("arm") || architecture.starts_with("thumb") {
+            Isa::Armv7
         } else {
             Isa::X86
         };
@@ -9575,6 +9583,10 @@ impl TargetTriple {
 
     pub fn is_64_bit(&self) -> bool {
         self.mode == Mode::Bits64 || self.architecture.starts_with("x86_64")
+    }
+
+    pub fn is_thumb(&self) -> bool {
+        self.isa == Isa::Armv7 && self.architecture.starts_with("thumb")
     }
 
     pub fn is_windows_msvc(&self) -> bool {
@@ -10947,14 +10959,15 @@ impl<'s> Assembler<'s> {
         };
         let mode = triple.mode;
         let dialect = options.input_syntax;
-        let arm_features = if triple.isa == Isa::Armv8 {
-            armv8::feature_set(target, &options.cpu, &options.features)
-        } else {
+        let arm_features = if triple.isa == Isa::X86 {
             BTreeSet::new()
+        } else {
+            armv8::feature_set(target, &options.cpu, &options.features)
         };
         let mut lexer = Lexer::new(&options.source_name, source);
         lexer.masm_integers = options.masm_integers;
-        lexer.hash_token = triple.isa == Isa::Armv8;
+        lexer.hash_token = triple.isa != Isa::X86;
+        lexer.at_comment = triple.isa == Isa::Armv7;
         let unnamed_temporaries = triple.isa == Isa::Armv8 && options.output == OutputKind::Object;
         Ok(Assembler {
             target,
@@ -16170,6 +16183,9 @@ impl<'s> Assembler<'s> {
         if self.target.isa == Isa::Armv8 {
             return self.arm_parse_and_match(identifier, identifier_token);
         }
+        if self.target.isa == Isa::Armv7 {
+            return self.arm32_parse_and_match(identifier, identifier_token);
+        }
         let name = identifier.to_ascii_lowercase();
         let mut state = InstructionState::default();
         self.extended_register_seen = false;
@@ -16213,6 +16229,7 @@ impl<'s> Assembler<'s> {
                 ParsedKind::Memory(memory) => format!("Memory: ModeSize={}", memory.mode_size),
                 ParsedKind::Prefix(value) => format!("Prefix:{value}"),
                 ParsedKind::Arm(operand) => armv8::describe_operand(self.target, operand),
+                ParsedKind::Arm32(operand) => format!("{operand:?}"),
             });
         }
         pieces.join(", ")
@@ -18910,10 +18927,10 @@ impl TextStreamer {
         mode: Mode,
         location: SourceLocation,
     ) -> bool {
-        let encoded = if self.target.isa == Isa::Armv8 {
-            armv8::encode(self.target, instruction)
-        } else {
-            Encoder::new(self.target, mode).encode(instruction)
+        let encoded = match self.target.isa {
+            Isa::Armv8 => armv8::encode(self.target, instruction),
+            Isa::Armv7 => armv7::encode(self.target, instruction),
+            Isa::X86 => Encoder::new(self.target, mode).encode(instruction),
         };
         let encoded = match encoded {
             Ok(encoded) => encoded,
@@ -25898,6 +25915,8 @@ pub mod object {
         fn machine(&self, context: &AssemblyContext) -> u16 {
             if context.triple.isa == Isa::Armv8 {
                 183
+            } else if context.triple.isa == Isa::Armv7 {
+                40
             } else if context.triple.is_64_bit() {
                 62
             } else if context.triple.system == "elfiamcu" {
@@ -26444,10 +26463,10 @@ pub mod object {
             mode: Mode,
             location: Option<SourceLocation>,
         ) -> Option<Encoded> {
-            let encoded = if self.target.isa == Isa::Armv8 {
-                armv8::encode(self.target, instruction)
-            } else {
-                Encoder::new(self.target, mode).encode(instruction)
+            let encoded = match self.target.isa {
+                Isa::Armv8 => armv8::encode(self.target, instruction),
+                Isa::Armv7 => armv7::encode(self.target, instruction),
+                Isa::X86 => Encoder::new(self.target, mode).encode(instruction),
             };
             match encoded {
                 Ok(encoded) => Some(encoded),

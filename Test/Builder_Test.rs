@@ -74949,6 +74949,178 @@ mod armv8_assembly {
         Ok(result.output)
     }
 
+    fn armv7_expected(source: &str) -> Option<Vec<u8>> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("llvm-mc-18")
+            .args([
+                "-triple=armv7a-linux-gnueabihf",
+                "-mcpu=cortex-a15",
+                "-show-encoding",
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(format!("{source}\n").as_bytes())
+            .ok()?;
+        let output = child.wait_with_output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        let line = text.lines().find(|line| line.contains("encoding: ["))?;
+        let inside = line.split("encoding: [").nth(1)?.split(']').next()?;
+        inside
+            .split(',')
+            .map(|piece| u8::from_str_radix(piece.trim().trim_start_matches("0x"), 16).ok())
+            .collect()
+    }
+
+    fn armv7_object(source: &str) -> Result<Vec<u8>, String> {
+        use crate::compilers::x86_64::{
+            assemble_source, AssemblerOptions, MessageKind, OutputKind,
+        };
+        let mut options = AssemblerOptions::new("armv7a-linux-gnueabihf");
+        options.output = OutputKind::Object;
+        options.cpu = "cortex-a15".to_string();
+        let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
+            .map_err(|diagnostic| diagnostic.message)?;
+        let errors: Vec<String> = result
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Error)
+            .map(|message| message.text.clone())
+            .collect();
+        if result.failed || !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        let parsed = crate::compilers::elf::ElfFile::parse(&result.output)
+            .map_err(|diagnostic| diagnostic.message)?;
+        Ok(parsed
+            .section_named(".text")
+            .map(|index| parsed.sections[index].data.clone())
+            .unwrap_or_default())
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_arm_mode_instructions() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[&str] = &[
+            "add r0, r1, r2",
+            "add r0, r1, #1",
+            "adds r0, r1, r2",
+            "addeq r0, r1, r2",
+            "addseq r0, r1, #255",
+            "sub r0, r1, r2, lsl #3",
+            "sub r0, r1, r2, lsr r3",
+            "mov r0, r1",
+            "mov r0, #0xff000000",
+            "mvn r0, #1",
+            "cmp r0, r1",
+            "cmp r0, #4",
+            "tst r0, r1, ror #8",
+            "orr r0, r1, r2",
+            "eor r0, r1, r2, asr #4",
+            "and r0, r1, #0xf0",
+            "bic r0, r1, r2",
+            "rsb r0, r1, #0",
+            "mul r0, r1, r2",
+            "mla r0, r1, r2, r3",
+            "ldr r0, [r1]",
+            "ldr r0, [r1, #4]",
+            "ldr r0, [r1, #-4]",
+            "ldr r0, [r1, r2]",
+            "ldr r0, [r1, -r2, lsl #2]",
+            "ldr r0, [r1, #4]!",
+            "ldr r0, [r1], #4",
+            "ldr r0, [r1], r2",
+            "str r0, [r1, #8]",
+            "strb r0, [r1], #1",
+            "ldrb r0, [r1, r2]",
+            "ldrh r0, [r1, #2]",
+            "ldrsh r0, [r1, r2]",
+            "strh r0, [r1], #2",
+            "push {r4, r5, lr}",
+            "pop {r4, r5, pc}",
+            "ldm r0, {r1, r2}",
+            "stmdb sp!, {r4-r7}",
+            "bx lr",
+            "blx r3",
+            "nop",
+            "svc #0",
+            "movw r0, #0x1234",
+            "movt r0, #0x5678",
+            "uxtb r0, r1",
+            "clz r0, r1",
+            "bfc r0, #4, #8",
+            "bfi r0, r1, #4, #8",
+            "ubfx r0, r1, #3, #5",
+            "ssat r0, #8, r1",
+            "ssat r0, #8, r1, lsl #4",
+            "uxtb r0, r1, ror #8",
+            "sxth r0, r1, ror #16",
+            "setend be",
+            "rev r0, r1",
+            "smull r0, r1, r2, r3",
+            "umlal r0, r1, r2, r3",
+            "sdiv r0, r1, r2",
+            "movs r0, r1",
+            "mov r0, r1, lsl #2",
+            "mov r0, r1, lsl r2",
+            "mov r0, r1, rrx",
+            "lsl r0, r1, #4",
+            "asr r0, r1, r2",
+            "ldrd r0, r1, [r2]",
+            "strd r0, r1, [r2, #8]",
+            "ldrex r0, [r1]",
+            "strex r0, r1, [r2]",
+            "ldmia sp!, {r0, r1}",
+            "stmia r0, {r1, r2}",
+            "bkpt #1",
+            "dmb ish",
+            "dsb",
+            "isb",
+            "wfi",
+            "yield",
+            "movne r0, #1",
+            "ldrne r0, [r1, #4]",
+            "pld [r0, #4]",
+        ];
+        let mut failures = Vec::new();
+        for source in cases {
+            let Some(expected) = armv7_expected(source) else {
+                failures.push(format!("{source}: llvm-mc rejects it"));
+                continue;
+            };
+            match armv7_object(source) {
+                Err(message) => failures.push(format!("{source}: {message}")),
+                Ok(bytes) => {
+                    if bytes != expected {
+                        failures.push(format!(
+                            "{source}: {bytes:02x?} but llvm-mc gives {expected:02x?}"
+                        ));
+                    }
+                }
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} failed",
+            failures.len(),
+            cases.len()
+        );
+    }
+
     #[test]
     fn the_armv8_assembler_matches_llvm_mc_on_common_instructions() {
         let cases: &[(&str, &str)] = &[
