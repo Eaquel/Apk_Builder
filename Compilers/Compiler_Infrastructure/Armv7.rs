@@ -27,6 +27,8 @@ pub fn matcher() -> &'static Matcher {
     CELL.get_or_init(|| build_matcher(target().expect("the ARMv7 tables load")))
 }
 
+pub const THUMB_MODE: u32 = 1 << 30;
+
 const CONDITION_AL: u32 = 14;
 
 pub fn condition_code(text: &str) -> Option<u32> {
@@ -139,6 +141,7 @@ pub enum Operand {
     RotateImmediate(u32),
     MemoryBarrier(u32),
     InstructionBarrier(u32),
+    ItMask(u32),
 }
 
 impl Operand {
@@ -203,6 +206,37 @@ pub fn so_immediate(value: u32) -> Option<u32> {
     Some(value.rotate_left(rotation) | ((rotation >> 1) << 8))
 }
 
+fn thumb_so_immediate_splat(value: u32) -> Option<u32> {
+    if value & 0xffff_ff00 == 0 {
+        return Some(value);
+    }
+    let shifted = if value & 0xff == 0 { value >> 8 } else { value };
+    let immediate = shifted & 0xff;
+    let repeated = immediate | (immediate << 16);
+    if shifted == repeated {
+        return Some((if shifted == value { 1 } else { 2 } << 8) | immediate);
+    }
+    if shifted == (repeated | (repeated << 8)) {
+        return Some((3 << 8) | immediate);
+    }
+    None
+}
+
+fn thumb_so_immediate_rotate(value: u32) -> Option<u32> {
+    let rotation = value.leading_zeros();
+    if rotation >= 24 {
+        return None;
+    }
+    if 0xff00_0000u32.rotate_right(rotation) & value == value {
+        return Some((value.rotate_right(24 - rotation) & 0x7f) | ((rotation + 8) << 7));
+    }
+    None
+}
+
+pub fn thumb_so_immediate(value: u32) -> Option<u32> {
+    thumb_so_immediate_splat(value).or_else(|| thumb_so_immediate_rotate(value))
+}
+
 fn so_register_opcode(shift: Shift, amount: u32) -> i64 {
     i64::from(shift.code() | (amount << 3))
 }
@@ -248,6 +282,7 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         _ => None,
     };
     let minimum = i64::from(i32::MIN);
+    let low = |register: RegisterId| in_class(target, "tGPR", register);
     match base.as_str() {
         "isCondCode" | "isITCondCode" => matches!(operand, Operand::Condition(_)),
         "isCCOut" => matches!(operand, Operand::CarrySet(_)),
@@ -412,10 +447,258 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
                 Some(_) => false,
             }
         }),
+        "isMemThumbRR" => memory.is_some_and(|held| {
+            held.offset_register != NO_REGISTER
+                && !held.negative
+                && held.shift == Shift::None
+                && held.alignment == 0
+                && low(held.base)
+                && low(held.offset_register)
+        }),
+        "isMemThumbRIs4" | "isMemThumbRIs2" | "isMemThumbRIs1" => memory.is_some_and(|held| {
+            if held.offset_register != NO_REGISTER || !low(held.base) || held.alignment != 0 {
+                return false;
+            }
+            let (limit, step) = match base.as_str() {
+                "isMemThumbRIs4" => (124, 4),
+                "isMemThumbRIs2" => (62, 2),
+                _ => (31, 1),
+            };
+            match &held.offset_immediate {
+                None => true,
+                Some(Expression::Constant(value)) => {
+                    *value >= 0 && *value <= limit && value % step == 0
+                }
+                Some(_) => false,
+            }
+        }),
+        "isMemThumbSPI" => memory.is_some_and(|held| {
+            if held.offset_register != NO_REGISTER
+                || register_encoding(target, held.base) != 13
+                || held.alignment != 0
+            {
+                return false;
+            }
+            match &held.offset_immediate {
+                None => true,
+                Some(Expression::Constant(value)) => {
+                    *value >= 0 && *value <= 1020 && value % 4 == 0
+                }
+                Some(_) => false,
+            }
+        }),
+        "isMemImm8s4Offset" | "isMemImm7s4Offset" => {
+            if is_immediate && constant.is_none() {
+                return true;
+            }
+            let (limit, class) = if base == "isMemImm8s4Offset" {
+                (1020, "GPR")
+            } else {
+                (508, "GPRnopc")
+            };
+            memory.is_some_and(|held| {
+                if held.offset_register != NO_REGISTER
+                    || held.alignment != 0
+                    || !in_class(target, class, held.base)
+                {
+                    return false;
+                }
+                match &held.offset_immediate {
+                    None => true,
+                    Some(Expression::Constant(value)) => {
+                        (*value >= -limit && *value <= limit && value & 3 == 0) || *value == minimum
+                    }
+                    Some(_) => false,
+                }
+            })
+        }
+        "isMemImm0_1020s4Offset" => memory.is_some_and(|held| {
+            if held.offset_register != NO_REGISTER || held.alignment != 0 {
+                return false;
+            }
+            match &held.offset_immediate {
+                None => true,
+                Some(Expression::Constant(value)) => {
+                    *value >= 0 && *value <= 1020 && value & 3 == 0
+                }
+                Some(_) => false,
+            }
+        }),
+        "isMemImm8Offset" => memory.is_some_and(|held| {
+            if held.offset_register != NO_REGISTER
+                || held.alignment != 0
+                || register_encoding(target, held.base) == 15
+            {
+                return false;
+            }
+            match &held.offset_immediate {
+                None => true,
+                Some(Expression::Constant(value)) => {
+                    *value == minimum || (*value > -256 && *value < 256)
+                }
+                Some(_) => false,
+            }
+        }),
+        "isMemPosImm8Offset" => memory.is_some_and(|held| {
+            if held.offset_register != NO_REGISTER || held.alignment != 0 {
+                return false;
+            }
+            match &held.offset_immediate {
+                None => true,
+                Some(Expression::Constant(value)) => *value >= 0 && *value < 256,
+                Some(_) => false,
+            }
+        }),
+        "isMemNegImm8Offset" => memory.is_some_and(|held| {
+            if held.offset_register != NO_REGISTER
+                || held.alignment != 0
+                || register_encoding(target, held.base) == 15
+            {
+                return false;
+            }
+            match &held.offset_immediate {
+                None => false,
+                Some(Expression::Constant(value)) => {
+                    *value == minimum || (*value > -256 && *value < 0)
+                }
+                Some(_) => false,
+            }
+        }),
+        "isT2MemRegOffset" => memory.is_some_and(|held| {
+            held.offset_register != NO_REGISTER
+                && !held.negative
+                && held.alignment == 0
+                && register_encoding(target, held.base) != 15
+                && (held.shift == Shift::None
+                    || (held.shift == Shift::Lsl && held.shift_immediate <= 3))
+        }),
+        "isMemTBB" | "isMemTBH" => memory.is_some_and(|held| {
+            held.offset_register != NO_REGISTER
+                && !held.negative
+                && held.alignment == 0
+                && if base == "isMemTBB" {
+                    held.shift == Shift::None
+                } else {
+                    held.shift == Shift::Lsl && held.shift_immediate == 1
+                }
+        }),
+        "isMemNoOffsetT" | "isMemNoOffsetT2" | "isMemNoOffsetT2NoSp" => {
+            memory.is_some_and(|held| {
+                let class = match base.as_str() {
+                    "isMemNoOffsetT" => "tGPR",
+                    "isMemNoOffsetT2" => "GPRnopc",
+                    _ => "rGPR",
+                };
+                in_class(target, class, held.base)
+                    && held.offset_register == NO_REGISTER
+                    && held.offset_immediate.is_none()
+                    && held.alignment == 0
+            })
+        }
+        "isThumbMemPC" => {
+            let value = match operand {
+                Operand::Immediate(Expression::Constant(value)) => Some(*value),
+                Operand::Immediate(_) => return true,
+                Operand::Memory(held)
+                    if held.offset_register == NO_REGISTER
+                        && register_encoding(target, held.base) == 15 =>
+                {
+                    match &held.offset_immediate {
+                        Some(Expression::Constant(value)) => Some(*value),
+                        _ => None,
+                    }
+                }
+                _ => None,
+            };
+            value.is_some_and(|value| value % 4 == 0 && (0..=1020).contains(&value))
+        }
+        "isT2SOImm" => match operand {
+            Operand::Immediate(Expression::Constant(value)) => {
+                thumb_so_immediate(*value as u32).is_some()
+            }
+            Operand::Immediate(Expression::Symbol { specifier, .. }) => {
+                !matches!(specifier.as_deref(), Some("upper16" | "lower16"))
+            }
+            Operand::Immediate(_) => true,
+            _ => false,
+        },
+        "isT2SOImmNot" => constant.is_some_and(|value| {
+            thumb_so_immediate(value as u32).is_none()
+                && thumb_so_immediate(!(value as u32)).is_some()
+        }),
+        "isT2SOImmNeg" => constant.is_some_and(|value| {
+            thumb_so_immediate(value as u32).is_none()
+                && thumb_so_immediate((value as u32).wrapping_neg()).is_some()
+        }),
+        "isImmediateS4" => constant.is_some_and(|value| {
+            (value & 3 == 0 && value >= number(0) && value <= number(1)) || value == minimum
+        }),
+        "isImmediateS2" => {
+            constant.is_some_and(|value| value & 1 == 0 && value >= number(0) && value <= number(1))
+        }
+        "isImm8s4" => constant.is_some_and(|value| {
+            (value & 3 == 0 && (-1020..=1020).contains(&value)) || value == minimum
+        }),
+        "isImm7s4" => constant.is_some_and(|value| {
+            (value & 3 == 0 && (-508..=508).contains(&value)) || value == minimum
+        }),
+        "isImm7Shift0" | "isImm7" => constant.is_some_and(|value| (-127..=127).contains(&value)),
+        "isImm7Shift1" => {
+            constant.is_some_and(|value| value & 1 == 0 && (-255..=255).contains(&value))
+        }
+        "isImm7Shift2" => {
+            constant.is_some_and(|value| value & 3 == 0 && (-511..=511).contains(&value))
+        }
+        "isImm0_1020s4" => {
+            constant.is_some_and(|value| value & 3 == 0 && (0..=1020).contains(&value))
+        }
+        "isImm0_508s4" => {
+            constant.is_some_and(|value| value & 3 == 0 && (0..=508).contains(&value))
+        }
+        "isImm0_508s4Neg" => constant.is_some_and(|value| {
+            let negated = -value;
+            negated & 3 == 0 && negated > 0 && negated <= 508
+        }),
+        "isImm1_16" => constant.is_some_and(|value| (1..=16).contains(&value)),
+        "isImm1_32" => constant.is_some_and(|value| (1..=32).contains(&value)),
+        "isImm8_255" => constant.is_some_and(|value| (8..=255).contains(&value)),
+        "isImm24bit" => constant.is_some_and(|value| (0..=0xff_ffff).contains(&value)),
+        "isImmThumbSR" => constant.is_some_and(|value| (1..=32).contains(&value)),
+        "isPKHLSLImm" => constant.is_some_and(|value| (0..=31).contains(&value)),
+        "isPKHASRImm" => constant.is_some_and(|value| (1..=32).contains(&value)),
+        "isThumbModImmNeg1_7" => constant.is_some_and(|value| {
+            let negated = -(value as i32);
+            negated > 0 && negated < 8
+        }),
+        "isThumbModImmNeg8_255" => constant.is_some_and(|value| {
+            let negated = -(value as i32);
+            negated > 7 && negated < 256
+        }),
+        "isUnsignedOffset" => match operand {
+            Operand::Immediate(Expression::Symbol { .. }) => true,
+            Operand::Immediate(Expression::Constant(value)) => {
+                let align = 1i64 << number(1);
+                let maximum = align * ((1i64 << number(0)) - 1);
+                value % align == 0 && *value >= 0 && *value <= maximum
+            }
+            _ => false,
+        },
+        "isSignedOffset" => match operand {
+            Operand::Immediate(Expression::Symbol { .. }) => true,
+            Operand::Immediate(Expression::Constant(value)) => {
+                let align = 1i64 << number(1);
+                let maximum = align * ((1i64 << (number(0) - 1)) - 1);
+                let minimum_value = -align * (1i64 << (number(0) - 1));
+                value % align == 0 && *value >= minimum_value && *value <= maximum
+            }
+            _ => false,
+        },
+        "isSetEndImm" => constant.is_some_and(|value| value == 0 || value == 1),
         "isRegList" => matches!(operand, Operand::RegisterList(_)),
         "isRegListWithAPSR" => matches!(operand, Operand::RegisterList(_)),
         "isBitfield" => matches!(operand, Operand::Bitfield { .. }),
         "isShifterImm" => matches!(operand, Operand::ShifterImmediate { .. }),
+        "isITMask" => matches!(operand, Operand::ItMask(_)),
         "isMemBarrierOpt" => matches!(operand, Operand::MemoryBarrier(_)),
         "isInstSyncBarrierOpt" => matches!(operand, Operand::InstructionBarrier(_)),
         "isRotImm" => matches!(operand, Operand::RotateImmediate(_)),
@@ -464,6 +747,7 @@ pub fn register_named(target: &Target, text: &str) -> Option<RegisterId> {
 }
 
 struct Mnemonic {
+    it_mask: Option<String>,
     base: String,
     condition: u32,
     carry: bool,
@@ -491,6 +775,7 @@ const KEEP_CONDITION_SUFFIX: &[&str] = &[
 
 fn split_mnemonic(text: &str, thumb: bool) -> Mnemonic {
     let mut result = Mnemonic {
+        it_mask: None,
         base: text.to_string(),
         condition: CONDITION_AL,
         carry: false,
@@ -524,6 +809,10 @@ fn split_mnemonic(text: &str, thumb: bool) -> Mnemonic {
             name.truncate(name.len() - 2);
             result.interrupt_modification = modification;
         }
+    }
+    if let Some(mask) = name.strip_prefix("it") {
+        result.it_mask = Some(mask.to_string());
+        name = "it".to_string();
     }
     result.base = name;
     result
@@ -1361,6 +1650,20 @@ impl<'s> Assembler<'s> {
         Parse::Success
     }
 
+    fn arm32_parse_it_condition(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        let start = self.lexer.token.start;
+        if !self.is(TokenKind::Identifier) {
+            return Parse::NoMatch;
+        }
+        let Some(code) = condition_code(&self.lexer.token.text.to_ascii_lowercase()) else {
+            return Parse::NoMatch;
+        };
+        self.lex();
+        let end = self.lexer.token.start;
+        operands.push(parsed(Operand::Condition(code), start, end));
+        Parse::Success
+    }
+
     fn arm32_parse_barrier(
         &mut self,
         operands: &mut Vec<ParsedOperand>,
@@ -1441,6 +1744,13 @@ impl<'s> Assembler<'s> {
             if entry.mnemonic != mnemonic {
                 continue;
             }
+            let mut predicates = self.target.instructions[entry.result].predicates.clone();
+            if let Some(alias) = entry.alias {
+                predicates.extend(self.target.aliases[alias].predicates.clone());
+            }
+            if !armv8::predicates_hold(self.target, &predicates, &self.arm_features) {
+                continue;
+            }
             let mut index = 0;
             for formal in &entry.operands {
                 let class = &matcher.classes[formal.class];
@@ -1471,6 +1781,9 @@ impl<'s> Assembler<'s> {
             let status = match class.as_str() {
                 "ModImm" => self.arm32_parse_modified_immediate(operands),
                 "AM3Offset" => self.arm32_parse_am3_offset(operands),
+                "ITCondCode" | "CondCodeNoAL" | "CondCodeNoALInv" => {
+                    self.arm32_parse_it_condition(operands)
+                }
                 "MemBarrierOpt" => self.arm32_parse_barrier(operands, false),
                 "InstSyncBarrierOpt" => self.arm32_parse_barrier(operands, true),
                 "Bitfield" => self.arm32_parse_bitfield(operands),
@@ -1579,6 +1892,32 @@ impl<'s> Assembler<'s> {
         let mnemonic = split.base.clone();
         let mut operands: Vec<ParsedOperand> = Vec::new();
         self.arm32_push_token(&mut operands, &mnemonic, name_start);
+        if let Some(mask) = &split.it_mask {
+            let location = self.statement_location(name_start + 2);
+            if mask.len() > 3 {
+                self.error(location, "too many conditions on IT instruction");
+                return Err(());
+            }
+            let mut value = 8u32;
+            for letter in mask.chars().rev() {
+                if letter != 't' && letter != 'e' {
+                    self.error(
+                        location,
+                        &format!("illegal IT block condition mask '{mask}'"),
+                    );
+                    return Err(());
+                }
+                value >>= 1;
+                if letter == 'e' {
+                    value |= 8;
+                }
+            }
+            operands.push(parsed(
+                Operand::ItMask(value),
+                name_start + 2,
+                name_start + 2,
+            ));
+        }
         let can_carry = accepts_carry(&mnemonic, thumb);
         let can_condition = accepts_condition(&mnemonic, thumb);
         let location = self.statement_location(name_start);
@@ -1644,7 +1983,7 @@ impl<'s> Assembler<'s> {
             }
             next = end;
         }
-        let prefix = operands.len();
+        let prefix = operands.len() - usize::from(split.it_mask.is_some());
         if !self.is(TokenKind::EndOfStatement) {
             if self.arm32_parse_operand(&mut operands, &mnemonic, prefix) {
                 return Err(());
@@ -1886,6 +2225,100 @@ impl<'s> Assembler<'s> {
                 }
             }
             ("addConstPoolAsmImmOperands", Operand::ConstantPool(held)) => expression(into, held),
+            ("addITMaskOperands", Operand::ItMask(mask)) => immediate(into, i64::from(*mask)),
+            ("addITCondCodeOperands", Operand::Condition(code)) => {
+                immediate(into, i64::from(*code))
+            }
+            (
+                "addMemThumbRROperands" | "addMemTBBOperands" | "addMemTBHOperands",
+                Operand::Memory(memory),
+            ) => {
+                into.push(MachineOperand::Register(memory.base));
+                into.push(MachineOperand::Register(memory.offset_register));
+            }
+            (
+                "addMemThumbRIs4Operands"
+                | "addMemThumbRIs2Operands"
+                | "addMemThumbSPIOperands"
+                | "addMemImm0_1020s4OffsetOperands",
+                Operand::Memory(memory),
+            ) => {
+                let divisor = match name.as_str() {
+                    "addMemThumbRIs2Operands" => 2,
+                    _ => 4,
+                };
+                into.push(MachineOperand::Register(memory.base));
+                match &memory.offset_immediate {
+                    None => immediate(into, 0),
+                    Some(Expression::Constant(value)) => immediate(into, value / divisor),
+                    Some(other) => into.push(MachineOperand::Expression(other.clone())),
+                }
+            }
+            (
+                "addMemThumbRIs1Operands"
+                | "addMemImm8s4OffsetOperands"
+                | "addMemImm7s4OffsetOperands"
+                | "addMemImm8OffsetOperands"
+                | "addMemPosImm8OffsetOperands"
+                | "addMemNegImm8OffsetOperands",
+                Operand::Memory(memory),
+            ) => {
+                into.push(MachineOperand::Register(memory.base));
+                match &memory.offset_immediate {
+                    None => immediate(into, 0),
+                    Some(held) => expression(into, held),
+                }
+            }
+            (
+                "addMemImm8s4OffsetOperands" | "addMemImm7s4OffsetOperands",
+                Operand::Immediate(held),
+            ) => {
+                expression(into, held);
+                immediate(into, 0);
+            }
+            (
+                "addMemNoOffsetT2Operands"
+                | "addMemNoOffsetT2NoSpOperands"
+                | "addMemNoOffsetTOperands",
+                Operand::Memory(memory),
+            ) => into.push(MachineOperand::Register(memory.base)),
+            ("addT2MemRegOffsetOperands", Operand::Memory(memory)) => {
+                into.push(MachineOperand::Register(memory.base));
+                into.push(MachineOperand::Register(memory.offset_register));
+                immediate(into, i64::from(memory.shift_immediate));
+            }
+            ("addT2SOImmNotOperands", _) => {
+                immediate(into, i64::from(!(operand.constant().unwrap_or(0) as u32)))
+            }
+            ("addT2SOImmNegOperands", _) => immediate(
+                into,
+                i64::from((operand.constant().unwrap_or(0) as u32).wrapping_neg()),
+            ),
+            ("addUnsignedOffset_b8s2Operands", Operand::Immediate(held)) => match held {
+                Expression::Constant(value) => immediate(into, value >> 2),
+                other => into.push(MachineOperand::Expression(other.clone())),
+            },
+            ("addThumbMemPCOperands", Operand::Immediate(held)) => expression(into, held),
+            ("addThumbMemPCOperands", Operand::Memory(memory)) => match &memory.offset_immediate {
+                Some(held) => expression(into, held),
+                None => immediate(into, 0),
+            },
+            ("addThumbModImmNeg8_255Operands" | "addThumbModImmNeg1_7Operands", _) => immediate(
+                into,
+                i64::from((operand.constant().unwrap_or(0) as u32).wrapping_neg()),
+            ),
+            (
+                "addImm8s4Operands"
+                | "addImm7s4Operands"
+                | "addImm7Shift0Operands"
+                | "addImm7Shift1Operands"
+                | "addImm7Shift2Operands"
+                | "addImm7Operands",
+                _,
+            ) => immediate(into, operand.constant().unwrap_or(0)),
+            ("addImm0_508s4NegOperands", _) => {
+                immediate(into, -operand.constant().unwrap_or(0) / 4)
+            }
             ("addMemBarrierOptOperands", Operand::MemoryBarrier(value))
             | ("addInstSyncBarrierOptOperands", Operand::InstructionBarrier(value)) => {
                 immediate(into, i64::from(*value))
@@ -1985,6 +2418,12 @@ impl<'s> Assembler<'s> {
             if let Some(alias) = entry.alias {
                 predicates.extend(target.aliases[alias].predicates.clone());
             }
+            if mnemonic == "nop"
+                && target.instructions[entry.result].record == "tMOVr"
+                && (self.arm32_thumb_two() || self.arm_features.contains("HasV6MOps"))
+            {
+                continue;
+            }
             let has_features = armv8::predicates_hold(target, &predicates, &self.arm_features);
             let mut actual_of: Vec<Option<usize>> = Vec::new();
             let mut actual = 1;
@@ -2065,6 +2504,12 @@ impl<'s> Assembler<'s> {
                         .push(MachineOperand::Register(*register)),
                 }
             }
+            if !self.arm32_target_predicate(&instruction) {
+                if error_index.is_none() {
+                    error_index = Some(1);
+                }
+                continue;
+            }
             return Outcome::Success(instruction);
         }
         if had_feature_failure {
@@ -2094,6 +2539,15 @@ impl<'s> Assembler<'s> {
             }
         }
         self.streamer.set_arm_features(&self.arm_features);
+    }
+
+    fn arm32_switch_mode(&mut self) {
+        let thumb = self.arm_thumb;
+        if thumb {
+            self.arm32_set_features(&["thumb-mode"], &[]);
+        } else {
+            self.arm32_set_features(&[], &["thumb-mode"]);
+        }
     }
 
     fn arm32_text_directive(&mut self, name: &str) -> Option<bool> {
@@ -2138,6 +2592,7 @@ impl<'s> Assembler<'s> {
                     return Some(true);
                 }
                 self.arm_thumb = identifier == ".thumb";
+                self.arm32_switch_mode();
                 self.streamer.emit_arm_directive(if self.arm_thumb {
                     "\t.code\t16"
                 } else {
@@ -2163,6 +2618,7 @@ impl<'s> Assembler<'s> {
                     return Some(true);
                 }
                 self.arm_thumb = value;
+                self.arm32_switch_mode();
                 self.streamer
                     .emit_arm_directive(if value { "\t.code\t16" } else { "\t.code\t32" });
                 Some(false)
@@ -2229,14 +2685,104 @@ impl<'s> Assembler<'s> {
         }
     }
 
+    fn arm32_track_it_block(&mut self, instruction: &MachineInstruction) {
+        let record = self.target.instructions[instruction.opcode].record.as_str();
+        if record == "ITasm" || record == "t2IT" {
+            let mask = instruction.immediate_at(1) as u32;
+            self.arm_it_remaining = 4 - mask.trailing_zeros().min(3);
+            return;
+        }
+        self.arm_it_remaining = self.arm_it_remaining.saturating_sub(1);
+    }
+
+    fn arm32_thumb_two(&self) -> bool {
+        self.arm_thumb && self.arm_features.contains("FeatureThumb2")
+    }
+
+    fn arm32_target_predicate(&self, instruction: &MachineInstruction) -> bool {
+        let target = self.target;
+        let description = &target.instructions[instruction.opcode];
+        let record = target.records.get(&description.record);
+        let flag_setting = record.is_some_and(|held| {
+            matches!(
+                held.field("thumbArithFlagSetting"),
+                Some(TableValue::Bit(true))
+            )
+        });
+        let thumb_two = self.arm32_thumb_two();
+        let in_it = self.arm_it_remaining > 0;
+        if flag_setting {
+            let mut carry = false;
+            for group in &description.groups {
+                if group.record == "s_cc_out" {
+                    carry = instruction.register_at(group.first) != NO_REGISTER;
+                }
+            }
+            if self.arm_thumb && !thumb_two && !carry {
+                return false;
+            }
+            if thumb_two && !carry && !in_it {
+                return false;
+            }
+            if thumb_two && carry && in_it {
+                return false;
+            }
+            if description.record == "tLSLri" && instruction.immediate_at(3) == 0 && in_it {
+                return false;
+            }
+        }
+        let version8 = self.arm_features.contains("HasV8Ops");
+        let stack = target
+            .register_by_name
+            .get("sp")
+            .copied()
+            .unwrap_or(NO_REGISTER);
+        let counter = target
+            .register_by_name
+            .get("pc")
+            .copied()
+            .unwrap_or(NO_REGISTER);
+        for group in &description.groups {
+            if group.record == "rGPR" && group.count == 1 {
+                if let MachineOperand::Register(register) = instruction.operand(group.first) {
+                    if *register == stack && !version8 {
+                        return false;
+                    }
+                    if *register == counter {
+                        return false;
+                    }
+                }
+            }
+        }
+        true
+    }
+
     fn arm32_record_index(&self, record: &str) -> Option<usize> {
         self.target.instruction_by_record.get(record).copied()
     }
 
-    fn arm32_process(&self, instruction: &mut MachineInstruction) -> bool {
+    fn arm32_process(&self, instruction: &mut MachineInstruction, wide: bool) -> bool {
         let target = self.target;
         let record = target.instructions[instruction.opcode].record.as_str();
         let operand = |index: usize| instruction.operand(index).clone();
+        let in_it = self.arm_it_remaining > 0;
+        let register = |name: &str| {
+            target
+                .register_by_name
+                .get(name)
+                .copied()
+                .unwrap_or(NO_REGISTER)
+        };
+        let (cpsr, stack, counter, link) = (
+            register("cpsr"),
+            register("sp"),
+            register("pc"),
+            register("lr"),
+        );
+        let low = |held: RegisterId| in_class(target, "tGPR", held);
+        let first_token = self.arm_mnemonic.clone();
+        let operand_count = self.arm_operand_count;
+        let writeback = self.arm_writeback;
         let shift_for = |prefix: &str| match prefix {
             "ASR" => Shift::Asr,
             "LSR" => Shift::Lsr,
@@ -2300,6 +2846,339 @@ impl<'s> Assembler<'s> {
                     None
                 }
             }
+            "t2ADDri12" | "t2SUBri12" | "t2ADDspImm12" | "t2SUBspImm12" => {
+                let token = first_token.as_str();
+                if (token != "add" && token != "sub")
+                    || thumb_so_immediate(instruction.immediate_at(2) as u32).is_none()
+                {
+                    None
+                } else {
+                    let name = match record {
+                        "t2ADDri12" => "t2ADDri",
+                        "t2SUBri12" => "t2SUBri",
+                        "t2ADDspImm12" => "t2ADDspImm",
+                        _ => "t2SUBspImm",
+                    };
+                    let mut operands = instruction.operands.clone();
+                    operands.push(MachineOperand::Register(NO_REGISTER));
+                    build(name, operands)
+                }
+            }
+            "tADDi8" | "tSUBi8" => {
+                if instruction.operand(3).immediate() >= 0
+                    && (instruction.immediate_at(3) as u32) < 8
+                    && operand_count == 2
+                {
+                    let mut built = instruction.clone();
+                    built.opcode = self
+                        .arm32_record_index(if record == "tADDi8" {
+                            "tADDi3"
+                        } else {
+                            "tSUBi3"
+                        })
+                        .unwrap_or(instruction.opcode);
+                    *instruction = built;
+                    return true;
+                }
+                None
+            }
+            "t2ADDri" | "t2SUBri" => {
+                let low_destination = low(instruction.register_at(0));
+                let carry = if in_it { NO_REGISTER } else { cpsr };
+                let narrow = !wide
+                    && instruction.register_at(0) == instruction.register_at(1)
+                    && low_destination
+                    && instruction.register_at(5) == carry
+                    && matches!(instruction.operand(2), MachineOperand::Immediate(value) if (0..=255).contains(value));
+                if narrow {
+                    build(
+                        if record == "t2ADDri" {
+                            "tADDi8"
+                        } else {
+                            "tSUBi8"
+                        },
+                        vec![
+                            operand(0),
+                            operand(5),
+                            operand(0),
+                            operand(2),
+                            operand(3),
+                            operand(4),
+                        ],
+                    )
+                } else {
+                    None
+                }
+            }
+            "t2ADDspImm" | "t2SUBspImm" => {
+                let value = instruction.immediate_at(2) as u32;
+                if instruction.register_at(5) != NO_REGISTER
+                    || wide
+                    || value & 3 != 0
+                    || value > (127 << 2)
+                {
+                    None
+                } else {
+                    build(
+                        if record == "t2ADDspImm" {
+                            "tADDspi"
+                        } else {
+                            "tSUBspi"
+                        },
+                        vec![
+                            MachineOperand::Register(stack),
+                            MachineOperand::Register(stack),
+                            MachineOperand::Immediate(i64::from(value / 4)),
+                            operand(3),
+                            operand(4),
+                        ],
+                    )
+                }
+            }
+            "t2ADDrr" => {
+                let destination = instruction.register_at(0);
+                let mut transform = destination == instruction.register_at(1);
+                let mut swap = false;
+                if !transform && destination == instruction.register_at(2) {
+                    transform = true;
+                    swap = true;
+                }
+                if !transform || instruction.register_at(5) != NO_REGISTER || wide {
+                    None
+                } else {
+                    build(
+                        "tADDhirr",
+                        vec![
+                            operand(0),
+                            operand(0),
+                            operand(if swap { 1 } else { 2 }),
+                            operand(3),
+                            operand(4),
+                        ],
+                    )
+                }
+            }
+            "tADDrSP" => {
+                if instruction.register_at(0) != instruction.register_at(2) {
+                    let mut operands = instruction.operands.clone();
+                    operands.push(MachineOperand::Register(NO_REGISTER));
+                    build("t2ADDrr", operands)
+                } else {
+                    None
+                }
+            }
+            "tB" | "t2B" => {
+                if instruction.immediate_at(1) != 14 && !in_it {
+                    let mut built = instruction.clone();
+                    built.opcode = self
+                        .arm32_record_index(if record == "tB" { "tBcc" } else { "t2Bcc" })
+                        .unwrap_or(instruction.opcode);
+                    *instruction = built;
+                    return true;
+                }
+                None
+            }
+            "t2Bcc" | "tBcc" => {
+                if instruction.immediate_at(1) == 14 || (record == "t2Bcc" && in_it) {
+                    let mut built = instruction.clone();
+                    built.opcode = self
+                        .arm32_record_index(if record == "tBcc" { "tB" } else { "t2B" })
+                        .unwrap_or(instruction.opcode);
+                    *instruction = built;
+                    return true;
+                }
+                None
+            }
+            "t2MOVi" => {
+                let carry = if in_it { NO_REGISTER } else { cpsr };
+                if low(instruction.register_at(0))
+                    && matches!(instruction.operand(1), MachineOperand::Immediate(value) if (0..=255).contains(value))
+                    && instruction.register_at(4) == carry
+                    && !wide
+                {
+                    build(
+                        "tMOVi8",
+                        vec![operand(0), operand(4), operand(1), operand(2), operand(3)],
+                    )
+                } else {
+                    None
+                }
+            }
+            "t2MOVr" => {
+                if low(instruction.register_at(0))
+                    && low(instruction.register_at(1))
+                    && instruction.immediate_at(2) == 14
+                    && instruction.register_at(4) == cpsr
+                    && !wide
+                {
+                    build("tMOVSr", vec![operand(0), operand(1)])
+                } else {
+                    None
+                }
+            }
+            "t2SXTH" | "t2SXTB" | "t2UXTH" | "t2UXTB" => {
+                if low(instruction.register_at(0))
+                    && low(instruction.register_at(1))
+                    && instruction.immediate_at(2) == 0
+                    && !wide
+                {
+                    build(
+                        &format!("t{}", &record[2..]),
+                        vec![operand(0), operand(1), operand(3), operand(4)],
+                    )
+                } else {
+                    None
+                }
+            }
+            "t2LSLri" | "t2LSRri" | "t2ASRri" => {
+                let carry = if in_it { NO_REGISTER } else { cpsr };
+                if low(instruction.register_at(0))
+                    && low(instruction.register_at(1))
+                    && instruction.register_at(5) == carry
+                    && !wide
+                {
+                    build(
+                        &format!("t{}", &record[2..]),
+                        vec![
+                            operand(0),
+                            operand(5),
+                            operand(1),
+                            operand(2),
+                            operand(3),
+                            operand(4),
+                        ],
+                    )
+                } else {
+                    None
+                }
+            }
+            "t2LSLrr" | "t2LSRrr" | "t2ASRrr" | "t2SBCrr" | "t2RORrr" | "t2BICrr" => {
+                let carry = if in_it { NO_REGISTER } else { cpsr };
+                if low(instruction.register_at(1))
+                    && low(instruction.register_at(2))
+                    && instruction.register_at(0) == instruction.register_at(1)
+                    && instruction.register_at(5) == carry
+                    && !wide
+                {
+                    let name = match record {
+                        "t2LSLrr" => "tLSLrr",
+                        "t2LSRrr" => "tLSRrr",
+                        "t2ASRrr" => "tASRrr",
+                        "t2SBCrr" => "tSBC",
+                        "t2RORrr" => "tROR",
+                        _ => "tBIC",
+                    };
+                    build(
+                        name,
+                        vec![
+                            operand(0),
+                            operand(5),
+                            operand(1),
+                            operand(2),
+                            operand(3),
+                            operand(4),
+                        ],
+                    )
+                } else {
+                    None
+                }
+            }
+            "t2ANDrr" | "t2EORrr" | "t2ADCrr" | "t2ORRrr" => {
+                let carry = if in_it { NO_REGISTER } else { cpsr };
+                if low(instruction.register_at(1))
+                    && low(instruction.register_at(2))
+                    && (instruction.register_at(0) == instruction.register_at(1)
+                        || instruction.register_at(0) == instruction.register_at(2))
+                    && instruction.register_at(5) == carry
+                    && !wide
+                {
+                    let name = match record {
+                        "t2ADCrr" => "tADC",
+                        "t2ANDrr" => "tAND",
+                        "t2EORrr" => "tEOR",
+                        _ => "tORR",
+                    };
+                    let (first, second) =
+                        if instruction.register_at(0) == instruction.register_at(1) {
+                            (operand(1), operand(2))
+                        } else {
+                            (operand(2), operand(1))
+                        };
+                    build(
+                        name,
+                        vec![
+                            operand(0),
+                            operand(5),
+                            first,
+                            second,
+                            operand(3),
+                            operand(4),
+                        ],
+                    )
+                } else {
+                    None
+                }
+            }
+            "tLDMIA" => {
+                let base = instruction.register_at(0);
+                let list_contains_base = (3..instruction.operands.len())
+                    .any(|index| instruction.register_at(index) == base);
+                let non_low = (3..instruction.operands.len()).any(|index| {
+                    !low(instruction.register_at(index)) && instruction.register_at(index) != base
+                });
+                if non_low
+                    || (!list_contains_base && !writeback)
+                    || (list_contains_base && writeback)
+                {
+                    let mut operands = instruction.operands.clone();
+                    let name = if writeback {
+                        operands.insert(0, MachineOperand::Register(base));
+                        "t2LDMIA_UPD"
+                    } else {
+                        "t2LDMIA"
+                    };
+                    build(name, operands)
+                } else {
+                    None
+                }
+            }
+            "tSTMIA_UPD" => {
+                let base = instruction.register_at(0);
+                let non_low = (4..instruction.operands.len()).any(|index| {
+                    !low(instruction.register_at(index)) && instruction.register_at(index) != base
+                });
+                if non_low {
+                    let mut built = instruction.clone();
+                    built.opcode = self
+                        .arm32_record_index("t2STMIA_UPD")
+                        .unwrap_or(instruction.opcode);
+                    *instruction = built;
+                    return true;
+                }
+                None
+            }
+            "tPOP" | "tPUSH" => {
+                let extra = if record == "tPOP" { counter } else { link };
+                let non_low = (2..instruction.operands.len()).any(|index| {
+                    let held = instruction.register_at(index);
+                    !low(held) && held != extra
+                });
+                if non_low {
+                    let mut operands = instruction.operands.clone();
+                    operands.insert(0, MachineOperand::Register(stack));
+                    operands.insert(0, MachineOperand::Register(stack));
+                    build(
+                        if record == "tPOP" {
+                            "t2LDMIA_UPD"
+                        } else {
+                            "t2STMDB_UPD"
+                        },
+                        operands,
+                    )
+                } else {
+                    None
+                }
+            }
             "ANDrsi" | "ORRrsi" | "EORrsi" | "BICrsi" | "SUBrsi" | "ADDrsi" => {
                 let packed = instruction.immediate_at(3) as u32;
                 let shift = packed & 7;
@@ -2348,7 +3227,23 @@ impl<'s> Assembler<'s> {
         let location = identifier_token.location();
         match self.arm32_match(&operands) {
             Outcome::Success(mut instruction) => {
-                while self.arm32_process(&mut instruction) {}
+                self.arm_mnemonic = operands
+                    .first()
+                    .map(|held| held.token_text().to_string())
+                    .unwrap_or_default();
+                self.arm_operand_count = operands
+                    .iter()
+                    .skip(1)
+                    .filter(|held| {
+                        operand_of(held).is_some_and(|op| {
+                            !matches!(op, Operand::Condition(_) | Operand::CarrySet(_))
+                        }) || held.token_text() == "!"
+                    })
+                    .count();
+                self.arm_writeback = operands.iter().any(|held| held.token_text() == "!");
+                let wide = operands.iter().any(|held| held.token_text() == ".w");
+                while self.arm32_process(&mut instruction, wide) {}
+                self.arm32_track_it_block(&instruction);
                 let locations = std::mem::take(&mut self.expression_locations);
                 self.streamer.note_expression_locations(&locations);
                 self.emit_instruction(&instruction, location);
@@ -2398,6 +3293,26 @@ enum OperandEncoder {
     LoadStoreMultipleMode,
     PowerTwo,
     HighLowImmediate,
+    ThumbBranch { shift: u32 },
+    ThumbLongBranch,
+    ThumbWideBranch,
+    ThumbShiftedImmediate,
+    ThumbShiftedRegister,
+    ThumbImmediateAddress { bits: u32, shift: u32 },
+    ThumbImmediateOffset,
+    ThumbScaledImmediate { bits: u32, shift: u32 },
+    ThumbImmediate8s4,
+    ThumbImmediate7s4,
+    ThumbImmediate0To1020s4,
+    ThumbRegisterAddress,
+    ThumbRegisterRegister,
+    ThumbFiveBitAddress,
+    ThumbStackAddress,
+    ThumbPcAddress,
+    ThumbAdrLabel,
+    ThumbWideAdrLabel,
+    AdrLabel,
+    ItMask,
 }
 
 fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
@@ -2422,6 +3337,53 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
         "getLdStmModeOpValue" => OperandEncoder::LoadStoreMultipleMode,
         "getPowerTwoOpValue" => OperandEncoder::PowerTwo,
         "getHiLoImmOpValue" => OperandEncoder::HighLowImmediate,
+        "getThumbBRTargetOpValue" | "getThumbBCCTargetOpValue" | "getThumbCBTargetOpValue" => {
+            OperandEncoder::ThumbBranch { shift: 1 }
+        }
+        "getThumbBLTargetOpValue" | "getThumbBLXTargetOpValue" => OperandEncoder::ThumbLongBranch,
+        "getThumbBranchTargetOpValue" => OperandEncoder::ThumbWideBranch,
+        "getARMBLXTargetOpValue" => OperandEncoder::ThumbBranch { shift: 1 },
+        "getT2SOImmOpValue" => OperandEncoder::ThumbShiftedImmediate,
+        "getT2SORegOpValue" => OperandEncoder::ThumbShiftedRegister,
+        "getT2AddrModeImmOpValue" => {
+            let (_, arguments) = split_arguments(text);
+            let number = |at: usize| {
+                arguments
+                    .get(at)
+                    .and_then(|argument| argument.parse::<u32>().ok())
+                    .unwrap_or(0)
+            };
+            OperandEncoder::ThumbImmediateAddress {
+                bits: number(0),
+                shift: number(1),
+            }
+        }
+        "getT2ScaledImmOpValue" => {
+            let (_, arguments) = split_arguments(text);
+            let number = |at: usize| {
+                arguments
+                    .get(at)
+                    .and_then(|argument| argument.parse::<u32>().ok())
+                    .unwrap_or(0)
+            };
+            OperandEncoder::ThumbScaledImmediate {
+                bits: number(0),
+                shift: number(1),
+            }
+        }
+        "getT2AddrModeImm8OffsetOpValue" => OperandEncoder::ThumbImmediateOffset,
+        "getT2AddrModeImm8s4OpValue" => OperandEncoder::ThumbImmediate8s4,
+        "getT2AddrModeImm7s4OpValue" => OperandEncoder::ThumbImmediate7s4,
+        "getT2AddrModeImm0_1020s4OpValue" => OperandEncoder::ThumbImmediate0To1020s4,
+        "getT2AddrModeSORegOpValue" => OperandEncoder::ThumbRegisterAddress,
+        "getThumbAddrModeRegRegOpValue" => OperandEncoder::ThumbRegisterRegister,
+        "getAddrModeISOpValue" => OperandEncoder::ThumbFiveBitAddress,
+        "getAddrModeThumbSPOpValue" => OperandEncoder::ThumbStackAddress,
+        "getAddrModePCOpValue" => OperandEncoder::ThumbPcAddress,
+        "getThumbAdrLabelOpValue" => OperandEncoder::ThumbAdrLabel,
+        "getT2AdrLabelOpValue" => OperandEncoder::ThumbWideAdrLabel,
+        "getAdrLabelOpValue" => OperandEncoder::AdrLabel,
+        "getITMaskOpValue" => OperandEncoder::ItMask,
         _ => return Err(format!("operand encoder {text}")),
     })
 }
@@ -2432,9 +3394,32 @@ struct EncodedVariable {
     bits: Vec<(u32, u32)>,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PostEncoder {
+    None,
+    NeonData,
+    NeonLoadStore,
+    NeonDuplicate,
+    NeonVersion8,
+    Vfp,
+}
+
+fn post_encoder(text: &str) -> Result<PostEncoder, String> {
+    Ok(match text {
+        "" => PostEncoder::None,
+        "NEONThumb2DataIPostEncoder" => PostEncoder::NeonData,
+        "NEONThumb2LoadStorePostEncoder" => PostEncoder::NeonLoadStore,
+        "NEONThumb2DupPostEncoder" => PostEncoder::NeonDuplicate,
+        "NEONThumb2V8PostEncoder" => PostEncoder::NeonVersion8,
+        "VFPThumb2PostEncoder" => PostEncoder::Vfp,
+        _ => return Err(format!("post encoder {text}")),
+    })
+}
+
 struct EncodingPlan {
     constant: u32,
     variables: Vec<EncodedVariable>,
+    post: PostEncoder,
 }
 
 fn locate_variable(
@@ -2481,7 +3466,7 @@ fn encoding_plan(target: &Target, index: usize) -> Result<EncodingPlan, String> 
     let Some(TableValue::Bits(bits)) = record.field("Inst") else {
         return Err("no Inst field".to_string());
     };
-    if bits.len() != 32 {
+    if bits.len() != 32 && bits.len() != 16 {
         return Err(format!("a {}-bit encoding", bits.len()));
     }
     let mut constant = 0u32;
@@ -2518,6 +3503,7 @@ fn encoding_plan(target: &Target, index: usize) -> Result<EncodingPlan, String> 
     Ok(EncodingPlan {
         constant,
         variables,
+        post: post_encoder(&table_text(record, "PostEncoderMethod"))?,
     })
 }
 
@@ -2543,6 +3529,7 @@ fn operand_value(
     instruction: &MachineInstruction,
     first: usize,
     encoder: &OperandEncoder,
+    thumb: bool,
 ) -> Result<u64, Diagnostic> {
     let register = |index: usize| -> u64 {
         u64::from(register_encoding(target, instruction.register_at(index)))
@@ -2709,9 +3696,210 @@ fn operand_value(
             u64::from(lsb | (msb << 5))
         }
         OperandEncoder::BranchTarget => match operand {
+            MachineOperand::Immediate(value) => {
+                if thumb {
+                    *value as u64
+                } else {
+                    (*value >> 2) as u64
+                }
+            }
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::ThumbBranch { shift } => match operand {
+            MachineOperand::Immediate(value) => (*value >> shift) as u64,
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::ThumbLongBranch => match operand {
+            MachineOperand::Immediate(value) => {
+                let offset = (*value as i32) >> 1;
+                let sign = (offset & 0x80_0000) >> 23;
+                let mut first = ((offset & 0x40_0000) >> 22) as u32;
+                let mut second = ((offset & 0x20_0000) >> 21) as u32;
+                first = !first & 1;
+                second = !second & 1;
+                first ^= sign as u32;
+                second ^= sign as u32;
+                let mut result = offset & !0x60_0000;
+                result |= (first as i32) << 22;
+                result |= (second as i32) << 21;
+                u64::from(result as u32)
+            }
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::ThumbWideBranch => match operand {
+            MachineOperand::Immediate(value) => {
+                let mut held = (*value >> 1) as u32;
+                let i = held & 0x80_0000 != 0;
+                let j1 = held & 0x40_0000 != 0;
+                let j2 = held & 0x20_0000 != 0;
+                if i ^ j1 {
+                    held &= !0x40_0000;
+                } else {
+                    held |= 0x40_0000;
+                }
+                if i ^ j2 {
+                    held &= !0x20_0000;
+                } else {
+                    held |= 0x20_0000;
+                }
+                u64::from(held)
+            }
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::ThumbShiftedImmediate => {
+            needs_constant(operand)?;
+            match thumb_so_immediate(immediate(first) as u32) {
+                Some(encoded) => u64::from(encoded),
+                None => return Err(unencodable("not a Thumb-2 modified immediate")),
+            }
+        }
+        OperandEncoder::ThumbShiftedRegister => {
+            let packed = immediate(first + 1) as u32;
+            let shift = packed & 7;
+            let mut binary = register(first);
+            let bits = match shift {
+                2 => 0u64,
+                3 => 2,
+                1 => 4,
+                5 | 4 => 6,
+                _ => return Err(unencodable("an unknown shift")),
+            };
+            binary |= bits << 4;
+            if shift == 5 {
+                return Ok(binary);
+            }
+            binary | (u64::from(packed >> 3) << 7)
+        }
+        OperandEncoder::ThumbImmediateAddress { bits, shift } => {
+            let mut value = register(first) << (bits + 1);
+            let mut held = immediate(first + 1) as i32;
+            if held == i32::MIN {
+                held = 0;
+            } else if held < 0 {
+                held = held.wrapping_abs();
+            } else {
+                value |= 1 << bits;
+            }
+            value | (((held >> shift) as u64) & ((1u64 << bits) - 1))
+        }
+        OperandEncoder::ThumbScaledImmediate { bits, shift } => {
+            let held = immediate(first) as i32;
+            let add = held >= 0;
+            let magnitude = (held as i64).unsigned_abs() as u32 >> shift;
+            let mut binary = u64::from(magnitude) & ((1u64 << bits) - 1);
+            if add {
+                binary |= 1 << bits;
+            }
+            binary
+        }
+        OperandEncoder::ThumbImmediateOffset => {
+            let held = immediate(first) as u32;
+            let mut binary = 0u64;
+            let magnitude = if (held as i32) < 0 {
+                held.wrapping_neg()
+            } else {
+                binary |= 256;
+                held
+            };
+            binary | u64::from(magnitude & 255)
+        }
+        OperandEncoder::ThumbImmediate8s4 => {
+            if !matches!(operand, MachineOperand::Register(_)) {
+                return Err(unencodable("a relocatable expression operand"));
+            }
+            let (add, amount) = split_offset(immediate(first + 1));
+            let mut binary = u64::from((amount >> 2) & 0xff);
+            if add {
+                binary |= 1 << 8;
+            }
+            binary | (register(first) << 9)
+        }
+        OperandEncoder::ThumbImmediate7s4 => {
+            let (add, amount) = split_offset(immediate(first + 1));
+            let mut binary = u64::from((amount >> 2) & 0xff);
+            if add {
+                binary |= 1 << 7;
+            }
+            binary | (register(first) << 8)
+        }
+        OperandEncoder::ThumbImmediate0To1020s4 => {
+            (register(first) << 8) | (immediate(first + 1) as u64 & 0xff)
+        }
+        OperandEncoder::ThumbRegisterAddress => {
+            let mut value = register(first);
+            value <<= 4;
+            value |= register(first + 1);
+            value <<= 2;
+            value | (immediate(first + 2) as u64 & 3)
+        }
+        OperandEncoder::ThumbRegisterRegister => (register(first + 1) << 3) | register(first),
+        OperandEncoder::ThumbFiveBitAddress => {
+            ((immediate(first + 1) as u64 & 0x1f) << 3) | register(first)
+        }
+        OperandEncoder::ThumbStackAddress => immediate(first + 1) as u64 & 0xff,
+        OperandEncoder::ThumbPcAddress => match operand {
             MachineOperand::Immediate(value) => (*value >> 2) as u64,
             _ => return Err(unencodable("a relocatable branch target")),
         },
+        OperandEncoder::ThumbAdrLabel => match operand {
+            MachineOperand::Immediate(value) => *value as u64,
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::ThumbWideAdrLabel => match operand {
+            MachineOperand::Immediate(value) => {
+                let held = *value as i32;
+                if held == i32::MIN {
+                    0x1000
+                } else if held < 0 {
+                    u64::from(held.unsigned_abs() | 0x1000)
+                } else {
+                    held as u64
+                }
+            }
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::AdrLabel => match operand {
+            MachineOperand::Immediate(value) => {
+                let mut binary = 0x2000u64;
+                let mut offset = *value;
+                let mut found;
+                if offset == i64::from(i32::MIN) {
+                    binary = 0x1000;
+                    found = Some(0);
+                } else if offset < 0 {
+                    binary = 0x1000;
+                    offset = -offset;
+                    found = so_immediate(offset as u32);
+                    if found.is_none() {
+                        binary = 0x2000;
+                        offset = -offset;
+                        found = so_immediate(offset as u32);
+                    }
+                } else {
+                    found = so_immediate(offset as u32);
+                    if found.is_none() {
+                        binary = 0x1000;
+                        offset = -offset;
+                        found = so_immediate(offset as u32);
+                    }
+                }
+                let Some(encoded) = found else {
+                    return Err(unencodable("not a valid so_imm value"));
+                };
+                binary | u64::from(encoded)
+            }
+            _ => return Err(unencodable("a relocatable branch target")),
+        },
+        OperandEncoder::ItMask => {
+            let mut mask = immediate(first) as u32;
+            let condition = instruction.immediate_at(first.saturating_sub(1)) as u32;
+            if condition & 1 != 0 {
+                let low = mask & mask.wrapping_neg();
+                let above = 0xf & (low.wrapping_neg() << 1);
+                mask ^= above;
+            }
+            u64::from(mask)
+        }
         OperandEncoder::LoadStoreMultipleMode => match immediate(first) {
             1 => 1,
             2 => 3,
@@ -2732,6 +3920,7 @@ pub fn encode(
     instruction: &MachineInstruction,
 ) -> Result<Encoded, Diagnostic> {
     let description = &target.instructions[instruction.opcode];
+    let thumb = instruction.flags & THUMB_MODE != 0;
     let plan = match &encoding_plans(target)[instruction.opcode] {
         Ok(plan) => plan,
         Err(cause) => {
@@ -2745,6 +3934,7 @@ pub fn encode(
             instruction,
             variable.first_operand,
             &variable.encoder,
+            thumb,
         )?;
         for (source, destination) in &variable.bits {
             if (encoded >> source) & 1 == 1 {
@@ -2752,10 +3942,110 @@ pub fn encode(
             }
         }
     }
+    if thumb {
+        value = thumb_post_encode(&plan.post, value);
+    }
+    let bytes = if description.size == 2 {
+        (value as u16).to_le_bytes().to_vec()
+    } else if thumb {
+        let mut bytes = ((value >> 16) as u16).to_le_bytes().to_vec();
+        bytes.extend_from_slice(&(value as u16).to_le_bytes());
+        bytes
+    } else {
+        value.to_le_bytes().to_vec()
+    };
     Ok(Encoded {
-        bytes: value.to_le_bytes().to_vec(),
+        bytes,
         fixups: Vec::new(),
     })
+}
+
+fn thumb_post_encode(post: &PostEncoder, value: u32) -> u32 {
+    match post {
+        PostEncoder::None => value,
+        PostEncoder::NeonData => {
+            let bit24 = value & 0x0100_0000;
+            let bit28 = bit24 << 4;
+            ((value & 0xefff_ffff) | bit28) | 0x0f00_0000
+        }
+        PostEncoder::NeonLoadStore => (value & 0xf0ff_ffff) | 0x0900_0000,
+        PostEncoder::NeonDuplicate => (value & 0x00ff_ffff) | 0xee00_0000,
+        PostEncoder::NeonVersion8 => value | 0x0c00_0000,
+        PostEncoder::Vfp => (value & 0x0fff_ffff) | 0xe000_0000,
+    }
+}
+
+fn architecture_name(text: &str) -> Option<&'static str> {
+    let rest = text
+        .strip_prefix("thumbeb")
+        .or_else(|| text.strip_prefix("armeb"))
+        .or_else(|| text.strip_prefix("thumb"))
+        .or_else(|| text.strip_prefix("arm"))?;
+    let rest = rest.strip_suffix("eb").unwrap_or(rest);
+    Some(match rest {
+        "v4" => "armv4",
+        "v4t" => "armv4t",
+        "v5" | "v5t" => "armv5t",
+        "v5te" | "v5e" => "armv5te",
+        "v5tej" | "v5ej" => "armv5tej",
+        "v6" => "armv6",
+        "v6j" => "armv6j",
+        "v6k" => "armv6k",
+        "v6z" | "v6kz" => "armv6kz",
+        "v6t2" => "armv6t2",
+        "v6m" => "armv6-m",
+        "v6sm" => "armv6s-m",
+        "v7" | "v7a" | "v7-a" => "armv7-a",
+        "v7r" | "v7-r" => "armv7-r",
+        "v7m" | "v7-m" => "armv7-m",
+        "v7em" | "v7e-m" => "armv7e-m",
+        "v7s" => "armv7s",
+        "v7k" => "armv7k",
+        "v8" | "v8a" | "v8-a" => "armv8-a",
+        "v8.1a" => "armv8.1-a",
+        "v8.2a" => "armv8.2-a",
+        "v8.3a" => "armv8.3-a",
+        "v8.4a" => "armv8.4-a",
+        "v8.5a" => "armv8.5-a",
+        "v8.6a" => "armv8.6-a",
+        "v8.7a" => "armv8.7-a",
+        "v8.8a" => "armv8.8-a",
+        "v8.9a" => "armv8.9-a",
+        "v9a" => "armv9-a",
+        "v9.1a" => "armv9.1-a",
+        "v9.2a" => "armv9.2-a",
+        "v9.3a" => "armv9.3-a",
+        "v8r" => "armv8-r",
+        "v8m.base" => "armv8-m.base",
+        "v8m.main" => "armv8-m.main",
+        "v8.1m.main" => "armv8.1-m.main",
+        _ => return None,
+    })
+}
+
+pub fn initial_features(
+    target: &Target,
+    triple: &TargetTriple,
+    cpu: &str,
+    attributes: &[String],
+) -> BTreeSet<String> {
+    let mut combined: Vec<String> = Vec::new();
+    let generic = cpu.is_empty() || cpu == "generic";
+    if generic {
+        if let Some(name) = architecture_name(&triple.architecture) {
+            combined.push(format!("+{name}"));
+        }
+    }
+    if triple.is_thumb() {
+        if combined.is_empty() {
+            combined.push("+thumb-mode".to_string());
+            combined.push("+v4t".to_string());
+        } else {
+            combined.push("+thumb-mode".to_string());
+        }
+    }
+    combined.extend(attributes.iter().cloned());
+    armv8::feature_set(target, cpu, &combined)
 }
 
 fn print_tables() -> &'static PrintTables {
@@ -2982,6 +4272,18 @@ impl<'t> Printer<'t> {
                 self.predicate(instruction, 2),
                 self.register_list(instruction, 4)
             )),
+            "tLDMIA" => {
+                let base = instruction.register_at(0);
+                let writeback = !(3..instruction.operands.len())
+                    .any(|index| instruction.register_at(index) == base);
+                Some(format!(
+                    "\tldm{}\t{}{}, {}",
+                    self.predicate(instruction, 1),
+                    self.register_name(base),
+                    if writeback { "!" } else { "" },
+                    self.register_list(instruction, 3)
+                ))
+            }
             "TSB" | "t2TSB" => Some("\ttsb\tcsync".to_string()),
             _ => None,
         }

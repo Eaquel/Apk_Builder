@@ -6985,6 +6985,7 @@ pub struct MatchClass {
     pub diagnostic_string: String,
     pub optional: bool,
     pub default_method: String,
+    pub order: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -7035,6 +7036,7 @@ pub struct Matcher {
     pub maximum_operands: usize,
     pub mnemonic_aliases: Vec<MnemonicAliasTable>,
     pub feature_names: BTreeMap<String, String>,
+    pub by_definition: bool,
 }
 
 fn tokenize_assembly(isa: Isa, text: &str) -> Vec<(String, bool)> {
@@ -7209,8 +7211,14 @@ impl Matcher {
                         return false;
                     }
                 } else {
-                    return self.classes[self.class_root(left)].value_name
-                        < self.classes[self.class_root(right)].value_name;
+                    let (first, second) = (
+                        &self.classes[self.class_root(left)],
+                        &self.classes[self.class_root(right)],
+                    );
+                    if self.by_definition && first.order != second.order {
+                        return first.order < second.order;
+                    }
+                    return first.value_name < second.value_name;
                 }
             }
             ClassKind::Register => {
@@ -7295,6 +7303,7 @@ impl<'t> MatcherBuilder<'t> {
             diagnostic_string: String::new(),
             optional: false,
             default_method: String::new(),
+            order: 0,
         });
         self.token_classes.insert(token.to_string(), made);
         made
@@ -7340,6 +7349,7 @@ impl<'t> MatcherBuilder<'t> {
             diagnostic_string: String::new(),
             optional: false,
             default_method: String::new(),
+            order: 0,
         });
         self.register_set_classes.insert(key, made);
         made
@@ -7377,6 +7387,12 @@ impl<'t> MatcherBuilder<'t> {
             diagnostic_string: held.diagnostic_string.clone(),
             optional: held.optional,
             default_method: held.default_method.clone(),
+            order: self
+                .target
+                .records
+                .get(record)
+                .map(|found| found.definition_order)
+                .unwrap_or(0),
         });
         self.user_classes.insert(record.to_string(), made);
         let mut supers = Vec::new();
@@ -7569,6 +7585,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
         maximum_operands: 0,
         mnemonic_aliases: Vec::new(),
         feature_names: BTreeMap::new(),
+        by_definition: target.isa == Isa::Armv7,
     };
     let register_classes: Vec<usize> = (0..matcher.classes.len())
         .filter(|at| matcher.classes[*at].kind == ClassKind::Register)
@@ -10852,6 +10869,9 @@ pub struct Assembler<'s> {
     pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
     pub arm_keep_symbols: bool,
     pub arm_thumb: bool,
+    pub arm_it_remaining: u32,
+    pub arm_operand_count: usize,
+    pub arm_writeback: bool,
     pub arm_attributes: armv8::AttributeSet,
     pub arm_pools: Vec<(usize, Vec<armv8::PoolEntry>)>,
     pending_errors: Vec<AssemblyMessage>,
@@ -10992,10 +11012,10 @@ impl<'s> Assembler<'s> {
         };
         let mode = triple.mode;
         let dialect = options.input_syntax;
-        let arm_features = if triple.isa == Isa::X86 {
-            BTreeSet::new()
-        } else {
-            armv8::feature_set(target, &options.cpu, &options.features)
+        let arm_features = match triple.isa {
+            Isa::X86 => BTreeSet::new(),
+            Isa::Armv7 => armv7::initial_features(target, &triple, &options.cpu, &options.features),
+            Isa::Armv8 => armv8::feature_set(target, &options.cpu, &options.features),
         };
         let mut lexer = Lexer::new(&options.source_name, source);
         lexer.masm_integers = options.masm_integers;
@@ -11022,6 +11042,9 @@ impl<'s> Assembler<'s> {
             arm_aliases: BTreeMap::new(),
             arm_keep_symbols: false,
             arm_thumb: starts_thumb,
+            arm_it_remaining: 0,
+            arm_operand_count: 0,
+            arm_writeback: false,
             arm_attributes: armv8::AttributeSet::default(),
             arm_pools: Vec::new(),
             pending_errors: Vec::new(),
@@ -18709,6 +18732,13 @@ impl<'s> Assembler<'s> {
             self.context.sections[section].has_instructions = true;
         }
         let mode = self.mode;
+        if self.target.isa == Isa::Armv7 && self.arm_thumb {
+            let mut marked = instruction.clone();
+            marked.flags |= armv7::THUMB_MODE;
+            self.streamer
+                .emit_instruction(&mut self.context, &marked, mode, location);
+            return;
+        }
         self.streamer
             .emit_instruction(&mut self.context, instruction, mode, location);
     }
@@ -20212,8 +20242,15 @@ pub fn assemble_source(
                 options.hexadecimal_immediates,
                 options.comment_column,
             );
-            if triple.isa != Isa::X86 {
-                text.arm_features = armv8::feature_set(target, &options.cpu, &options.features);
+            match triple.isa {
+                Isa::X86 => {}
+                Isa::Armv7 => {
+                    text.arm_features =
+                        armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                }
+                Isa::Armv8 => {
+                    text.arm_features = armv8::feature_set(target, &options.cpu, &options.features)
+                }
             }
             Box::new(text)
         }

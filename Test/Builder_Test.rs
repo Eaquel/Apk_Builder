@@ -74901,8 +74901,14 @@ mod armv8_assembly {
         let index = target.instruction_by_record[&name];
         let held = &target.instructions[index];
         eprintln!(
-            "R {} two={:?} asm={:?} groups={:?}",
-            held.record, held.two_operand_alias_constraint, held.assembly, held.groups
+            "R {} two={:?} asm={:?} ns={:?} size={} preds={:?} groups={:?}",
+            held.record,
+            held.two_operand_alias_constraint,
+            held.assembly,
+            held.decoder_namespace,
+            held.size,
+            held.predicates,
+            held.groups
         );
     }
 
@@ -74973,11 +74979,11 @@ mod armv8_assembly {
         Ok(result.output)
     }
 
-    fn armv7_expected(source: &str) -> Option<Vec<u8>> {
+    fn armv7_expected(source: &str, triple: &str) -> Option<Vec<u8>> {
         use std::io::Write;
         let mut child = std::process::Command::new("llvm-mc-18")
             .args([
-                "-triple=armv7a-linux-gnueabihf",
+                &format!("-triple={triple}"),
                 "-mcpu=cortex-a15",
                 "-show-encoding",
             ])
@@ -75001,10 +75007,10 @@ mod armv8_assembly {
             .collect()
     }
 
-    fn armv7_text_expected(source: &str) -> Option<String> {
+    fn armv7_text_expected(source: &str, triple: &str) -> Option<String> {
         use std::io::Write;
         let mut child = std::process::Command::new("llvm-mc-18")
-            .args(["-triple=armv7a-linux-gnueabihf", "-mcpu=cortex-a15"])
+            .args([&format!("-triple={triple}"), "-mcpu=cortex-a15"])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
             .stderr(std::process::Stdio::null())
@@ -75022,11 +75028,11 @@ mod armv8_assembly {
             .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 
-    fn armv7_text(source: &str) -> Result<String, String> {
+    fn armv7_text(source: &str, triple: &str) -> Result<String, String> {
         use crate::compilers::x86_64::{
             assemble_source, AssemblerOptions, MessageKind, OutputKind,
         };
-        let mut options = AssemblerOptions::new("armv7a-linux-gnueabihf");
+        let mut options = AssemblerOptions::new(triple);
         options.output = OutputKind::Assembly;
         options.cpu = "cortex-a15".to_string();
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
@@ -75047,11 +75053,11 @@ mod armv8_assembly {
             .ok_or_else(|| "no instruction line".to_string())
     }
 
-    fn armv7_object(source: &str) -> Result<Vec<u8>, String> {
+    fn armv7_object(source: &str, triple: &str) -> Result<Vec<u8>, String> {
         use crate::compilers::x86_64::{
             assemble_source, AssemblerOptions, MessageKind, OutputKind,
         };
-        let mut options = AssemblerOptions::new("armv7a-linux-gnueabihf");
+        let mut options = AssemblerOptions::new(triple);
         options.output = OutputKind::Object;
         options.cpu = "cortex-a15".to_string();
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
@@ -75073,8 +75079,7 @@ mod armv8_assembly {
             .unwrap_or_default())
     }
 
-    #[test]
-    fn the_armv7_assembler_matches_llvm_mc_on_arm_mode_instructions() {
+    fn compare_armv7(cases: &[&str], triple: &str) {
         if std::process::Command::new("llvm-mc-18")
             .arg("--version")
             .output()
@@ -75082,6 +75087,50 @@ mod armv8_assembly {
         {
             return;
         }
+        let mut failures = Vec::new();
+        let mut printed = 0;
+        for source in cases {
+            if armv7_text_expected(source, triple).is_some() {
+                printed += 1;
+            }
+            let Some(expected) = armv7_expected(source, triple) else {
+                failures.push(format!("{source}: llvm-mc rejects it"));
+                continue;
+            };
+            if let Some(want) = armv7_text_expected(source, triple) {
+                match armv7_text(source, triple) {
+                    Ok(got) if got == want => {}
+                    Ok(got) => failures.push(format!(
+                        "{source}: prints `{got}` but llvm-mc prints `{want}`"
+                    )),
+                    Err(message) => failures.push(format!("{source}: text output: {message}")),
+                }
+            }
+            match armv7_object(source, triple) {
+                Err(message) => failures.push(format!("{source}: {message}")),
+                Ok(bytes) => {
+                    if bytes != expected {
+                        failures.push(format!(
+                            "{source}: {bytes:02x?} but llvm-mc gives {expected:02x?}"
+                        ));
+                    }
+                }
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert_eq!(printed, cases.len(), "llvm-mc prints every case");
+        assert!(
+            failures.is_empty(),
+            "{} of {} failed",
+            failures.len(),
+            cases.len()
+        );
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_arm_mode_instructions() {
         let cases: &[&str] = &[
             "add r0, r1, r2",
             "add r0, r1, #1",
@@ -75163,46 +75212,81 @@ mod armv8_assembly {
             "ldrne r0, [r1, #4]",
             "pld [r0, #4]",
         ];
-        let mut failures = Vec::new();
-        let mut printed = 0;
-        for source in cases {
-            if armv7_text_expected(source).is_some() {
-                printed += 1;
-            }
-            let Some(expected) = armv7_expected(source) else {
-                failures.push(format!("{source}: llvm-mc rejects it"));
-                continue;
-            };
-            if let Some(want) = armv7_text_expected(source) {
-                match armv7_text(source) {
-                    Ok(got) if got == want => {}
-                    Ok(got) => failures.push(format!(
-                        "{source}: prints `{got}` but llvm-mc prints `{want}`"
-                    )),
-                    Err(message) => failures.push(format!("{source}: text output: {message}")),
-                }
-            }
-            match armv7_object(source) {
-                Err(message) => failures.push(format!("{source}: {message}")),
-                Ok(bytes) => {
-                    if bytes != expected {
-                        failures.push(format!(
-                            "{source}: {bytes:02x?} but llvm-mc gives {expected:02x?}"
-                        ));
-                    }
-                }
-            }
-        }
-        for failure in &failures {
-            eprintln!("{failure}");
-        }
-        assert_eq!(printed, cases.len(), "llvm-mc prints every case");
-        assert!(
-            failures.is_empty(),
-            "{} of {} failed",
-            failures.len(),
-            cases.len()
-        );
+        compare_armv7(cases, "armv7a-linux-gnueabihf");
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_thumb_instructions() {
+        let cases: &[&str] = &[
+            "add.w r0, r1, r2",
+            "add.w r0, r1, #1",
+            "adds r0, r1, r2",
+            "add r0, r1, r2",
+            "add r0, r1, #1",
+            "adds r0, r1, #1",
+            "add r0, #1",
+            "sub r0, r1, r2",
+            "mov r0, r1",
+            "movs r0, #0",
+            "mov.w r0, #0xff00ff",
+            "movw r0, #0x1234",
+            "movt r0, #0x5678",
+            "cmp r0, r1",
+            "cmp r0, #4",
+            "cmp.w r0, #4",
+            "and r0, r1, r2",
+            "orr.w r0, r1, r2, lsl #3",
+            "eor r0, r1",
+            "lsl r0, r1, #2",
+            "lsr.w r0, r1, r2",
+            "ldr r0, [r1]",
+            "ldr r0, [r1, #4]",
+            "ldr.w r0, [r1, #4000]",
+            "ldr r0, [r1, r2]",
+            "ldr.w r0, [r1, r2, lsl #2]",
+            "ldr r0, [sp, #8]",
+            "ldr r0, [r1], #4",
+            "ldr r0, [r1, #4]!",
+            "str r0, [r1, #4]",
+            "ldrb r0, [r1, #1]",
+            "ldrh r0, [r1, #2]",
+            "strh r0, [r1, r2]",
+            "ldrd r0, r1, [r2, #8]",
+            "strd r0, r1, [r2]",
+            "push {r4, lr}",
+            "pop {r4, pc}",
+            "push.w {r4, r5, r6, lr}",
+            "ldm r0!, {r1, r2}",
+            "stmdb sp!, {r4-r8}",
+            "bx lr",
+            "blx r3",
+            "nop",
+            "svc #1",
+            "mul r0, r1, r0",
+            "mul r0, r1, r2",
+            "mla r0, r1, r2, r3",
+            "sdiv r0, r1, r2",
+            "udiv r0, r1, r2",
+            "uxtb r0, r1",
+            "sxth r0, r1",
+            "clz r0, r1",
+            "rbit r0, r1",
+            "bfc r0, #4, #8",
+            "ubfx r0, r1, #3, #5",
+            "dmb ish",
+            "tst r0, r1",
+            "mvn r0, r1",
+            "neg r0, r1",
+            "rsb r0, r1, #0",
+            "adc r0, r1, r2",
+            "sbc r0, r1, r2",
+            "bic r0, r1, r2",
+            "ror r0, r1, #8",
+            "it eq",
+            "cbz r0, #8",
+            "wfi",
+        ];
+        compare_armv7(cases, "thumbv7a-linux-gnueabihf");
     }
 
     #[test]
