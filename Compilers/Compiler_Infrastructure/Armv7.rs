@@ -625,6 +625,12 @@ pub fn elf_relocation(
             (4, "tlsdesc") => 90,
             (4, "tlsldm") => 105,
             (4, "tlsdescseq") => 92,
+            (4, "funcdesc") => 163,
+            (4, "gotfuncdesc") => 161,
+            (4, "gotofffuncdesc") => 162,
+            (4, "tlsgd_fdpic") => 165,
+            (4, "tlsldm_fdpic") => 166,
+            (4, "gottpoff_fdpic") => 167,
             (8, _) => return Err("unsupported relocation type"),
             (1, _) => return Err("invalid fixup for 1-byte data relocation"),
             (2, _) => return Err("invalid fixup for 2-byte data relocation"),
@@ -17335,6 +17341,17 @@ pub fn relocation_number(name: &str) -> Option<u32> {
         })
 }
 
+pub fn is_fdpic_relocation(number: u32) -> bool {
+    matches!(number, 161..=167)
+}
+
+pub fn relocation_name(number: u32) -> &'static str {
+    ARM_RELOCATIONS
+        .iter()
+        .find(|(_, held)| *held == number)
+        .map_or("R_ARM_NONE", |(name, _)| *name)
+}
+
 pub fn variant_specifier(name: &str) -> Option<&'static str> {
     Some(match name.to_ascii_lowercase().as_str() {
         "none" => "none",
@@ -17354,6 +17371,12 @@ pub fn variant_specifier(name: &str) -> Option<&'static str> {
         "tlsdesc" => "tlsdesc",
         "tlscall" => "tlscall",
         "secrel32" => "secrel32",
+        "funcdesc" => "funcdesc",
+        "gotfuncdesc" => "gotfuncdesc",
+        "gotofffuncdesc" => "gotofffuncdesc",
+        "tlsgd_fdpic" => "tlsgd_fdpic",
+        "tlsldm_fdpic" => "tlsldm_fdpic",
+        "gottpoff_fdpic" => "gottpoff_fdpic",
         _ => return None,
     })
 }

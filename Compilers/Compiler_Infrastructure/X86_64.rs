@@ -4329,13 +4329,39 @@ pub fn expression_text(
                     if !matches!(specifier.as_str(), "abs" | "pg_hi21") {
                         out = format!(":{specifier}:{out}");
                     }
-                } else if target.isa == Isa::Armv7
-                    && matches!(
-                        specifier.as_str(),
+                } else if target.isa == Isa::Armv7 {
+                    let (prefix, variant) = match specifier.split_once(':') {
+                        Some((prefix, variant)) => (Some(prefix), variant),
+                        None => (None, specifier.as_str()),
+                    };
+                    let prefixed = matches!(
+                        variant,
                         "lower16" | "upper16" | "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15"
-                    )
-                {
-                    out = format!(":{specifier}:{out}");
+                    );
+                    if prefixed {
+                        out = format!(":{variant}:{out}");
+                    } else {
+                        let shown = match variant {
+                            "got" => "GOT",
+                            "gotoff" => "GOTOFF",
+                            "got_prel" => "GOT_PREL",
+                            "plt" => "PLT",
+                            "tlsgd" => "TLSGD",
+                            "tlsldm" => "TLSLDM",
+                            "tlsldo" => "TLSLDO",
+                            "gottpoff" => "GOTTPOFF",
+                            "tpoff" => "TPOFF",
+                            "secrel32" => "SECREL32",
+                            "funcdesc" => "FUNCDESC",
+                            "gotfuncdesc" => "GOTFUNCDESC",
+                            "gotofffuncdesc" => "GOTOFFFUNCDESC",
+                            other => other,
+                        };
+                        out = format!("{out}({shown})");
+                        if let Some(prefix) = prefix {
+                            out = format!(":{prefix}:{out}");
+                        }
+                    }
                 } else {
                     out.push('@');
                     out.push_str(specifier);
@@ -10671,6 +10697,7 @@ pub struct AssemblerOptions {
     pub implicit_mapping_symbols: bool,
     pub fatal_warnings: bool,
     pub no_deprecated_warn: bool,
+    pub fdpic: bool,
 }
 
 impl AssemblerOptions {
@@ -10703,6 +10730,7 @@ impl AssemblerOptions {
             implicit_mapping_symbols: false,
             fatal_warnings: false,
             no_deprecated_warn: false,
+            fdpic: false,
         }
     }
 }
@@ -11514,7 +11542,11 @@ impl<'s> Assembler<'s> {
         if !matches!(
             expression,
             Expression::Constant(_) | Expression::Register(_)
-        ) {
+        ) && !self
+            .expression_locations
+            .last()
+            .is_some_and(|(held, _)| *held == expression)
+        {
             self.expression_locations
                 .push((expression.clone(), Some(root)));
         }
@@ -26117,6 +26149,7 @@ pub mod object {
         address_significance: Option<Vec<usize>>,
         base_symbols: BTreeMap<usize, Option<usize>>,
         seen_gnu_abi: bool,
+        fdpic: bool,
         seen_identifier: bool,
         unique_bindings: BTreeSet<usize>,
         signatures: BTreeSet<usize>,
@@ -26327,6 +26360,7 @@ pub mod object {
                 address_significance: None,
                 base_symbols: BTreeMap::new(),
                 seen_gnu_abi: false,
+                fdpic: options.fdpic,
                 seen_identifier: false,
                 unique_bindings: BTreeSet::new(),
                 signatures: BTreeSet::new(),
@@ -28555,7 +28589,42 @@ pub mod object {
                     );
                     return 0;
                 }
+                if matches!(
+                    specifier.to_ascii_lowercase().as_str(),
+                    "tlsgd"
+                        | "tlsldm"
+                        | "tlsldo"
+                        | "gottpoff"
+                        | "tpoff"
+                        | "tlscall"
+                        | "tlsdesc"
+                        | "tlsgd_fdpic"
+                        | "tlsldm_fdpic"
+                        | "gottpoff_fdpic"
+                ) {
+                    if let Some(add) = target.add {
+                        context.symbols[add].symbol_type = Some(SymbolType::ThreadLocal);
+                    }
+                }
                 return match armv7::elf_relocation(arm_kind, kind.size(), &specifier, pc_relative) {
+                    Ok(number) if !self.fdpic && armv7::is_fdpic_relocation(number) => {
+                        context.report(
+                            MessageKind::Error,
+                            fixup.location,
+                            &format!(
+                                "relocation {} only supported in FDPIC mode",
+                                armv7::relocation_name(number)
+                            ),
+                        );
+                        number
+                    }
+                    Ok(3)
+                        if target.add.is_some_and(|add| {
+                            context.symbols[add].name == "_GLOBAL_OFFSET_TABLE_"
+                        }) =>
+                    {
+                        25
+                    }
                     Ok(number) => number,
                     Err(message) => {
                         context.report(MessageKind::Error, fixup.location, message);
@@ -29454,6 +29523,8 @@ pub mod object {
             out.u8(1);
             let abi = if context.triple.system.starts_with("freebsd") {
                 9
+            } else if self.fdpic && context.triple.isa == Isa::Armv7 {
+                65
             } else if self.seen_gnu_abi {
                 3
             } else {
@@ -31285,7 +31356,7 @@ pub mod object {
                     ..
                 } = value
                 {
-                    if held != "none" {
+                    if held.eq_ignore_ascii_case("sbrel") {
                         context.report(
                             MessageKind::Error,
                             Some(location),
