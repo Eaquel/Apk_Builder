@@ -75447,6 +75447,45 @@ mod armv8_assembly {
     }
 
     #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_mve_instructions() {
+        let spec = "thumbv8.1m.main-none-eabi|generic|+mve.fp,+fp64,+lob";
+        let cases: &[&str] = &[
+            "wlstp.8 lr, r0, #1668",
+            "wls lr, r0, #8",
+            "dls lr, r0",
+            "dlstp.32 lr, r4",
+            "le lr, #-8",
+            "le #-8",
+            "letp lr, #-12",
+            "bf #4, #8",
+            "bfl #4, #8",
+            "bfx #4, r1",
+            "vpst",
+            "vpteee.i8 eq, q0, q1",
+            "vptt.s32 gt, q0, q1",
+            "vpt.f32 le, q0, q1",
+            "vpt.u16 hi, q0, r3",
+            "vpnot",
+            "vctp.16 r2",
+            "vadd.i8 q0, q1, q2",
+            "vabav.s32 lr, q1, q3",
+            "vaddv.s16 lr, q0",
+            "vldrb.u8 q0, [r0]",
+            "vldrb.s16 q0, [r0, #-5]",
+            "vldrw.u32 q0, [r0, #8]!",
+            "vldrw.u32 q0, [r0], #-8",
+            "vstrw.32 q1, [r0, q2, uxtw #2]",
+            "vldrh.u16 q0, [r0, q1]",
+            "vldrw.u32 q0, [q1, #4]!",
+            "vstrd.64 q0, [q1, #-16]",
+            "vld20.8 {q0, q1}, [sp]",
+            "vst43.32 {q0, q1, q2, q3}, [r0]!",
+            "vld40.8 {q0-q3}, [r2]",
+        ];
+        compare_armv7(cases, spec);
+    }
+
+    #[test]
     fn the_armv7_assembler_matches_llvm_mc_on_floating_point_instructions() {
         let cases: &[&str] = &[
             "vadd.f32 s0, s1, s2",

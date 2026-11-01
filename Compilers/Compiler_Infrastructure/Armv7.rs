@@ -66,6 +66,13 @@ pub enum Fixup32 {
     ThumbLower07,
     ModImm,
     T2SoImm,
+    BfBranch,
+    BfTarget,
+    BflTarget,
+    BfcTarget,
+    BfcselElse,
+    Wls,
+    Le,
 }
 
 impl Fixup32 {
@@ -105,6 +112,13 @@ impl Fixup32 {
             Fixup32::ThumbLower07 => "fixup_arm_thumb_lower_0_7",
             Fixup32::ModImm => "fixup_arm_mod_imm",
             Fixup32::T2SoImm => "fixup_t2_so_imm",
+            Fixup32::BfBranch => "fixup_bf_branch",
+            Fixup32::BfTarget => "fixup_bf_target",
+            Fixup32::BflTarget => "fixup_bfl_target",
+            Fixup32::BfcTarget => "fixup_bfc_target",
+            Fixup32::BfcselElse => "fixup_bfcsel_else_target",
+            Fixup32::Wls => "fixup_wls",
+            Fixup32::Le => "fixup_le",
         }
     }
 
@@ -144,6 +158,7 @@ impl Fixup32 {
                 | Fixup32::ThumbLower07
                 | Fixup32::ModImm
                 | Fixup32::T2SoImm
+                | Fixup32::BfcselElse
         )
     }
 }
@@ -422,6 +437,54 @@ pub fn adjust_fixup_value(
                 result
             }
         }
+        Fixup32::BfBranch => {
+            let offset = value as i64 - 4;
+            if !(2..=30).contains(&offset) {
+                return Err(range_error);
+            }
+            swap_half_words((((value - 4) >> 1) as u32 & 0xf) << 23)
+        }
+        Fixup32::BfTarget | Fixup32::BflTarget | Fixup32::BfcTarget => {
+            let offset = value as i64 - 4;
+            let (low, high, mask) = match kind {
+                Fixup32::BfTarget => (-0x10000, 0xfffe, 0xf800u32),
+                Fixup32::BflTarget => (-0x40000, 0x3fffe, 0x3f800),
+                _ => (-0x1000, 0xffe, 0x800),
+            };
+            if offset < low || offset > high {
+                return Err(range_error);
+            }
+            let shifted = (value.wrapping_sub(4) as i64 >> 1) as u32;
+            let mut out = (shifted & 1) << 11;
+            out |= shifted & 0x7fe;
+            out |= (shifted & mask) << 5;
+            swap_half_words(out)
+        }
+        Fixup32::BfcselElse => {
+            if value != 2 && value != 4 {
+                return Err("out of range label-relative fixup value");
+            }
+            swap_half_words(((value as u32 >> 2) & 1) << 17)
+        }
+        Fixup32::Wls | Fixup32::Le => {
+            let offset = value as i64 - 4;
+            let (low, high) = if kind == Fixup32::Wls {
+                (0, 0xffe)
+            } else {
+                (-0xffe, 0)
+            };
+            if offset < low || offset > high {
+                return Err(range_error);
+            }
+            let mut real = value.wrapping_sub(4) as i64;
+            if kind == Fixup32::Le {
+                real = -real;
+            }
+            let real = real as u64;
+            let mut out = (((real >> 1) & 1) as u32) << 11;
+            out |= ((real >> 1) & 0x7fe) as u32;
+            swap_half_words(out)
+        }
         Fixup32::ModImm => match so_immediate(value as u32) {
             Some(encoded) if encoded >> 12 == 0 => encoded,
             _ => return Err("out of range immediate fixup value"),
@@ -478,6 +541,9 @@ pub fn elf_relocation(
             Some(Fixup32::ThumbUpper07) => 134,
             Some(Fixup32::ThumbLower815) => 133,
             Some(Fixup32::ThumbLower07) => 132,
+            Some(Fixup32::BfTarget) => 0x88,
+            Some(Fixup32::BfcTarget) => 0x89,
+            Some(Fixup32::BflTarget) => 0x8a,
             Some(Fixup32::ThumbBr) => 102,
             Some(Fixup32::ThumbBcc) => 103,
             Some(Fixup32::ThumbBl) | Some(Fixup32::ThumbBlx) => {
@@ -4623,6 +4689,71 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             operand,
             Operand::ShiftedImmediate { source, .. } if general(*source)
         ),
+        "isMemImm7ShiftedOffset" => memory.is_some_and(|held| {
+            let class = arguments
+                .get(1)
+                .map(|argument| {
+                    argument
+                        .trim_start_matches("ARM::")
+                        .trim_end_matches("RegClassID")
+                        .to_string()
+                })
+                .unwrap_or_default();
+            if held.offset_register != NO_REGISTER
+                || held.alignment != 0
+                || !in_class(target, &class, held.base)
+            {
+                return false;
+            }
+            match &held.offset_immediate {
+                None => true,
+                Some(Expression::Constant(value)) => {
+                    if *value == minimum {
+                        return true;
+                    }
+                    let divisor = 1i64 << number(0);
+                    value % divisor == 0 && (-127..=127).contains(&(value / divisor))
+                }
+                Some(_) => false,
+            }
+        }),
+        "isMemRegRQOffset" => match operand {
+            Operand::Memory(held) => {
+                let shift = number(0);
+                held.offset_immediate.is_none()
+                    && held.alignment == 0
+                    && in_class(target, "GPRnopc", held.base)
+                    && (in_class(target, "MQPR", held.offset_register)
+                        || in_class(target, "QPR", held.offset_register))
+                    && if shift == 0 {
+                        held.shift == Shift::None
+                    } else {
+                        held.shift == Shift::Uxtw && i64::from(held.shift_immediate) == shift
+                    }
+            }
+            _ => false,
+        },
+        "isMemRegQOffset" => match operand {
+            Operand::Memory(held) => {
+                if held.offset_register != NO_REGISTER
+                    || held.alignment != 0
+                    || !(in_class(target, "MQPR", held.base) || in_class(target, "QPR", held.base))
+                {
+                    return false;
+                }
+                match &held.offset_immediate {
+                    None => true,
+                    Some(Expression::Constant(value)) => {
+                        let shift = number(0);
+                        let range = (1i64 << (7 + shift)) - 1;
+                        value & ((1i64 << shift) - 1) == 0
+                            && (*value == minimum || (*value > -range && *value < range))
+                    }
+                    Some(_) => false,
+                }
+            }
+            _ => false,
+        },
         "isMemNoOffset" => memory.is_some_and(|held| {
             held.offset_register == NO_REGISTER
                 && held.offset_immediate.is_none()
@@ -4954,6 +5085,13 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             let negated = -(value as i32);
             negated > 7 && negated < 256
         }),
+        "isLEOffset" => match operand {
+            Operand::Immediate(Expression::Symbol { .. }) => true,
+            Operand::Immediate(Expression::Constant(value)) => {
+                *value < 0 && *value >= -4094 && value & 1 == 0
+            }
+            _ => false,
+        },
         "isUnsignedOffset" => match operand {
             Operand::Immediate(Expression::Symbol { .. }) => true,
             Operand::Immediate(Expression::Constant(value)) => {
@@ -5003,6 +5141,18 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
                 lane: VectorLane::Whole,
                 ..
             } => *count == 1,
+            _ => false,
+        },
+        "isVecListTwoMQ" | "isVecListFourMQ" => match operand {
+            Operand::VectorList {
+                register,
+                count,
+                spaced: false,
+                lane: VectorLane::Whole,
+            } => {
+                *count == if base == "isVecListTwoMQ" { 2 } else { 4 }
+                    && in_class(target, "MQPR", *register)
+            }
             _ => false,
         },
         "isVecListDPair" => match operand {
@@ -7004,7 +7154,102 @@ impl<'s> Assembler<'s> {
             .map(|index| index as RegisterId)
     }
 
+    fn arm32_parse_mve_vector_list(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        let start = self.lexer.token.start;
+        self.lex();
+        let mut location = self.location();
+        let Some(first) = self.arm32_try_register() else {
+            self.error(location, "register expected");
+            return Parse::Failure;
+        };
+        let target = self.target;
+        let q_register = |held: RegisterId| in_class(target, "MQPR", held);
+        if !q_register(first) {
+            let at = self.location();
+            self.error(at, "vector register in range Q0-Q7 expected");
+            return Parse::Failure;
+        }
+        let mut count = 1u32;
+        let mut last = first;
+        if self.arm32_vector_lane() != Ok(VectorLane::Whole) {
+            return Parse::Failure;
+        }
+        while self.is(TokenKind::Comma) || self.is(TokenKind::Minus) {
+            if self.is(TokenKind::Minus) {
+                self.lex();
+                let after = self.location();
+                let Some(end) = self.arm32_try_register() else {
+                    self.error(after, "register expected");
+                    return Parse::Failure;
+                };
+                if last == end {
+                    continue;
+                }
+                if !q_register(end) {
+                    self.error(after, "invalid register in register list");
+                    return Parse::Failure;
+                }
+                let (low, high) = (
+                    register_encoding(target, last),
+                    register_encoding(target, end),
+                );
+                if low > high {
+                    self.error(after, "bad range in register list");
+                    return Parse::Failure;
+                }
+                if self.arm32_vector_lane() != Ok(VectorLane::Whole) {
+                    return Parse::Failure;
+                }
+                count += high - low;
+                last = end;
+                continue;
+            }
+            self.lex();
+            location = self.location();
+            let Some(next) = self.arm32_try_register() else {
+                self.error(location, "register expected");
+                return Parse::Failure;
+            };
+            if !q_register(next) {
+                self.error(location, "vector register in range Q0-Q7 expected");
+                return Parse::Failure;
+            }
+            if register_encoding(target, next) != register_encoding(target, last) + 1 {
+                self.error(location, "non-contiguous register range");
+                return Parse::Failure;
+            }
+            count += 1;
+            last = next;
+            if self.arm32_vector_lane() != Ok(VectorLane::Whole) {
+                return Parse::Failure;
+            }
+        }
+        if !self.is(TokenKind::RightBrace) {
+            self.token_error("'}' expected");
+            return Parse::Failure;
+        }
+        let end = self.lexer.token.end;
+        self.lex();
+        operands.push(parsed(
+            Operand::VectorList {
+                register: first,
+                count,
+                spaced: false,
+                lane: VectorLane::Whole,
+            },
+            start,
+            end,
+        ));
+        Parse::Success
+    }
+
     fn arm32_parse_vector_list(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        if self.arm_features.contains("HasMVEIntegerOps") {
+            if self.is(TokenKind::LeftBrace) {
+                return self.arm32_parse_mve_vector_list(operands);
+            }
+            return Parse::NoMatch;
+        }
         let start = self.lexer.token.start;
         if self.is(TokenKind::Identifier) {
             let Some(register) = self.arm32_try_register() else {
@@ -7674,6 +7919,38 @@ impl<'s> Assembler<'s> {
             }
             ("addMemNoOffsetOperands", Operand::Memory(memory)) => {
                 into.push(MachineOperand::Register(memory.base))
+            }
+            (
+                "addMVEVecListOperands",
+                Operand::VectorList {
+                    register, count, ..
+                },
+            ) => {
+                let first = *register;
+                let pair = |low: RegisterId, high: RegisterId| {
+                    self.target
+                        .registers
+                        .iter()
+                        .position(|held| held.sub_registers == [low, high])
+                        .map(|index| index as RegisterId)
+                };
+                let number = register_encoding(self.target, first);
+                let at =
+                    |offset: u32| register_named(self.target, &format!("q{}", number + offset));
+                let joined = if *count == 2 {
+                    at(1).and_then(|next| pair(first, next))
+                } else {
+                    let high = at(2).zip(at(3)).and_then(|(low, next)| pair(low, next));
+                    at(1)
+                        .and_then(|next| pair(first, next))
+                        .zip(high)
+                        .and_then(|(low, high)| pair(low, high))
+                };
+                into.push(MachineOperand::Register(joined.unwrap_or(NO_REGISTER)));
+            }
+            ("addMemRegRQOffsetOperands", Operand::Memory(memory)) => {
+                into.push(MachineOperand::Register(memory.base));
+                into.push(MachineOperand::Register(memory.offset_register));
             }
             ("addAddrMode2Operands", Operand::Memory(memory)) => {
                 into.push(MachineOperand::Register(memory.base));
@@ -10596,6 +10873,10 @@ enum OperandEncoder {
     ItMask,
     VptMask,
     RestrictedCondition,
+    MveRegisterQ,
+    MveQImmediate(u32),
+    BranchFuture(bool, Fixup32),
+    BranchFutureAfter,
     ShiftRight(u32),
     AddressMode6(u32),
     AddressMode6Offset,
@@ -10660,6 +10941,16 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
                 shift: number(1),
             }
         }
+        "getMveAddrModeRQOpValue" => OperandEncoder::MveRegisterQ,
+        "getMveAddrModeQOpValue" => {
+            let (_, arguments) = split_arguments(text);
+            OperandEncoder::MveQImmediate(
+                arguments
+                    .first()
+                    .and_then(|argument| argument.parse::<u32>().ok())
+                    .unwrap_or(0),
+            )
+        }
         "getT2AddrModeImm8OffsetOpValue" => OperandEncoder::ThumbImmediateOffset,
         "getT2AddrModeImm8s4OpValue" => OperandEncoder::ThumbImmediate8s4,
         "getT2AddrModeImm7s4OpValue" => OperandEncoder::ThumbImmediate7s4,
@@ -10673,6 +10964,21 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
         "getT2AdrLabelOpValue" => OperandEncoder::ThumbWideAdrLabel,
         "getAdrLabelOpValue" => OperandEncoder::AdrLabel,
         "getITMaskOpValue" => OperandEncoder::ItMask,
+        "getBFTargetOpValue" => {
+            let (_, arguments) = split_arguments(text);
+            let negative = arguments.first().is_some_and(|held| held == "true");
+            let kind = match arguments.get(1).map(String::as_str) {
+                Some("ARM::fixup_bf_branch") => Fixup32::BfBranch,
+                Some("ARM::fixup_bf_target") => Fixup32::BfTarget,
+                Some("ARM::fixup_bfl_target") => Fixup32::BflTarget,
+                Some("ARM::fixup_bfc_target") => Fixup32::BfcTarget,
+                Some("ARM::fixup_wls") => Fixup32::Wls,
+                Some("ARM::fixup_le") => Fixup32::Le,
+                _ => return Err(format!("the encoder {text}")),
+            };
+            OperandEncoder::BranchFuture(negative, kind)
+        }
+        "getBFAfterTargetOpValue" => OperandEncoder::BranchFutureAfter,
         "getVPTMaskOpValue" => OperandEncoder::VptMask,
         "getRestrictedCondCodeOpValue" => OperandEncoder::RestrictedCondition,
         "getAddrMode6AddressOpValue" => OperandEncoder::AddressMode6(0),
@@ -11336,6 +11642,46 @@ fn operand_value(
             }
             _ => return Err(unencodable("a relocatable branch target")),
         },
+        OperandEncoder::BranchFuture(negative, kind) => match operand {
+            MachineOperand::Immediate(value) => {
+                let half = *value >> 1;
+                (if *negative { -half } else { half }) as u64
+            }
+            MachineOperand::Expression(expression) => {
+                add_fixup(expression, *kind);
+                0
+            }
+            _ => return Err(unencodable("a branch target register")),
+        },
+        OperandEncoder::BranchFutureAfter => match (operand, instruction.operand(0)) {
+            (MachineOperand::Expression(after), MachineOperand::Expression(branch)) => {
+                let difference = Expression::Binary {
+                    operator: BinaryOperator::Subtract,
+                    left: Box::new(after.clone()),
+                    right: Box::new(branch.clone()),
+                };
+                add_fixup(&difference, Fixup32::BfcselElse);
+                0
+            }
+            (MachineOperand::Immediate(after), MachineOperand::Immediate(branch)) => {
+                u64::from(after - branch == 4)
+            }
+            _ => return Err(unencodable("an else branch target")),
+        },
+        OperandEncoder::MveRegisterQ => (register(first) << 3) | register(first + 1),
+        OperandEncoder::MveQImmediate(shift) => {
+            let held = immediate(first + 1) as i32;
+            let add = held >= 0;
+            let mut magnitude = held >> shift;
+            if !add {
+                magnitude = (magnitude as u32).wrapping_neg() as i32;
+            }
+            let mut result = (magnitude & 0x7f) as u64;
+            if add {
+                result |= 0x80;
+            }
+            (register(first) << 8) | result
+        }
         OperandEncoder::VptMask => {
             let value = immediate(first) as u32;
             let mut result = 0u32;
@@ -12477,6 +12823,25 @@ impl<'t> Printer<'t> {
                 }
                 out.push(']');
             }
+            "printMVEVectorListTwoQ" | "printMVEVectorListFourQ" | "printMVEVectorList" => {
+                let names: Vec<String> = self
+                    .leaf_registers(instruction.register_at(index))
+                    .iter()
+                    .map(|member| self.register_name(*member))
+                    .collect();
+                out.push_str(&format!("{{{}}}", names.join(", ")));
+            }
+            "printMveAddrModeRQOperand" => {
+                out.push_str(&format!("[{}, {}", register(0), register(1)));
+                let shift = arguments
+                    .first()
+                    .and_then(|argument| argument.parse::<u32>().ok())
+                    .unwrap_or(0);
+                if shift > 0 {
+                    out.push_str(&format!(", uxtw #{shift}"));
+                }
+                out.push(']');
+            }
             "printVectorListOne" => out.push_str(&format!("{{{}}}", register(0))),
             "printVectorListOneAllLanes" => out.push_str(&format!("{{{}[]}}", register(0))),
             "printVectorListTwo"
@@ -12527,6 +12892,17 @@ impl<'t> Printer<'t> {
                 out.push_str(&format!("<{name}>"));
             }
         }
+    }
+
+    fn leaf_registers(&self, register: RegisterId) -> Vec<RegisterId> {
+        let held = &self.target.registers[register as usize];
+        if held.sub_registers.is_empty() || !held.assembly_name.is_empty() {
+            return vec![register];
+        }
+        held.sub_registers
+            .iter()
+            .flat_map(|member| self.leaf_registers(*member))
+            .collect()
     }
 
     fn vector_members(&self, register: RegisterId, count: usize, spaced: bool) -> Vec<String> {
