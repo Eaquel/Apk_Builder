@@ -10551,6 +10551,11 @@ impl AssemblyContext {
         let Some(difference) = layout.symbol_difference(self, a, b, in_set) else {
             return;
         };
+        let difference = if self.triple.isa == Isa::Armv7 && self.symbols[a].thumb_function {
+            difference | 1
+        } else {
+            difference
+        };
         *constant = constant.wrapping_add(difference);
         *add = None;
         *subtract = None;
@@ -12110,7 +12115,10 @@ impl<'s> Assembler<'s> {
             .emit_label(&mut self.context, symbol, Some(location));
         if self.target.isa == Isa::Armv7 && self.arm_thumb {
             self.arm_thumb_labels.insert(symbol);
-            if self.context.symbols[symbol].symbol_type == Some(SymbolType::Function) {
+            if matches!(
+                self.context.symbols[symbol].symbol_type,
+                Some(SymbolType::Function | SymbolType::IndirectFunction)
+            ) {
                 self.context.symbols[symbol].thumb_function = true;
             }
         }
@@ -25625,6 +25633,8 @@ pub mod object {
         pub allow_auto_padding: bool,
         pub mode: Mode,
         pub thumb: bool,
+        pub arm_nop: bool,
+        pub arm_features: u8,
     }
 
     impl Fragment {
@@ -25643,6 +25653,8 @@ pub mod object {
                 allow_auto_padding: false,
                 mode,
                 thumb: false,
+                arm_nop: false,
+                arm_features: 0,
             }
         }
 
@@ -26054,7 +26066,6 @@ pub mod object {
         arm32_attributes: Vec<u8>,
         arm32_mapping: BTreeMap<usize, (u8, Option<(usize, u64)>)>,
         arm32_thumb: bool,
-        arm32_mapping_counter: u32,
         thumb_two_features: bool,
         thumb_long_call: bool,
         thumb_v8m_baseline: bool,
@@ -26253,7 +26264,6 @@ pub mod object {
                 arm32_attributes: Vec::new(),
                 arm32_mapping: BTreeMap::new(),
                 arm32_thumb: triple.isa == Isa::Armv7 && triple.is_thumb(),
-                arm32_mapping_counter: 0,
                 arm32_nop: triple.isa == Isa::Armv7
                     && armv7::initial_features(target, &triple, &options.cpu, &options.features)
                         .contains("HasV6T2Ops"),
@@ -26734,9 +26744,8 @@ pub mod object {
         }
 
         fn arm32_mapping_symbol(&mut self, context: &mut AssemblyContext, name: &str) -> usize {
-            let number = self.arm32_mapping_counter;
-            self.arm32_mapping_counter += 1;
-            let symbol = context.renamable_symbol(&format!("{name}.{number}"), false, false);
+            let symbol = context.symbols.len();
+            context.symbols.push(Symbol::new(name, false));
             self.emit_label(context, symbol, None);
             symbol
         }
@@ -26785,8 +26794,17 @@ pub mod object {
                 if !seen.insert(current) {
                     return false;
                 }
-                let Some(Expression::Symbol { name, .. }) = &held.value else {
-                    return false;
+                let name = match &held.value {
+                    Some(Expression::Symbol { name, .. }) => name,
+                    Some(Expression::Binary {
+                        operator: BinaryOperator::Add | BinaryOperator::Subtract,
+                        left,
+                        right,
+                    }) if matches!(**right, Expression::Constant(_)) => match &**left {
+                        Expression::Symbol { name, .. } => name,
+                        _ => return false,
+                    },
+                    _ => return false,
                 };
                 let Some(next) = context.lookup(name) else {
                     return false;
@@ -26892,6 +26910,18 @@ pub mod object {
                     self.emit_assignment(context, target, &value);
                 }
             }
+        }
+
+        fn arm_feature_bits(&self) -> u8 {
+            u8::from(self.thumb_two_features)
+                | (u8::from(self.thumb_v8m_baseline) << 1)
+                | (u8::from(self.thumb_long_call) << 2)
+        }
+
+        fn set_arm_feature_bits(&mut self, bits: u8) {
+            self.thumb_two_features = bits & 1 != 0;
+            self.thumb_v8m_baseline = bits & 2 != 0;
+            self.thumb_long_call = bits & 4 != 0;
         }
 
         fn arm32_relaxed_opcode(&self, instruction: &MachineInstruction) -> Option<usize> {
@@ -27052,6 +27082,8 @@ pub mod object {
             };
             let fragment = self.fragment();
             let base = self.fragments[fragment].fixed.len();
+            let bits = self.arm_feature_bits();
+            self.fragments[fragment].arm_features = bits;
             self.fragments[fragment]
                 .fixed
                 .extend_from_slice(&encoded.bytes);
@@ -27074,7 +27106,9 @@ pub mod object {
             };
             let fragment = self.fragment();
             let base = self.fragments[fragment].fixed.len();
+            let bits = self.arm_feature_bits();
             let held = &mut self.fragments[fragment];
+            held.arm_features = bits;
             held.tail = Tail::Relaxable(instruction.clone());
             held.has_instructions = true;
             held.mode = mode;
@@ -27557,6 +27591,10 @@ pub mod object {
             let Tail::Relaxable(instruction) = self.fragments[fragment].tail.clone() else {
                 return;
             };
+            if self.target.isa == Isa::Armv7 {
+                let bits = self.fragments[fragment].arm_features;
+                self.set_arm_feature_bits(bits);
+            }
             if !self.may_need_relaxation(&instruction) {
                 return;
             }
@@ -28315,6 +28353,10 @@ pub mod object {
             index: usize,
         ) {
             let _ = index;
+            if self.target.isa == Isa::Armv7 {
+                let bits = self.fragments[fragment].arm_features;
+                self.set_arm_feature_bits(bits);
+            }
             let mut resolved = resolved;
             let literal = matches!(fixup.fixup.kind, FixupKind::Literal(_));
             if resolved && literal {
@@ -29064,11 +29106,12 @@ pub mod object {
             offset: u64,
             maximum: u64,
             mode: Mode,
-            thumb: bool,
+            arm: (bool, bool),
         ) {
+            let (thumb, arm_nop) = arm;
             if self.target.isa == Isa::Armv7 {
                 if thumb {
-                    let encoding: u16 = if self.arm32_nop { 0xbf00 } else { 0x46c0 };
+                    let encoding: u16 = if arm_nop { 0xbf00 } else { 0x46c0 };
                     for _ in 0..count / 2 {
                         out.extend_from_slice(&encoding.to_le_bytes());
                     }
@@ -29076,11 +29119,7 @@ pub mod object {
                         out.push(0);
                     }
                 } else {
-                    let encoding: u32 = if self.arm32_nop {
-                        0xe320f000
-                    } else {
-                        0xe1a00000
-                    };
+                    let encoding: u32 = if arm_nop { 0xe320f000 } else { 0xe1a00000 };
                     for _ in 0..count / 4 {
                         out.extend_from_slice(&encoding.to_le_bytes());
                     }
@@ -29146,7 +29185,7 @@ pub mod object {
                             held.offset + held.fixed.len() as u64,
                             maximum,
                             held.mode,
-                            held.thumb,
+                            (held.thumb, held.arm_nop),
                         );
                     } else {
                         for _ in 0..count {
@@ -29202,11 +29241,18 @@ pub mod object {
                         held.offset,
                         control as u64,
                         held.mode,
-                        held.thumb,
+                        (held.thumb, held.arm_nop),
                     );
                 }
                 Tail::BoundaryAlign { .. } => {
-                    self.write_nops(out, size, held.offset, size, held.mode, held.thumb);
+                    self.write_nops(
+                        out,
+                        size,
+                        held.offset,
+                        size,
+                        held.mode,
+                        (held.thumb, held.arm_nop),
+                    );
                 }
                 Tail::Org { value, .. } => {
                     out.extend(std::iter::repeat_n(*value, size as usize));
@@ -31359,6 +31405,7 @@ pub mod object {
             }
             self.fragments[fragment].mode = mode;
             self.fragments[fragment].thumb = self.arm32_thumb;
+            self.fragments[fragment].arm_nop = self.arm32_nop;
         }
 
         fn emit_value_to_offset(

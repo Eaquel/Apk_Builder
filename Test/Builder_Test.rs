@@ -75752,9 +75752,19 @@ mod armv8_assembly {
         let mut rows: Vec<String> = symbols
             .iter()
             .map(|held| {
+                let name = match held.name.split_once('.') {
+                    Some((head, tail))
+                        if matches!(head, "$a" | "$t" | "$d")
+                            && !tail.is_empty()
+                            && tail.bytes().all(|byte| byte.is_ascii_digit()) =>
+                    {
+                        head
+                    }
+                    _ => held.name.as_str(),
+                };
                 format!(
                     "sym {} value={:#x} size={} bind={} type={} other={} in={}",
-                    held.name,
+                    name,
                     held.value,
                     held.size,
                     held.binding,

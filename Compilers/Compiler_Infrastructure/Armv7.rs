@@ -16665,7 +16665,9 @@ impl<'a> Assembler<'a> {
             0x7000_0001,
             ELF_FLAG_ALLOCATE | ELF_FLAG_LINK_ORDER,
         );
-        if self.arm_unwind.personality_index < 4 {
+        if self.arm_unwind.personality_index < 4
+            && !self.context.triple.environment.contains("android")
+        {
             let name = format!("__aeabi_unwind_cpp_pr{}", self.arm_unwind.personality_index);
             self.arm32_personality_fixup(&name, location);
         }
