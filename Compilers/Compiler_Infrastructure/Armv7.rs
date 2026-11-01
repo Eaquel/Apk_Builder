@@ -676,6 +676,7 @@ pub enum Operand {
     SystemMask(u32),
     BankedRegister(u32),
     ProcessorFlags(u32),
+    VectorPredicate(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -729,6 +730,17 @@ impl ItState {
         let zeros = self.mask.trailing_zeros().min(4);
         self.position += 1;
         if self.position == 5 - zeros && self.explicit {
+            self.position = u32::MAX;
+        }
+    }
+
+    pub fn forward_vector(&mut self) {
+        if !self.active() {
+            return;
+        }
+        let zeros = self.mask.trailing_zeros().min(4);
+        self.position += 1;
+        if self.position == 5 - zeros {
             self.position = u32::MAX;
         }
     }
@@ -4540,6 +4552,19 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
     let low = |register: RegisterId| in_class(target, "tGPR", register);
     match base.as_str() {
         "isCondCode" | "isITCondCode" => matches!(operand, Operand::Condition(_)),
+        "isITCondCodeNoAL" => matches!(operand, Operand::Condition(code) if *code != 14),
+        "isITCondCodeRestrictedI" => {
+            matches!(operand, Operand::Condition(code) if *code == 0 || *code == 1)
+        }
+        "isITCondCodeRestrictedS" => {
+            matches!(operand, Operand::Condition(code) if (10..=13).contains(code))
+        }
+        "isITCondCodeRestrictedU" => {
+            matches!(operand, Operand::Condition(code) if *code == 2 || *code == 8)
+        }
+        "isITCondCodeRestrictedFP" => {
+            matches!(operand, Operand::Condition(code) if *code <= 1 || (10..=13).contains(code))
+        }
         "isCCOut" => matches!(operand, Operand::CarrySet(_)),
         "isImm" => is_immediate,
         "isImmediate" => constant.is_some_and(|value| value >= number(0) && value <= number(1)),
@@ -5175,6 +5200,7 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isMSRMask" => matches!(operand, Operand::SystemMask(_)),
         "isBankedReg" => matches!(operand, Operand::BankedRegister(_)),
         "isProcIFlags" => matches!(operand, Operand::ProcessorFlags(_)),
+        "isVPTPred" => matches!(operand, Operand::VectorPredicate(_)),
         "isConstPoolAsmImm" | "isConstantPoolImm" => matches!(operand, Operand::ConstantPool(_)),
         _ => false,
     }
@@ -5340,6 +5366,7 @@ struct Mnemonic {
     condition: u32,
     carry: bool,
     interrupt_modification: u32,
+    vpt_code: u32,
 }
 
 const UNSPLIT: &[&str] = &[
@@ -5361,19 +5388,176 @@ const KEEP_CONDITION_SUFFIX: &[&str] = &[
     "adcs", "bics", "movs", "muls", "smlals", "smulls", "umlals", "umulls", "lsls", "sbcs", "rscs",
 ];
 
-fn split_mnemonic(text: &str, thumb: bool) -> Mnemonic {
+const VPT_PREDICABLE: &[&str] = &[
+    "vabav",
+    "vabd",
+    "vabs",
+    "vadc",
+    "vadd",
+    "vaddlv",
+    "vaddv",
+    "vand",
+    "vbic",
+    "vbrsr",
+    "vcadd",
+    "vcls",
+    "vclz",
+    "vcmla",
+    "vcmp",
+    "vcmul",
+    "vctp",
+    "vcvt",
+    "vddup",
+    "vdup",
+    "vdwdup",
+    "veor",
+    "vfma",
+    "vfmas",
+    "vfms",
+    "vhadd",
+    "vhcadd",
+    "vhsub",
+    "vidup",
+    "viwdup",
+    "vldrb",
+    "vldrd",
+    "vldrw",
+    "vmax",
+    "vmaxa",
+    "vmaxav",
+    "vmaxnm",
+    "vmaxnma",
+    "vmaxnmav",
+    "vmaxnmv",
+    "vmaxv",
+    "vmin",
+    "vminav",
+    "vminnm",
+    "vminnmav",
+    "vminnmv",
+    "vminv",
+    "vmla",
+    "vmladav",
+    "vmlaldav",
+    "vmlalv",
+    "vmlas",
+    "vmlav",
+    "vmlsdav",
+    "vmlsldav",
+    "vmovlb",
+    "vmovlt",
+    "vmovnb",
+    "vmovnt",
+    "vmul",
+    "vmvn",
+    "vneg",
+    "vorn",
+    "vorr",
+    "vpnot",
+    "vpsel",
+    "vqabs",
+    "vqadd",
+    "vqdmladh",
+    "vqdmlah",
+    "vqdmlash",
+    "vqdmlsdh",
+    "vqdmulh",
+    "vqdmull",
+    "vqmovn",
+    "vqmovun",
+    "vqneg",
+    "vqrdmladh",
+    "vqrdmlah",
+    "vqrdmlash",
+    "vqrdmlsdh",
+    "vqrdmulh",
+    "vqrshl",
+    "vqrshrn",
+    "vqrshrun",
+    "vqshl",
+    "vqshrn",
+    "vqshrun",
+    "vqsub",
+    "vrev16",
+    "vrev32",
+    "vrev64",
+    "vrhadd",
+    "vrmlaldavh",
+    "vrmlalvh",
+    "vrmlsldavh",
+    "vrmulh",
+    "vrshl",
+    "vrshr",
+    "vrshrn",
+    "vsbc",
+    "vshl",
+    "vshlc",
+    "vshll",
+    "vshr",
+    "vshrn",
+    "vsli",
+    "vsri",
+    "vstrb",
+    "vstrd",
+    "vstrw",
+    "vsub",
+];
+
+const VPT_SPLIT_EXCEPTIONS: &[&str] = &[
+    "vmovlt",
+    "vshllt",
+    "vrshrnt",
+    "vshrnt",
+    "vqrshrunt",
+    "vqshrunt",
+    "vqrshrnt",
+    "vqshrnt",
+    "vmullt",
+    "vqmovnt",
+    "vqmovunt",
+    "vmovnt",
+    "vqdmullt",
+    "vpnot",
+    "vcvtt",
+    "vcvt",
+];
+
+const MVE_NO_CONDITION: &[&str] = &[
+    "vmine", "vshle", "vshlt", "vshllt", "vrshle", "vrshlt", "vmvne", "vorne", "vnege", "vnegt",
+    "vmule", "vmult", "vrintne", "vcmult", "vcmule", "vpsele", "vpselt",
+];
+
+fn is_vpt_predicable(mnemonic: &str, extra: &str, mve: bool) -> bool {
+    if !mve {
+        return false;
+    }
+    if (mnemonic.starts_with("vldrh") && mnemonic != "vldrhi")
+        || (mnemonic.starts_with("vmov") && !matches!(extra, ".f16" | ".32" | ".16" | ".8"))
+        || (mnemonic.starts_with("vrint") && mnemonic != "vrintr")
+        || (mnemonic.starts_with("vstrh") && mnemonic != "vstrhi")
+    {
+        return true;
+    }
+    VPT_PREDICABLE
+        .iter()
+        .any(|prefix| mnemonic.starts_with(prefix))
+}
+
+fn split_mnemonic(text: &str, thumb: bool, mve: bool, extra: &str) -> Mnemonic {
     let mut result = Mnemonic {
         it_mask: None,
         base: text.to_string(),
         condition: CONDITION_AL,
         carry: false,
         interrupt_modification: 0,
+        vpt_code: 0,
     };
     if (text == "movs" && thumb) || UNSPLIT.contains(&text) || text.starts_with("vsel") {
         return result;
     }
     let mut name = text.to_string();
-    if !KEEP_CONDITION_SUFFIX.contains(&name.as_str()) && name.len() >= 2 {
+    let mve_keep = mve && (MVE_NO_CONDITION.contains(&text) || text.starts_with("vq"));
+    if !KEEP_CONDITION_SUFFIX.contains(&name.as_str()) && !mve_keep && name.len() >= 2 {
         if let Some(code) = condition_code(&name[name.len() - 2..]) {
             name.truncate(name.len() - 2);
             result.condition = code;
@@ -5398,9 +5582,29 @@ fn split_mnemonic(text: &str, thumb: bool) -> Mnemonic {
             result.interrupt_modification = modification;
         }
     }
+    if is_vpt_predicable(&name, extra, mve) && !VPT_SPLIT_EXCEPTIONS.contains(&name.as_str()) {
+        let code = match name.chars().last() {
+            Some('t') => 1,
+            Some('e') => 2,
+            _ => 0,
+        };
+        if code != 0 {
+            name.pop();
+            result.vpt_code = code;
+        }
+        result.base = name;
+        return result;
+    }
     if let Some(mask) = name.strip_prefix("it") {
         result.it_mask = Some(mask.to_string());
         name = "it".to_string();
+    }
+    if let Some(mask) = name.strip_prefix("vpst") {
+        result.it_mask = Some(mask.to_string());
+        name = "vpst".to_string();
+    } else if let Some(mask) = name.strip_prefix("vpt") {
+        result.it_mask = Some(mask.to_string());
+        name = "vpt".to_string();
     }
     result.base = name;
     result
@@ -6611,9 +6815,13 @@ impl<'s> Assembler<'s> {
                 "FPImm" => self.arm32_parse_fp_immediate(operands, mnemonic),
                 name if name.starts_with("VecList") => self.arm32_parse_vector_list(operands),
                 "AM3Offset" => self.arm32_parse_am3_offset(operands),
-                "ITCondCode" | "CondCodeNoAL" | "CondCodeNoALInv" => {
-                    self.arm32_parse_it_condition(operands)
-                }
+                "ITCondCode"
+                | "CondCodeNoAL"
+                | "CondCodeNoALInv"
+                | "CondCodeRestrictedI"
+                | "CondCodeRestrictedS"
+                | "CondCodeRestrictedU"
+                | "CondCodeRestrictedFP" => self.arm32_parse_it_condition(operands),
                 "MemBarrierOpt" => self.arm32_parse_barrier(operands, false),
                 "InstSyncBarrierOpt" => self.arm32_parse_barrier(operands, true),
                 "Bitfield" => self.arm32_parse_bitfield(operands),
@@ -7113,14 +7321,30 @@ impl<'s> Assembler<'s> {
             .matcher
             .apply_mnemonic_alias(&name.to_ascii_lowercase(), 0, Mode::Bits32);
         let head_end = lower.find('.').unwrap_or(lower.len());
-        let split = split_mnemonic(&lower[..head_end], thumb);
+        let mve = self.arm_features.contains("HasMVEIntegerOps");
+        let extra = lower[head_end..]
+            .split_once(' ')
+            .map_or(&lower[head_end..], |(head, _)| head);
+        let extra = extra
+            .split('.')
+            .nth(1)
+            .map_or(String::new(), |piece| format!(".{piece}"));
+        let split = split_mnemonic(&lower[..head_end], thumb, mve, &extra);
         let mnemonic = split.base.clone();
         let mut operands: Vec<ParsedOperand> = Vec::new();
         self.arm32_push_token(&mut operands, &mnemonic, name_start);
         if let Some(mask) = &split.it_mask {
-            let location = self.statement_location(name_start + 2);
+            let width = mnemonic.len();
+            let location = self.statement_location(name_start + width);
             if mask.len() > 3 {
-                self.error(location, "too many conditions on IT instruction");
+                self.error(
+                    location,
+                    if mnemonic == "it" {
+                        "too many conditions on IT instruction"
+                    } else {
+                        "too many conditions on VPT instruction"
+                    },
+                );
                 return Err(());
             }
             let mut value = 8u32;
@@ -7139,10 +7363,11 @@ impl<'s> Assembler<'s> {
             }
             operands.push(parsed(
                 Operand::ItMask(value),
-                name_start + 2,
-                name_start + 2,
+                name_start + width,
+                name_start + width,
             ));
         }
+        let can_vpt = is_vpt_predicable(&mnemonic, &extra, mve);
         let can_carry = accepts_carry(&mnemonic, thumb);
         let can_condition = accepts_condition(&mnemonic, thumb);
         let location = self.statement_location(name_start);
@@ -7175,6 +7400,26 @@ impl<'s> Assembler<'s> {
         if can_condition && split.condition != CONDITION_AL {
             operands.push(parsed(
                 Operand::Condition(split.condition),
+                after + usize::from(split.carry),
+                after + usize::from(split.carry),
+            ));
+        }
+        if !can_vpt && split.vpt_code != 0 {
+            self.error(
+                location,
+                &format!(
+                    "instruction '{mnemonic}' is not VPT predicable, but VPT code T/E is specified"
+                ),
+            );
+            return Err(());
+        }
+        if can_vpt
+            && split.vpt_code != 0
+            && !(mnemonic.starts_with("vcvt")
+                && !matches!(mnemonic.as_str(), "vcvta" | "vcvtn" | "vcvtp" | "vcvtm"))
+        {
+            operands.push(parsed(
+                Operand::VectorPredicate(split.vpt_code),
                 after + usize::from(split.carry),
                 after + usize::from(split.carry),
             ));
@@ -7224,6 +7469,31 @@ impl<'s> Assembler<'s> {
             self.token_error("unexpected token in argument list");
             return Err(());
         }
+        let mut mnemonic = mnemonic;
+        if mve {
+            let end = Self::arm32_mnemonic_operand_end(&operands);
+            let omit = self.arm32_omit_vector_predicate(&mnemonic, &operands, end);
+            let converting = mnemonic.starts_with("vcvt")
+                && !matches!(mnemonic.as_str(), "vcvta" | "vcvtn" | "vcvtp" | "vcvtm");
+            if converting {
+                if !omit {
+                    let at = name_start + mnemonic.len() + usize::from(split.carry);
+                    operands.insert(1, parsed(Operand::VectorPredicate(split.vpt_code), at, at));
+                }
+            } else if can_vpt && omit {
+                operands
+                    .retain(|held| !matches!(operand_of(held), Some(Operand::VectorPredicate(_))));
+            }
+            if split.vpt_code != 0
+                && !operands
+                    .iter()
+                    .any(|held| matches!(operand_of(held), Some(Operand::VectorPredicate(_))))
+            {
+                let joined = &lower[..mnemonic.len() + 1];
+                mnemonic = joined.to_string();
+                operands[0] = ParsedOperand::token(&mnemonic, name_start);
+            }
+        }
         if !thumb
             && mnemonic == "blx"
             && operands.len() == prefix + 1
@@ -7232,6 +7502,47 @@ impl<'s> Assembler<'s> {
             operands.retain(|held| !matches!(operand_of(held), Some(Operand::Condition(_))));
         }
         Ok((operands, mnemonic))
+    }
+
+    fn arm32_omit_vector_predicate(
+        &self,
+        mnemonic: &str,
+        operands: &[ParsedOperand],
+        end: usize,
+    ) -> bool {
+        if operands.len() <= end {
+            return true;
+        }
+        if ["vld2", "vld4", "vst2", "vst4"]
+            .iter()
+            .any(|prefix| mnemonic.starts_with(prefix))
+        {
+            return true;
+        }
+        if mnemonic.starts_with("vctp") || mnemonic.starts_with("vpnot") {
+            return false;
+        }
+        let target = self.target;
+        let vector =
+            |held: &ParsedOperand| matches!(operand_of(held), Some(Operand::VectorIndex(_)));
+        let register_in = |held: &ParsedOperand, classes: &[&str]| match operand_of(held) {
+            Some(Operand::Register(register)) => classes
+                .iter()
+                .any(|class| in_class(target, class, *register)),
+            _ => false,
+        };
+        if mnemonic.starts_with("vmov")
+            && !(mnemonic.starts_with("vmovl")
+                || mnemonic.starts_with("vmovn")
+                || mnemonic.starts_with("vmovx"))
+        {
+            return operands
+                .iter()
+                .any(|held| vector(held) || register_in(held, &["SPR", "DPR"]));
+        }
+        !operands
+            .iter()
+            .any(|held| vector(held) || register_in(held, &["MQPR", "QPR"]))
     }
 
     fn arm32_render(
@@ -7256,6 +7567,12 @@ impl<'s> Assembler<'s> {
                     immediate(into, i64::from(CONDITION_AL));
                     into.push(nothing);
                 }
+                "addVPTPredNOperands" | "addVPTPredROperands" => {
+                    immediate(into, 0);
+                    for _ in 1..count {
+                        into.push(nothing.clone());
+                    }
+                }
                 _ => {
                     for _ in 0..count {
                         into.push(nothing.clone());
@@ -7265,6 +7582,27 @@ impl<'s> Assembler<'s> {
             return;
         };
         match (name.as_str(), operand) {
+            ("addVPTPredNOperands" | "addVPTPredROperands", Operand::VectorPredicate(code)) => {
+                immediate(into, i64::from(*code));
+                into.push(if *code == 0 {
+                    nothing.clone()
+                } else {
+                    MachineOperand::Register(
+                        register_named(self.target, "p0").unwrap_or(NO_REGISTER),
+                    )
+                });
+                into.push(nothing.clone());
+                if count == 4 {
+                    into.push(if *code == 0 {
+                        nothing.clone()
+                    } else {
+                        match into.first() {
+                            Some(MachineOperand::Register(held)) => MachineOperand::Register(*held),
+                            _ => nothing.clone(),
+                        }
+                    });
+                }
+            }
             ("addCondCodeOperands", Operand::Condition(code)) => {
                 immediate(into, i64::from(*code));
                 let cpsr = self
@@ -7967,6 +8305,8 @@ impl<'s> Assembler<'s> {
                         let method = match class.name.as_str() {
                             "CondCode" => "addCondCodeOperands".to_string(),
                             "CCOut" => "addCCOutOperands".to_string(),
+                            "VPTPredN" => "addVPTPredNOperands".to_string(),
+                            "VPTPredR" => "addVPTPredROperands".to_string(),
                             name if class.render.is_empty() => format!("add{name}Operands"),
                             _ => class.render.clone(),
                         };
@@ -8303,6 +8643,14 @@ impl<'s> Assembler<'s> {
 
     fn arm32_start_it_block(&mut self, instruction: &MachineInstruction) {
         let record = self.target.instructions[instruction.opcode].record.as_str();
+        if record == "MVE_VPST" || record.starts_with("MVE_VPTv") {
+            self.arm_vpt = ItState {
+                condition: 0,
+                mask: instruction.immediate_at(0) as u32,
+                position: 0,
+                explicit: true,
+            };
+        }
         if record == "ITasm" || record == "t2IT" {
             self.arm_it = ItState {
                 condition: instruction.immediate_at(0) as u32,
@@ -9054,11 +9402,13 @@ impl<'s> Assembler<'s> {
                 }
                 if self.arm32_validate_instruction(&instruction, &operands, location) {
                     self.arm_it.forward();
+                    self.arm_vpt.forward_vector();
                     return true;
                 }
                 while self.arm32_process(&mut instruction, wide) {}
                 self.arm32_start_it_block(&instruction);
                 self.arm_it.forward();
+                self.arm_vpt.forward_vector();
                 if self.target.instructions[instruction.opcode].record == "ITasm" {
                     return false;
                 }
@@ -9113,9 +9463,11 @@ impl<'s> Assembler<'s> {
             {
                 right_hand_condition = true;
                 end += 1;
-            } else if matches!(operand_of(held), Some(Operand::CarrySet(_)))
-                || (matches!(operand_of(held), Some(Operand::Condition(_)))
-                    && !right_hand_condition)
+            } else if matches!(
+                operand_of(held),
+                Some(Operand::CarrySet(_) | Operand::VectorPredicate(_))
+            ) || (matches!(operand_of(held), Some(Operand::Condition(_)))
+                && !right_hand_condition)
             {
                 end += 1;
             } else {
@@ -9248,7 +9600,31 @@ impl<'s> Assembler<'s> {
                 );
             }
         }
-        if let Some(group) = vector_group {
+        if self.arm_vpt.active() && !breakpoint {
+            let Some(group) = vector_group else {
+                return self.error(location, "instruction in VPT block must be predicable");
+            };
+            let bit = (self.arm_vpt.mask >> (5 - self.arm_vpt.position.min(5))) & 1;
+            let expected = if bit == 1 { 2 } else { 1 };
+            let found = instruction.immediate_at(group.first);
+            if found != expected {
+                let names = ["none", "t", "e"];
+                let predicate_location = operands
+                    .iter()
+                    .enumerate()
+                    .skip(1)
+                    .find(|(_, held)| matches!(operand_of(held), Some(Operand::VectorPredicate(_))))
+                    .map_or(location, |(index, _)| spot(index));
+                return self.error(
+                    predicate_location,
+                    &format!(
+                        "incorrect predication in VPT block; got '{}', but expected '{}'",
+                        names[found.clamp(0, 2) as usize],
+                        names[expected as usize]
+                    ),
+                );
+            }
+        } else if let Some(group) = vector_group {
             if instruction.immediate_at(group.first) != 0 {
                 return self.error(location, "VPT predicated instructions must be in VPT block");
             }
@@ -10218,6 +10594,8 @@ enum OperandEncoder {
     ThumbWideAdrLabel,
     AdrLabel,
     ItMask,
+    VptMask,
+    RestrictedCondition,
     ShiftRight(u32),
     AddressMode6(u32),
     AddressMode6Offset,
@@ -10295,6 +10673,8 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
         "getT2AdrLabelOpValue" => OperandEncoder::ThumbWideAdrLabel,
         "getAdrLabelOpValue" => OperandEncoder::AdrLabel,
         "getITMaskOpValue" => OperandEncoder::ItMask,
+        "getVPTMaskOpValue" => OperandEncoder::VptMask,
+        "getRestrictedCondCodeOpValue" => OperandEncoder::RestrictedCondition,
         "getAddrMode6AddressOpValue" => OperandEncoder::AddressMode6(0),
         "getAddrMode6OneLane32AddressOpValue" => OperandEncoder::AddressMode6(1),
         "getAddrMode6DupAddressOpValue" => OperandEncoder::AddressMode6(2),
@@ -10956,6 +11336,32 @@ fn operand_value(
             }
             _ => return Err(unencodable("a relocatable branch target")),
         },
+        OperandEncoder::VptMask => {
+            let value = immediate(first) as u32;
+            let mut result = 0u32;
+            let mut previous = 0u32;
+            for bit in (0..4).rev() {
+                let held = (value >> bit) & 1;
+                if value & !(!0u32 << bit) == 0 {
+                    result |= 1 << bit;
+                    break;
+                }
+                if held != previous {
+                    result |= 1 << bit;
+                }
+                previous = held;
+            }
+            u64::from(result)
+        }
+        OperandEncoder::RestrictedCondition => u64::from(match immediate(first) {
+            2 | 0 => 0u32,
+            8 | 1 => 1,
+            10 => 4,
+            11 => 5,
+            12 => 6,
+            13 => 7,
+            _ => 0,
+        }),
         OperandEncoder::ItMask => {
             let mut mask = immediate(first) as u32;
             let condition = instruction.immediate_at(first.saturating_sub(1)) as u32;
@@ -11964,7 +12370,7 @@ impl<'t> Printer<'t> {
             "printFBits16" => out.push_str(&format!("#{}", 16 - value(0))),
             "printFBits32" => out.push_str(&format!("#{}", 32 - value(0))),
             "printVectorIndex" => out.push_str(&format!("[{}]", value(0))),
-            "printThumbITMask" => {
+            "printThumbITMask" | "printVPTMask" => {
                 let mask = value(0) as u32;
                 let trailing = mask.trailing_zeros();
                 for position in (trailing + 1..=3).rev() {

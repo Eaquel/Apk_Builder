@@ -74981,7 +74981,24 @@ mod armv8_assembly {
         Ok(result.output)
     }
 
-    fn armv7_expected(source: &str, triple: &str) -> Option<Vec<u8>> {
+    fn armv7_settings(spec: &str) -> (String, String, Vec<String>) {
+        let mut parts = spec.split('|');
+        let triple = parts.next().unwrap_or_default().to_string();
+        let cpu = parts.next().unwrap_or("cortex-a15").to_string();
+        let attributes = match parts.next() {
+            Some(held) => held
+                .split(',')
+                .filter(|piece| !piece.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => vec!["+neon".to_string()],
+        };
+        (triple, cpu, attributes)
+    }
+
+    fn armv7_expected(source: &str, spec: &str) -> Option<Vec<u8>> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
+        let triple = triple.as_str();
         use std::io::Write;
         let folder = std::env::temp_dir().join(format!(
             "apk_builder_armv7_{}_{:?}",
@@ -74994,8 +75011,8 @@ mod armv8_assembly {
         let mut child = std::process::Command::new("llvm-mc-18")
             .args([
                 &format!("-triple={triple}"),
-                "-mcpu=cortex-a15",
-                "-mattr=+neon",
+                &format!("-mcpu={cpu}"),
+                &format!("-mattr={}", attributes.join(",")),
                 "-filetype=obj",
                 "-o",
             ])
@@ -75029,13 +75046,14 @@ mod armv8_assembly {
         bytes
     }
 
-    fn armv7_text_expected(source: &str, triple: &str) -> Option<String> {
+    fn armv7_text_expected(source: &str, spec: &str) -> Option<String> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
         use std::io::Write;
         let mut child = std::process::Command::new("llvm-mc-18")
             .args([
                 &format!("-triple={triple}"),
-                "-mcpu=cortex-a15",
-                "-mattr=+neon",
+                &format!("-mcpu={cpu}"),
+                &format!("-mattr={}", attributes.join(",")),
             ])
             .stdin(std::process::Stdio::piped())
             .stdout(std::process::Stdio::piped())
@@ -75054,14 +75072,15 @@ mod armv8_assembly {
             .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
     }
 
-    fn armv7_text(source: &str, triple: &str) -> Result<String, String> {
+    fn armv7_text(source: &str, spec: &str) -> Result<String, String> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
         use crate::compilers::x86_64::{
             assemble_source, AssemblerOptions, MessageKind, OutputKind,
         };
-        let mut options = AssemblerOptions::new(triple);
+        let mut options = AssemblerOptions::new(&triple);
         options.output = OutputKind::Assembly;
-        options.cpu = "cortex-a15".to_string();
-        options.features = vec!["+neon".to_string()];
+        options.cpu = cpu;
+        options.features = attributes;
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
             .map_err(|diagnostic| diagnostic.message)?;
         let errors: Vec<String> = result
@@ -75080,14 +75099,15 @@ mod armv8_assembly {
             .ok_or_else(|| "no instruction line".to_string())
     }
 
-    fn armv7_object(source: &str, triple: &str) -> Result<Vec<u8>, String> {
+    fn armv7_object(source: &str, spec: &str) -> Result<Vec<u8>, String> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
         use crate::compilers::x86_64::{
             assemble_source, AssemblerOptions, MessageKind, OutputKind,
         };
-        let mut options = AssemblerOptions::new(triple);
+        let mut options = AssemblerOptions::new(&triple);
         options.output = OutputKind::Object;
-        options.cpu = "cortex-a15".to_string();
-        options.features = vec!["+neon".to_string()];
+        options.cpu = cpu;
+        options.features = attributes;
         let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
             .map_err(|diagnostic| diagnostic.message)?;
         let errors: Vec<String> = result
