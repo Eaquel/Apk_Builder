@@ -7626,17 +7626,34 @@ pub fn build_matcher(target: &Target) -> Matcher {
         }
     }
     for (from, to) in &target.token_aliases {
-        let from_class = matcher
-            .classes
-            .iter()
-            .position(|class| class.kind == ClassKind::Token && class.value_name == *from);
-        let to_class = matcher
-            .classes
-            .iter()
-            .position(|class| class.kind == ClassKind::Token && class.value_name == *to);
-        if let (Some(from_class), Some(to_class)) = (from_class, to_class) {
-            matcher.classes[from_class].super_classes.push(to_class);
-        }
+        let token_class = |matcher: &mut Matcher, name: &str| -> usize {
+            if let Some(found) = matcher
+                .classes
+                .iter()
+                .position(|class| class.kind == ClassKind::Token && class.value_name == name)
+            {
+                return found;
+            }
+            matcher.classes.push(MatchClass {
+                kind: ClassKind::Token,
+                value_name: name.to_string(),
+                name: name.to_string(),
+                registers: BTreeSet::new(),
+                super_classes: Vec::new(),
+                render: String::new(),
+                predicate: String::new(),
+                parser: String::new(),
+                diagnostic: String::new(),
+                diagnostic_string: String::new(),
+                optional: false,
+                default_method: String::new(),
+                order: 0,
+            });
+            matcher.classes.len() - 1
+        };
+        let from_class = token_class(&mut matcher, from);
+        let to_class = token_class(&mut matcher, to);
+        matcher.classes[from_class].super_classes.push(to_class);
     }
     let mut indices: Vec<usize> = (0..matchables.len()).collect();
     indices.sort_by(|left, right| {

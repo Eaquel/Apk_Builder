@@ -5725,7 +5725,11 @@ fn is_vpt_predicable(mnemonic: &str, extra: &str, mve: bool) -> bool {
     {
         return true;
     }
-    VPT_PREDICABLE
+    let cde = mnemonic.strip_prefix("vcx").is_some_and(|rest| {
+        let rest = rest.strip_suffix(['t', 'e']).unwrap_or(rest);
+        matches!(rest, "1" | "1a" | "2" | "2a" | "3" | "3a")
+    });
+    cde || VPT_PREDICABLE
         .iter()
         .any(|prefix| mnemonic.starts_with(prefix))
 }
@@ -8671,6 +8675,13 @@ impl<'s> Assembler<'s> {
                         }
                     }
                 }
+                if let Some(Operand::Register(register)) = operand_of(operand) {
+                    if register_named(self.target, &held.value_name.to_ascii_lowercase())
+                        == Some(*register)
+                    {
+                        return Ok(());
+                    }
+                }
                 if let Some(literal) = held.value_name.strip_prefix('#') {
                     if let (Some(Operand::Immediate(Expression::Constant(value))), Ok(wanted)) =
                         (operand_of(operand), literal.parse::<i64>())
@@ -9421,7 +9432,7 @@ impl<'s> Assembler<'s> {
             "tADDi8" | "tSUBi8" => {
                 if instruction.operand(3).immediate() >= 0
                     && (instruction.immediate_at(3) as u32) < 8
-                    && operand_count == 2
+                    && operand_count == 3
                 {
                     let mut built = instruction.clone();
                     built.opcode = self
@@ -9672,6 +9683,79 @@ impl<'s> Assembler<'s> {
                 } else {
                     None
                 }
+            }
+            "t2MOVsi" | "t2MOVSsi" => {
+                let flag_setting = record == "t2MOVSsi";
+                let mut narrow = low(instruction.register_at(0))
+                    && low(instruction.register_at(1))
+                    && in_it == !flag_setting
+                    && !wide;
+                let packed = instruction.immediate_at(2) as u32;
+                let shift = packed & 7;
+                let mut amount = packed >> 3;
+                let mut is_move = false;
+                let name = if shift == 2 && amount == 0 {
+                    is_move = true;
+                    if in_it {
+                        narrow = false;
+                    }
+                    if narrow {
+                        "tMOVSr"
+                    } else {
+                        "t2MOVr"
+                    }
+                } else {
+                    match shift {
+                        1 => {
+                            if narrow {
+                                "tASRri"
+                            } else {
+                                "t2ASRri"
+                            }
+                        }
+                        3 => {
+                            if narrow {
+                                "tLSRri"
+                            } else {
+                                "t2LSRri"
+                            }
+                        }
+                        2 => {
+                            if narrow {
+                                "tLSLri"
+                            } else {
+                                "t2LSLri"
+                            }
+                        }
+                        4 => {
+                            narrow = false;
+                            "t2RORri"
+                        }
+                        _ => {
+                            narrow = false;
+                            "t2RRX"
+                        }
+                    }
+                };
+                if amount == 32 {
+                    amount = 0;
+                }
+                let status =
+                    MachineOperand::Register(if flag_setting { cpsr } else { NO_REGISTER });
+                let mut operands = vec![operand(0)];
+                if narrow && !is_move {
+                    operands.push(status.clone());
+                }
+                operands.push(operand(1));
+                if name != "t2RRX" && !is_move {
+                    operands.push(MachineOperand::Immediate(i64::from(amount)));
+                }
+                operands.push(operand(3));
+                operands.push(operand(4));
+                if !narrow {
+                    operands.push(status);
+                }
+                build(name, operands)
             }
             "LDMIA_UPD" if first_token == "pop" && instruction.operands.len() == 5 => build(
                 "LDR_POST_IMM",
@@ -9951,11 +10035,15 @@ impl<'s> Assembler<'s> {
         if self.has_pending_error() {
             return true;
         }
+        if self.is(TokenKind::EndOfStatement) {
+            self.lex();
+        }
         let location = identifier_token.location();
         let mut operands = operands;
         if self.arm32_fix_pair_operands(&mut operands, location) {
             return true;
         }
+        self.arm32_return_from_exception_form(&mut operands);
         self.arm32_two_operand_form(&mut operands);
         match self.arm32_match(&operands) {
             Outcome::Success(mut instruction) => {
@@ -10073,6 +10161,32 @@ impl<'s> Assembler<'s> {
                     .then(|| "use of LR and PC simultaneously in the list is deprecated".to_string())
             }
             _ => None,
+        }
+    }
+
+    fn arm32_return_from_exception_form(&self, operands: &mut Vec<ParsedOperand>) {
+        let end = Self::arm32_mnemonic_operand_end(operands);
+        if !self.arm32_thumb_two() || operands.len() != end + 3 || operands[0].token_text() != "sub"
+        {
+            return;
+        }
+        let carry = operands[..end]
+            .iter()
+            .position(|held| matches!(operand_of(held), Some(Operand::CarrySet(_))));
+        let Some(carry) = carry else {
+            return;
+        };
+        let is_register = |held: &ParsedOperand, name: &str| {
+            matches!(operand_of(held), Some(Operand::Register(register))
+                if register_named(self.target, name) == Some(*register))
+        };
+        if is_register(&operands[end], "pc")
+            && is_register(&operands[end + 1], "lr")
+            && matches!(operand_of(&operands[end + 2]), Some(Operand::Immediate(_)))
+        {
+            let start = operands[0].start;
+            operands[0] = ParsedOperand::token("subs", start);
+            operands.remove(carry);
         }
     }
 
@@ -11049,6 +11163,42 @@ impl<'s> Assembler<'s> {
         let Some(mnemonic) = operands.first().map(|held| held.token_text().to_string()) else {
             return false;
         };
+        if matches!(
+            mnemonic.as_str(),
+            "cx1d" | "cx1da" | "cx2d" | "cx2da" | "cx3d" | "cx3da"
+        ) && (0..6).any(|number| {
+            self.arm_features
+                .contains(&format!("FeatureCoprocCDE{number}"))
+        }) {
+            let end = Self::arm32_mnemonic_operand_end(operands);
+            if operands.len() < end + 3 {
+                return false;
+            }
+            let diagnostic = "operand must be an even-numbered register in the range [r0, r10]";
+            let at = self.statement_location(operands[end + 1].start);
+            let Some(Operand::Register(first)) = operands.get(end + 1).and_then(operand_of) else {
+                return self.error(at, diagnostic);
+            };
+            let first = *first;
+            let encoding = register_encoding(self.target, first);
+            if !in_class(self.target, "GPR", first) || encoding > 10 || encoding & 1 == 1 {
+                return self.error(at, diagnostic);
+            }
+            let next = register_named(self.target, &format!("r{}", encoding + 1));
+            let second = match operands.get(end + 2).and_then(operand_of) {
+                Some(Operand::Register(held)) if Some(*held) == next => *held,
+                _ => {
+                    let at = self.statement_location(operands[end + 2].start);
+                    return self.error(at, "operand must be a consecutive register");
+                }
+            };
+            if let Some(pair) = self.arm32_general_pair(first, second) {
+                let (start, finish) = (operands[end + 1].start, operands[end + 2].end);
+                operands[end + 1] = parsed(Operand::Register(pair), start, finish);
+                operands.remove(end + 2);
+            }
+            return false;
+        }
         if !matches!(
             mnemonic.as_str(),
             "ldrd" | "strd" | "ldrexd" | "strexd" | "ldaexd" | "stlexd"
