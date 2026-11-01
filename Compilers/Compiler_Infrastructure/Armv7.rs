@@ -5166,7 +5166,11 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             _ => false,
         },
         "isSetEndImm" => constant.is_some_and(|value| value == 0 || value == 1),
-        "isRegList" | "isRegListWithAPSR" => match operand {
+        "isRegList" => match operand {
+            Operand::RegisterList(list) => list.iter().all(|held| in_class(target, "GPR", *held)),
+            _ => false,
+        },
+        "isRegListWithAPSR" => match operand {
             Operand::RegisterList(list) => list.iter().all(|held| {
                 in_class(target, "GPR", *held) || in_class(target, "GPRwithAPSRnosp", *held)
             }),
@@ -6255,6 +6259,9 @@ impl<'s> Assembler<'s> {
                 || held.token_text().eq_ignore_ascii_case("vlldm")
         });
         let loose = scrub || lazy;
+        let enforce_order = !operands
+            .first()
+            .is_some_and(|held| held.token_text().to_ascii_lowercase().starts_with("clr"));
         self.lex();
         let location = self.location();
         let Some(mut register) = self.arm32_try_register_bound(loose) else {
@@ -6355,10 +6362,15 @@ impl<'s> Assembler<'s> {
                     let Some(next) = register_named(self.target, &name) else {
                         return self.error(after, "invalid register in register list");
                     };
-                    if registers.iter().any(|held| {
-                        register_encoding(self.target, *held)
-                            == register_encoding(self.target, next)
-                    }) {
+                    let key = |held: RegisterId| {
+                        register_encoding(self.target, held)
+                            + if adjust && in_class(self.target, "DPR", held) {
+                                16
+                            } else {
+                                0
+                            }
+                    };
+                    if registers.iter().any(|held| key(*held) == key(next)) {
                         self.message(
                             MessageKind::Warning,
                             after,
@@ -6416,7 +6428,7 @@ impl<'s> Assembler<'s> {
                 return self.error(location, "invalid register in register list");
             }
             let encoding = register_encoding(self.target, next) + if adjust { 16 } else { 0 };
-            if encoding < previous {
+            if enforce_order && encoding < previous {
                 if family != "GPR" {
                     return self.error(location, "register list not in ascending order");
                 }
@@ -7839,17 +7851,11 @@ impl<'s> Assembler<'s> {
             self.lex();
         }
         let (expression, _) = self.parse_expression()?;
-        if let Expression::Constant(value) = expression {
-            let value = value as i32;
-            let folded = match name.as_str() {
-                "upper16" => (value & !0xffff) >> 16,
-                "lower16" => value & 0xffff,
-                "upper8_15" => (value & !0x00ff_ffff) >> 24,
-                "upper0_7" => (value & 0x00ff_0000) >> 16,
-                "lower8_15" => (value & 0xff00) >> 8,
-                _ => value & 0xff,
-            };
-            return Ok(Expression::Constant(i64::from(folded)));
+        if let Expression::Constant(_) = expression {
+            return Ok(Expression::Prefixed {
+                prefix: name,
+                operand: Box::new(expression),
+            });
         }
         if let Expression::Symbol {
             name: symbol,
@@ -8018,6 +8024,9 @@ impl<'s> Assembler<'s> {
                 name_start,
                 name_start,
             ));
+        } else if mnemonic == "cps" && self.arm_features.contains("FeatureMClass") {
+            self.error(location, "instruction 'cps' requires effect for M-class");
+            return Err(());
         }
         let mut next = lower.find('.');
         while let Some(start) = next {
@@ -10269,6 +10278,7 @@ impl<'s> Assembler<'s> {
                     self.arm_vpt.forward_vector();
                     return true;
                 }
+                self.arm32_lazy_load_store(&mut instruction, &operands);
                 while self.arm32_process(&mut instruction, wide) {}
                 self.arm32_start_it_block(&instruction);
                 self.arm_it.forward();
@@ -10381,6 +10391,32 @@ impl<'s> Assembler<'s> {
             let start = operands[0].start;
             operands[0] = ParsedOperand::token("subs", start);
             operands.remove(carry);
+        }
+    }
+
+    fn arm32_lazy_load_store(
+        &self,
+        instruction: &mut MachineInstruction,
+        operands: &[ParsedOperand],
+    ) {
+        let record = self.target.instructions[instruction.opcode].record.as_str();
+        let wide = match record {
+            "VLLDM" => "VLLDM_T2",
+            "VLSTM" => "VLSTM_T2",
+            _ => return,
+        };
+        let end = Self::arm32_mnemonic_operand_end(operands);
+        if operands.len() != end + 2 {
+            return;
+        }
+        let thirty_two = matches!(
+            operands.get(end + 1).and_then(operand_of),
+            Some(Operand::RegisterList(list)) if list.len() == 32
+        );
+        if thirty_two {
+            if let Some(index) = self.arm32_record_index(wide) {
+                instruction.opcode = index;
+            }
         }
     }
 
@@ -15640,13 +15676,34 @@ impl<'a> Assembler<'a> {
         if self.parse_token(TokenKind::Comma, "expected comma") {
             return true;
         }
+        let location = self.location();
         let Ok((expression, _)) = self.parse_expression() else {
             return self.token_error("missing expression");
         };
+        let value_location = self
+            .expression_locations
+            .last()
+            .filter(|(held, _)| *held == expression)
+            .and_then(|(_, at)| *at);
         if self.parse_end_of_line() {
             return true;
         }
-        let symbol = self.context.symbol(&name);
+        let symbol = match self.context.lookup(&name) {
+            Some(found) => {
+                let held = &self.context.symbols[found];
+                if (held.is_variable() || held.defined) && !held.redefinable {
+                    return self.error(location, &format!("redefinition of '{name}'"));
+                }
+                if held.redefinable {
+                    self.context.clone_symbol(found)
+                } else {
+                    found
+                }
+            }
+            None => self.context.parse_symbol(&name),
+        };
+        self.context.symbols[symbol].redefinable = true;
+        self.context.symbols[symbol].value_location = value_location;
         let defined_source = match &expression {
             Expression::Symbol { name: source, .. } => self
                 .context

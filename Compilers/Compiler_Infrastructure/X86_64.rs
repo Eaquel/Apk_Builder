@@ -1481,9 +1481,9 @@ pub enum Expression {
 pub fn prefix_fold(prefix: &str, value: i64) -> i64 {
     let value = value as i32;
     i64::from(match prefix {
-        "upper16" => (value & !0xffff) >> 16,
+        "upper16" => ((value as u32) >> 16) as i32,
         "lower16" => value & 0xffff,
-        "upper8_15" => (value & !0x00ff_ffff) >> 24,
+        "upper8_15" => ((value as u32) >> 24) as i32,
         "upper0_7" => (value & 0x00ff_0000) >> 16,
         "lower8_15" => (value & 0xff00) >> 8,
         _ => value & 0xff,
@@ -4345,7 +4345,10 @@ pub fn expression_text(
         }
         Expression::Prefixed { prefix, operand } => {
             let inner = expression_text(target, operand, 0, syntax);
-            if matches!(operand.as_ref(), Expression::Binary { .. }) {
+            if matches!(
+                operand.as_ref(),
+                Expression::Binary { .. } | Expression::Constant(_)
+            ) {
                 format!(":{prefix}:({inner})")
             } else {
                 format!(":{prefix}:{inner}")
@@ -29368,7 +29371,17 @@ pub mod object {
                 return Some(symbol);
             };
             let at = held.value_location;
+            let own_name = held.name.clone();
             let Some(evaluated) = context.evaluate_relocatable(&value, Some(self), true) else {
+                let mut mentioned = Vec::new();
+                expression_symbols(&value, &mut mentioned);
+                if mentioned.iter().any(|name| *name == own_name) {
+                    context.report(
+                        MessageKind::Error,
+                        at,
+                        &format!("cyclic dependency detected for symbol '{own_name}'"),
+                    );
+                }
                 context.report(MessageKind::Error, at, "expression could not be evaluated");
                 return None;
             };
