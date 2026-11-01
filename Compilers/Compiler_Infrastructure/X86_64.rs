@@ -9671,6 +9671,8 @@ impl TargetTriple {
             || system.starts_with("darwin")
             || system.starts_with("macos")
             || system.starts_with("ios")
+            || system == "macho"
+            || environment.ends_with("macho")
         {
             ObjectFormat::MachObject
         } else if system.starts_with("windows")
@@ -26054,12 +26056,15 @@ pub mod object {
         arm32_thumb: bool,
         arm32_mapping_counter: u32,
         thumb_two_features: bool,
+        thumb_long_call: bool,
+        thumb_v8m_baseline: bool,
         arm32_nop: bool,
         current_fragment: Option<usize>,
         symbols_in_order: Vec<usize>,
         has_layout: bool,
         has_final_layout: bool,
         stretch: i64,
+        stretch_limit: usize,
         pending_errors: Vec<(Option<SourceLocation>, String)>,
         pending_assignments: BTreeMap<usize, Vec<(usize, Expression)>>,
         frames: Vec<FrameInfo>,
@@ -26255,11 +26260,22 @@ pub mod object {
                 thumb_two_features: triple.isa == Isa::Armv7
                     && armv7::initial_features(target, &triple, &options.cpu, &options.features)
                         .contains("FeatureThumb2"),
+                thumb_v8m_baseline: triple.isa == Isa::Armv7
+                    && armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                        .contains("HasV8MBaselineOps"),
+                thumb_long_call: triple.isa == Isa::Armv7
+                    && armv7::long_call_features(&armv7::initial_features(
+                        target,
+                        &triple,
+                        &options.cpu,
+                        &options.features,
+                    )),
                 current_fragment: None,
                 symbols_in_order: Vec::new(),
                 has_layout: false,
                 has_final_layout: false,
                 stretch: 0,
+                stretch_limit: usize::MAX,
                 pending_errors: Vec::new(),
                 pending_assignments: BTreeMap::new(),
                 frames: Vec::new(),
@@ -26878,7 +26894,48 @@ pub mod object {
             }
         }
 
+        fn arm32_relaxed_opcode(&self, instruction: &MachineInstruction) -> Option<usize> {
+            let record = self.target.instructions[instruction.opcode].record.as_str();
+            let relaxed = match record {
+                "tBcc" if self.thumb_two_features => "t2Bcc",
+                "tLDRpci" if self.thumb_two_features => "t2LDRpci",
+                "tADR" if self.thumb_two_features => "t2ADR",
+                "tB" if self.thumb_two_features || self.thumb_v8m_baseline => "t2B",
+                _ => return None,
+            };
+            self.target.instruction_by_record.get(relaxed).copied()
+        }
+
+        fn arm32_needs_interworking(
+            &self,
+            context: &AssemblyContext,
+            symbol: usize,
+            kind: armv7::Fixup32,
+        ) -> bool {
+            use armv7::Fixup32;
+            if !matches!(
+                self.type_of(context, symbol),
+                TYPE_FUNCTION | TYPE_GNU_IFUNC
+            ) {
+                return false;
+            }
+            if self.is_thumb_function(context, symbol) {
+                kind == Fixup32::UncondBranch
+            } else {
+                matches!(
+                    kind,
+                    Fixup32::ThumbBr
+                        | Fixup32::ThumbBl
+                        | Fixup32::T2CondBranch
+                        | Fixup32::T2UncondBranch
+                )
+            }
+        }
+
         fn may_need_relaxation(&self, instruction: &MachineInstruction) -> bool {
+            if self.target.isa == Isa::Armv7 {
+                return self.arm32_relaxed_opcode(instruction).is_some();
+            }
             let record = self.target.instructions[instruction.opcode].record.as_str();
             if record == "JCC_1" || record == "JMP_1" {
                 return true;
@@ -26898,6 +26955,12 @@ pub mod object {
         }
 
         fn relax_instruction(&self, instruction: &mut MachineInstruction, mode: Mode) {
+            if self.target.isa == Isa::Armv7 {
+                if let Some(opcode) = self.arm32_relaxed_opcode(instruction) {
+                    instruction.opcode = opcode;
+                }
+                return;
+            }
             let record = self.target.instructions[instruction.opcode].record.as_str();
             let replacement = match record {
                 "JCC_1" => Some(if mode == Mode::Bits16 {
@@ -27433,6 +27496,27 @@ pub mod object {
             let Some(target) = target else {
                 return true;
             };
+            if let (Isa::Armv7, FixupKind::Arm32(kind)) = (self.target.isa, fixup.fixup.kind) {
+                use armv7::Fixup32;
+                if let Some(add) = target.add {
+                    if self.arm32_needs_interworking(context, add, kind) {
+                        return true;
+                    }
+                }
+                if !resolved {
+                    return true;
+                }
+                let offset = (value as i64).wrapping_sub(4);
+                return match kind {
+                    Fixup32::ThumbBr => !(-2048..=2046).contains(&offset),
+                    Fixup32::ThumbBcc => !(-256..=254).contains(&offset),
+                    Fixup32::ThumbAdrPcrel10 | Fixup32::ThumbCp => {
+                        offset & 3 != 0 || !(0..=1020).contains(&offset)
+                    }
+                    Fixup32::ThumbCb => (value & !1) == 2,
+                    _ => false,
+                };
+            }
             if resolved {
                 let slack = if self.bundle_alignment != 0
                     && self.pad_max_prefix_size != 0
@@ -27645,7 +27729,18 @@ pub mod object {
                 loop {
                     let mut changed = false;
                     let mut offset = 0u64;
+                    let aligns: Vec<usize> = fragments
+                        .iter()
+                        .filter(|held| matches!(self.fragments[**held].tail, Tail::Align { .. }))
+                        .map(|held| self.fragments[*held].order)
+                        .collect();
                     for &fragment in &fragments {
+                        let here = self.fragments[fragment].order;
+                        self.stretch_limit = aligns
+                            .iter()
+                            .copied()
+                            .find(|order| *order > here)
+                            .unwrap_or(usize::MAX);
                         if self.fragments[fragment].offset != offset {
                             changed = true;
                         }
@@ -27672,6 +27767,7 @@ pub mod object {
                 }
             }
             self.stretch = 0;
+            self.stretch_limit = usize::MAX;
             result
         }
 
@@ -28106,20 +28202,27 @@ pub mod object {
             }
             let mut resolved;
             if fixup.fixup.pc_relative {
-                value =
-                    value.wrapping_sub(self.fragments[fragment].offset + fixup.fixup.offset as u64);
+                let mut place = self.fragments[fragment].offset + fixup.fixup.offset as u64;
+                if matches!(fixup.fixup.kind, FixupKind::Arm32(held) if held.aligned_down()) {
+                    place &= !3;
+                }
+                value = value.wrapping_sub(place);
                 if self.stretch != 0 {
                     let order = self.fragments[fragment].order;
                     if let Some(add) = target.add {
                         if let Place::Fragment(other) = self.place_of(context, add) {
-                            if self.fragments[other].order > order {
+                            if self.fragments[other].order > order
+                                && self.fragments[other].order <= self.stretch_limit
+                            {
                                 value = value.wrapping_add(self.stretch as u64);
                             }
                         }
                     }
                     if let Some(subtract) = target.subtract {
                         if let Place::Fragment(other) = self.place_of(context, subtract) {
-                            if self.fragments[other].order > order {
+                            if self.fragments[other].order > order
+                                && self.fragments[other].order <= self.stretch_limit
+                            {
                                 value = value.wrapping_sub(self.stretch as u64);
                             }
                         }
@@ -28140,6 +28243,34 @@ pub mod object {
             }
             if fixup.fixup.kind == FixupKind::Arm(armv8::ArmFixup::PcrelAdrpImm21) {
                 resolved = false;
+            }
+            if let (Isa::Armv7, FixupKind::Arm32(held), Some(add)) =
+                (context.triple.isa, fixup.fixup.kind, target.add)
+            {
+                use armv7::Fixup32;
+                let function = matches!(self.type_of(context, add), TYPE_FUNCTION | TYPE_GNU_IFUNC);
+                let thumb = self.is_thumb_function(context, add);
+                if function
+                    && if thumb {
+                        held == Fixup32::UncondBranch
+                    } else {
+                        matches!(
+                            held,
+                            Fixup32::ThumbBr
+                                | Fixup32::ThumbBl
+                                | Fixup32::T2CondBranch
+                                | Fixup32::T2UncondBranch
+                        )
+                    }
+                {
+                    resolved = false;
+                }
+                if matches!(
+                    held,
+                    Fixup32::ThumbBlx | Fixup32::Blx | Fixup32::UncondBl | Fixup32::CondBl
+                ) {
+                    resolved = false;
+                }
             }
             (Some(target), value, resolved)
         }
@@ -28204,7 +28335,13 @@ pub mod object {
             }
             if let FixupKind::Arm32(kind) = fixup.fixup.kind {
                 let thumb_two = self.target.isa == Isa::Armv7 && self.thumb_two_features;
-                let adjusted = match armv7::adjust_fixup_value(kind, value, resolved, thumb_two) {
+                let adjusted = match armv7::adjust_fixup_value(
+                    kind,
+                    value,
+                    resolved,
+                    thumb_two,
+                    self.thumb_long_call,
+                ) {
                     Ok(adjusted) => adjusted,
                     Err(message) => {
                         context.report(MessageKind::Error, fixup.location, message);
@@ -30649,6 +30786,8 @@ pub mod object {
 
         fn set_arm_features(&mut self, features: &BTreeSet<String>) {
             self.thumb_two_features = features.contains("FeatureThumb2");
+            self.thumb_long_call = armv7::long_call_features(features);
+            self.thumb_v8m_baseline = features.contains("HasV8MBaselineOps");
             self.arm32_nop = features.contains("HasV6T2Ops");
         }
 

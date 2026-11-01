@@ -71830,6 +71830,14 @@ mod x86_assembly {
         {
             unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
         }
+        if (triple.starts_with("arm") || triple.starts_with("thumb"))
+            && triple
+                .split('-')
+                .next()
+                .is_some_and(|name| name.ends_with("eb"))
+        {
+            unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
+        }
         if triple.starts_with("aarch64") || triple.starts_with("arm64") {
             if options.features.iter().any(|feature| {
                 let name = feature.trim_start_matches(['+', '-']);

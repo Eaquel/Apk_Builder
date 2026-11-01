@@ -158,6 +158,24 @@ impl Fixup32 {
         }
     }
 
+    pub fn aligned_down(self) -> bool {
+        matches!(
+            self,
+            Fixup32::LdstPcrel12
+                | Fixup32::T2LdstPcrel12
+                | Fixup32::PcrelTenUnscaled
+                | Fixup32::PcrelTen
+                | Fixup32::T2PcrelTen
+                | Fixup32::PcrelNine
+                | Fixup32::T2PcrelNine
+                | Fixup32::ThumbAdrPcrel10
+                | Fixup32::AdrPcrel12
+                | Fixup32::T2AdrPcrel12
+                | Fixup32::ThumbBlx
+                | Fixup32::ThumbCp
+        )
+    }
+
     pub fn pc_relative(self) -> bool {
         !matches!(
             self,
@@ -181,11 +199,18 @@ fn swap_half_words(value: u32) -> u32 {
     value.rotate_right(16)
 }
 
+pub fn long_call_features(features: &BTreeSet<String>) -> bool {
+    features.contains("FeatureThumb2")
+        || features.contains("HasV8MBaselineOps")
+        || features.contains("HasV6MOps")
+}
+
 pub fn adjust_fixup_value(
     kind: Fixup32,
     value: u64,
     resolved: bool,
     thumb_two: bool,
+    long_call: bool,
 ) -> Result<u32, &'static str> {
     let range_error = "out of range pc-relative fixup value";
     let signed = |held: u64, bits: u32| -> bool {
@@ -328,7 +353,7 @@ pub fn adjust_fixup_value(
         }
         Fixup32::ThumbBl => {
             let held = (value as i64) - 4;
-            if !signed(held as u64, 25) || (!thumb_two && !signed(held as u64, 23)) {
+            if !signed(held as u64, 25) || (!long_call && !signed(held as u64, 23)) {
                 return Err("Relocation out of range");
             }
             let offset = (held >> 1) as u32;
@@ -10237,6 +10262,7 @@ impl<'s> Assembler<'s> {
                 if self.arm32_constant_pool(&mut instruction, location) {
                     return true;
                 }
+                self.arm32_thumb_branches(&mut instruction);
                 if self.arm32_validate_instruction(&instruction, &operands, location) {
                     self.arm_it.forward();
                     self.arm_vpt.forward_vector();
@@ -10354,6 +10380,26 @@ impl<'s> Assembler<'s> {
             let start = operands[0].start;
             operands[0] = ParsedOperand::token("subs", start);
             operands.remove(carry);
+        }
+    }
+
+    fn arm32_thumb_branches(&self, instruction: &mut MachineInstruction) {
+        let record = self.target.instructions[instruction.opcode].record.as_str();
+        let (plain, conditional) = match record {
+            "tB" | "tBcc" => ("tB", "tBcc"),
+            "t2B" | "t2Bcc" => ("t2B", "t2Bcc"),
+            _ => return,
+        };
+        let always = instruction.immediate_at(1) == 14;
+        let wanted = if self.arm_it.active() || always {
+            plain
+        } else {
+            conditional
+        };
+        if wanted != record {
+            if let Some(index) = self.arm32_record_index(wanted) {
+                instruction.opcode = index;
+            }
         }
     }
 
@@ -10600,7 +10646,7 @@ impl<'s> Assembler<'s> {
             }
         } else if thumb_two
             && predicate_value.is_some_and(|value| value != 14)
-            && !matches!(record, "tBcc" | "t2Bcc" | "t2BFic")
+            && !matches!(record, "tBcc" | "t2Bcc" | "t2BFic" | "tB" | "t2B")
         {
             return self.error(location, "predicated instructions must be in IT block");
         } else if unpredicable && predicate_value.is_some_and(|value| value != 14) {
