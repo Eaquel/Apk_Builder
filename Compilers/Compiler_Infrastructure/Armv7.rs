@@ -4634,6 +4634,11 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isCCOut" => matches!(operand, Operand::CarrySet(_)),
         "isImm" => is_immediate,
         "isImmediate" => constant.is_some_and(|value| value >= number(0) && value <= number(1)),
+        "isPowerTwoInRange" => constant.is_some_and(|value| {
+            value >= number(0) && value <= number(1) && value > 0 && (value & (value - 1)) == 0
+        }),
+        "isMveSaturateOp" => constant.is_some_and(|value| value == 48 || value == 64),
+        "isMVELongShift" => constant.is_some_and(|value| (1..=32).contains(&value)),
         "isARMBranchTarget" => match operand {
             Operand::Immediate(Expression::Constant(value)) => value % 4 == 0,
             Operand::Immediate(_) => true,
@@ -5233,6 +5238,15 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             };
             matches!(operand, Operand::VectorList { count: held, spaced: held_spaced, lane: VectorLane::Index(index), .. }
                 if *held == count && *held_spaced == spaced && *index <= limit)
+        }
+        "isComplexRotation" => constant
+            .is_some_and(|value| (0..=270).contains(&value) && value % number(0) == number(1)),
+        "isVectorIndexInRange" => {
+            matches!(operand, Operand::VectorIndex(index) if i64::from(*index) < number(0))
+        }
+        "isMVEPairVectorIndex" => {
+            matches!(operand, Operand::VectorIndex(index)
+                if i64::from(*index) == number(0) || i64::from(*index) == number(1))
         }
         "isVectorIndex8" | "isVectorIndex16" | "isVectorIndex32" | "isVectorIndex64" => {
             let limit = match base.as_str() {
@@ -7720,7 +7734,46 @@ impl<'s> Assembler<'s> {
             let omit = self.arm32_omit_vector_predicate(&mnemonic, &operands, end);
             let converting = mnemonic.starts_with("vcvt")
                 && !matches!(mnemonic.as_str(), "vcvta" | "vcvtn" | "vcvtp" | "vcvtm");
-            if converting {
+            let less_than = 11;
+            let not_equal = 1;
+            let condition_at = operands
+                .iter()
+                .position(|held| matches!(operand_of(held), Some(Operand::Condition(_))));
+            if !omit && mnemonic == "vmov" && split.condition == less_than && condition_at.is_some()
+            {
+                if let Some(at) = condition_at {
+                    operands.remove(at);
+                }
+                let place = name_start + mnemonic.len() - 1 + usize::from(split.carry);
+                operands.remove(0);
+                operands.insert(0, parsed(Operand::VectorPredicate(0), place, place));
+                operands.insert(0, ParsedOperand::token("vmovlt", name_start));
+                mnemonic = "vmovlt".to_string();
+            } else if !omit
+                && mnemonic == "vcvt"
+                && split.condition == not_equal
+                && condition_at.is_some()
+            {
+                if let Some(at) = condition_at {
+                    operands.remove(at);
+                }
+                let place = name_start + mnemonic.len() - 1 + usize::from(split.carry);
+                operands.remove(0);
+                operands.insert(0, parsed(Operand::VectorPredicate(2), place, place));
+                operands.insert(0, ParsedOperand::token("vcvtn", name_start));
+                mnemonic = "vcvtn".to_string();
+            } else if !omit
+                && mnemonic == "vmul"
+                && split.condition == less_than
+                && condition_at.is_some()
+            {
+                if let Some(at) = condition_at {
+                    operands.remove(at);
+                }
+                operands.remove(0);
+                operands.insert(0, ParsedOperand::token("vmullt", name_start));
+                mnemonic = "vmullt".to_string();
+            } else if converting {
                 if !omit {
                     let at = name_start + mnemonic.len() + usize::from(split.carry);
                     operands.insert(1, parsed(Operand::VectorPredicate(split.vpt_code), at, at));
@@ -7869,7 +7922,10 @@ impl<'s> Assembler<'s> {
                 into.push(MachineOperand::Register(*register))
             }
             (
-                "addImmOperands" | "addARMBranchTargetOperands" | "addThumbBranchTargetOperands",
+                "addImmOperands"
+                | "addPowerTwoOperands"
+                | "addARMBranchTargetOperands"
+                | "addThumbBranchTargetOperands",
                 Operand::Immediate(held),
             ) => expression(into, held),
             ("addAdrLabelOperands", Operand::Immediate(held)) => expression(into, held),
@@ -7947,6 +8003,16 @@ impl<'s> Assembler<'s> {
                         .and_then(|(low, high)| pair(low, high))
                 };
                 into.push(MachineOperand::Register(joined.unwrap_or(NO_REGISTER)));
+            }
+            (
+                "addMVEVectorIndexOperands" | "addMVEPairVectorIndexOperands",
+                Operand::VectorIndex(index),
+            ) => immediate(into, i64::from(*index)),
+            ("addComplexRotationEvenOperands", Operand::Immediate(Expression::Constant(value))) => {
+                immediate(into, *value / 90)
+            }
+            ("addComplexRotationOddOperands", Operand::Immediate(Expression::Constant(value))) => {
+                immediate(into, (*value - 90) / 180)
             }
             ("addMemRegRQOffsetOperands", Operand::Memory(memory)) => {
                 into.push(MachineOperand::Register(memory.base));
@@ -8091,6 +8157,12 @@ impl<'s> Assembler<'s> {
             ) => immediate(into, i64::from(*value)),
             ("addITCondCodeOperands", Operand::Condition(code)) => {
                 immediate(into, i64::from(*code))
+            }
+            ("addMveSaturateOperands", _) => {
+                immediate(into, i64::from(operand.constant().unwrap_or(64) == 48))
+            }
+            ("addITCondCodeInvOperands", Operand::Condition(code)) => {
+                immediate(into, i64::from(*code ^ 1))
             }
             (
                 "addMemThumbRROperands" | "addMemTBBOperands" | "addMemTBHOperands",
@@ -10479,8 +10551,32 @@ impl<'s> Assembler<'s> {
                     }
                 }
             }
+            "MVE_VMOV_rr_q" | "MVE_VMOV_q_rr" => {
+                let offset = if record == "MVE_VMOV_rr_q" { 2 } else { 0 };
+                let register_at = |at: usize| match operands.get(at).and_then(operand_of) {
+                    Some(Operand::Register(held)) => *held,
+                    _ => NO_REGISTER,
+                };
+                let index_at = |at: usize| match operands.get(at).and_then(operand_of) {
+                    Some(Operand::VectorIndex(held)) => i64::from(*held),
+                    _ => -1,
+                };
+                if register_at(end + offset) != register_at(end + offset + 2) {
+                    return self.error(spot(end + offset), "Q-registers must be the same");
+                }
+                if index_at(end + offset + 1) != index_at(end + offset + 3) + 2 {
+                    return self.error(
+                        spot(end + offset + 1),
+                        "Q-register indexes must be 2 and 0 or 3 and 1",
+                    );
+                }
+            }
             "MVE_SQRSHR" | "MVE_UQRSHL" => {
-                if instruction.register_at(0) == instruction.register_at(1) {
+                let register_of = |at: usize| match operands.get(at).and_then(operand_of) {
+                    Some(Operand::Register(held)) => *held,
+                    _ => NO_REGISTER,
+                };
+                if register_of(end) == register_of(end + 1) {
                     return self
                         .error(spot(end), "Rda register and Rm register can't be identical");
                 }
@@ -10875,6 +10971,8 @@ enum OperandEncoder {
     RestrictedCondition,
     MveRegisterQ,
     MveQImmediate(u32),
+    MvePairIndex(i64),
+    MveShiftImmediate,
     BranchFuture(bool, Fixup32),
     BranchFutureAfter,
     ShiftRight(u32),
@@ -10941,6 +11039,16 @@ fn operand_encoder(text: &str) -> Result<OperandEncoder, String> {
                 shift: number(1),
             }
         }
+        "getMVEPairVectorIndexOpValue" => {
+            let (_, arguments) = split_arguments(text);
+            OperandEncoder::MvePairIndex(
+                arguments
+                    .first()
+                    .and_then(|argument| argument.parse::<i64>().ok())
+                    .unwrap_or(0),
+            )
+        }
+        "getMVEShiftImmOpValue" => OperandEncoder::MveShiftImmediate,
         "getMveAddrModeRQOpValue" => OperandEncoder::MveRegisterQ,
         "getMveAddrModeQOpValue" => {
             let (_, arguments) = split_arguments(text);
@@ -11668,6 +11776,12 @@ fn operand_value(
             }
             _ => return Err(unencodable("an else branch target")),
         },
+        OperandEncoder::MvePairIndex(start) => (immediate(first) - start) as u64,
+        OperandEncoder::MveShiftImmediate => {
+            let record = target.instructions[instruction.opcode].record.as_str();
+            let size = if record.contains("8") { 8 } else { 16 };
+            (size + immediate(first)) as u64
+        }
         OperandEncoder::MveRegisterQ => (register(first) << 3) | register(first + 1),
         OperandEncoder::MveQImmediate(shift) => {
             let held = immediate(first + 1) as i32;
@@ -12319,6 +12433,7 @@ impl<'t> Printer<'t> {
                     out.push_str(condition_name(value(0) as u32).max("al"))
                 }
             }
+            "printMveSaturateOp" => out.push_str(if value(0) == 1 { "#48" } else { "#64" }),
             "printMandatoryInvertedPredicateOperand" => {
                 out.push_str(condition_name(value(0) as u32 ^ 1).max("al"))
             }

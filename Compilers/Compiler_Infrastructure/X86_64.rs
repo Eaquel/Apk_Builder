@@ -7495,7 +7495,9 @@ pub fn build_matcher(target: &Target) -> Matcher {
             let mut seen = BTreeSet::new();
             let valid = tokens.iter().all(|(token, _)| {
                 !(token.starts_with('$') && token.contains(':'))
-                    && (!token.starts_with('$') || seen.insert(token.clone()))
+                    && (!token.starts_with('$')
+                        || seen.insert(token.clone())
+                        || (target.isa == Isa::Armv7 && !instruction.match_converter.is_empty()))
             });
             if !valid || flat.contains('\n') {
                 continue;

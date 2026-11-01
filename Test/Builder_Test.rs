@@ -75481,6 +75481,18 @@ mod armv8_assembly {
             "vld20.8 {q0, q1}, [sp]",
             "vst43.32 {q0, q1, q2, q3}, [r0]!",
             "vld40.8 {q0-q3}, [r2]",
+            "viwdup.u8 q0, lr, r1, #1",
+            "vidup.u16 q1, r2, #4",
+            "vshlc q0, lr, #8",
+            "vshllb.s8 q0, q1, #7",
+            "vshllt.u16 q2, q3, #15",
+            "cinc lr, r7, pl",
+            "cset lr, eq",
+            "sqrshr lr, r12",
+            "sqrshrl lr, r3, #64, r8",
+            "asrl r0, r1, #23",
+            "vcmla.f32 q0, q1, q2, #90",
+            "vmov q0[2], q0[0], r0, r1",
         ];
         compare_armv7(cases, spec);
     }
