@@ -67712,7 +67712,7 @@ def op {
         assert!(has(&x86_64, "GR32") && has(&x86_64, "EAX") && has(&x86_64, "MRMDestReg"));
         let armv7 = read("Armv7");
         assert!(has(&armv7, "t2ADDri") && has(&armv7, "VADDfq") && has(&armv7, "SDIV"));
-        assert!(!has(&armv7, "MVE_VADDf32") && !has(&armv7, "LDA") && !has(&armv7, "VSELEQD"));
+        assert!(has(&armv7, "MVE_VADDf32") && has(&armv7, "LDA") && has(&armv7, "VSELEQD"));
         let inst = armv7
             .record("t2ADDri")
             .and_then(|record| record.field("Inst"));
