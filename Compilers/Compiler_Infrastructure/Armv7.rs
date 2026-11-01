@@ -9196,7 +9196,7 @@ impl<'s> Assembler<'s> {
                     specifier: Some("tlsdescseq".to_string()),
                 };
                 self.streamer
-                    .emit_arm_marker_fixup(&mut self.context, &expression, location);
+                    .emit_arm_marker_fixup(&mut self.context, &expression, None, location);
                 Some(false)
             }
             ".eabi_attribute" => Some(self.arm32_directive_eabi_attribute()),
@@ -16494,6 +16494,7 @@ impl<'a> Assembler<'a> {
                 self.context.sections[created].comdat = held.comdat;
                 if section_type == 0x7000_0001 {
                     self.context.sections[created].linked_symbol = linked;
+                    self.context.sections[created].linked_section = Some(function_section);
                 }
                 created
             }
@@ -16511,17 +16512,9 @@ impl<'a> Assembler<'a> {
     }
 
     fn arm32_personality_fixup(&mut self, name: &str, location: SourceLocation) {
-        let symbol = self.context.symbol(name);
-        let here = self.arm32_emit_label_here();
-        let offset = Expression::symbol(&self.context.symbols[here].name.clone());
-        let target = Expression::symbol(&self.context.symbols[symbol].name.clone());
-        self.streamer.emit_relocation_directive(
-            &mut self.context,
-            &offset,
-            "R_ARM_NONE",
-            Some(&target),
-            location,
-        );
+        let target = Expression::symbol(name);
+        self.streamer
+            .emit_arm_marker_fixup(&mut self.context, &target, Some(0), location);
     }
 
     fn arm32_flush_pending_offset(&mut self) {

@@ -9849,6 +9849,7 @@ pub struct Section {
     pub group: Option<String>,
     pub comdat: bool,
     pub linked_symbol: Option<String>,
+    pub linked_section: Option<usize>,
     pub unique: Option<u64>,
     pub characteristics: u32,
     pub coff_selection: u8,
@@ -9871,6 +9872,7 @@ impl Section {
             group: None,
             comdat: false,
             linked_symbol: None,
+            linked_section: None,
             unique: None,
             characteristics: 0,
             coff_selection: 0,
@@ -10914,6 +10916,7 @@ pub trait Streamer {
         &mut self,
         _context: &mut AssemblyContext,
         _value: &Expression,
+        _literal: Option<u32>,
         _location: SourceLocation,
     ) {
     }
@@ -11135,7 +11138,7 @@ impl<'s> Assembler<'s> {
         lexer.masm_integers = options.masm_integers;
         lexer.hash_token = triple.isa != Isa::X86;
         lexer.at_comment = triple.isa == Isa::Armv7;
-        let unnamed_temporaries = triple.isa == Isa::Armv8 && options.output == OutputKind::Object;
+        let unnamed_temporaries = triple.isa != Isa::X86 && options.output == OutputKind::Object;
         let starts_thumb = triple.is_thumb()
             || (triple.isa == Isa::Armv7
                 && target.records.values().any(|record| {
@@ -26188,7 +26191,9 @@ pub mod object {
     fn expression_symbols(expression: &Expression, out: &mut Vec<String>) {
         match expression {
             Expression::Symbol { name, .. } => out.push(name.clone()),
-            Expression::Unary { operand, .. } => expression_symbols(operand, out),
+            Expression::Unary { operand, .. } | Expression::Prefixed { operand, .. } => {
+                expression_symbols(operand, out)
+            }
             Expression::Binary { left, right, .. } => {
                 expression_symbols(left, out);
                 expression_symbols(right, out);
@@ -26616,7 +26621,10 @@ pub mod object {
                 let begin = match context.lookup(&name) {
                     Some(existing)
                         if context.symbols[existing].symbol_type != Some(SymbolType::Section)
-                            || context.sections[section].begin_symbol.is_some() =>
+                            || context.sections[section].begin_symbol.is_some()
+                            || context.symbols[existing]
+                                .section
+                                .is_some_and(|owner| owner != section) =>
                     {
                         let index = context.symbols.len();
                         context.symbols.push(Symbol::new(&name, false));
@@ -28213,7 +28221,15 @@ pub mod object {
                 } else {
                     (&mut held.fixed, fixup.fixup.offset)
                 };
-                for byte in 0..kind.bits().div_ceil(8) {
+                let bytes = if matches!(
+                    kind,
+                    armv7::Fixup32::T2MovwLo16 | armv7::Fixup32::T2MovtHi16
+                ) {
+                    4
+                } else {
+                    kind.bits().div_ceil(8)
+                };
+                for byte in 0..bytes {
                     if let Some(slot) = buffer.get_mut(start + byte) {
                         *slot |= (adjusted >> (byte * 8)) as u8;
                     }
@@ -28632,6 +28648,15 @@ pub mod object {
             let _ = value;
             let section = self.fragments[fragment].section;
             let mut add = target.add;
+            let mut absolute_literal = false;
+            if let (None, FixupKind::Literal(_), Expression::Symbol { name, .. }) =
+                (add, fixup.fixup.kind, &fixup.fixup.expression)
+            {
+                if let Some(symbol) = context.lookup(name) {
+                    add = Some(symbol);
+                    absolute_literal = true;
+                }
+            }
             if context.triple.isa == Isa::Armv8 {
                 if let (Some(symbol), Some(specifier)) = (add, target.specifier.as_deref()) {
                     if ["dtprel", "gottprel", "tprel", "tlsdesc"]
@@ -28644,7 +28669,7 @@ pub mod object {
             }
             let mut pc_relative = fixup.fixup.pc_relative;
             let fixup_offset = self.fragments[fragment].offset + fixup.fixup.offset as u64;
-            let mut addend = target.constant;
+            let mut addend = if absolute_literal { 0 } else { target.constant };
             if let Some(subtract) = target.subtract {
                 if self.place_of(context, subtract) == Place::Undefined {
                     let name = context.symbols[subtract].name.clone();
@@ -28737,9 +28762,6 @@ pub mod object {
                 }
             }
             if self.target.isa == Isa::Armv7 {
-                if context.symbols[symbol].temporary {
-                    return true;
-                }
                 if self.is_thumb_function(context, symbol) {
                     return false;
                 }
@@ -29227,7 +29249,11 @@ pub mod object {
             out.word(0);
             out.word(0);
             out.word(0);
-            out.u32(0);
+            out.u32(if context.triple.isa == Isa::Armv7 {
+                0x0500_0000
+            } else {
+                0
+            });
             out.u16(if sixty_four { 64 } else { 52 });
             out.u16(0);
             out.u16(0);
@@ -29435,7 +29461,10 @@ pub mod object {
                 }
                 if let Some(section) = header.source {
                     if header.flags & ELF_FLAG_LINK_ORDER != 0 {
-                        if let Some(linked) = context.sections[section].linked_symbol.clone() {
+                        if let Some(owner) = context.sections[section].linked_section {
+                            link = section_ordinal.get(&owner).copied().unwrap_or(0) as u32;
+                        } else if let Some(linked) = context.sections[section].linked_symbol.clone()
+                        {
                             if let Some(symbol) = context.lookup(&linked) {
                                 if let Some(owner) = self.symbol_section(context, symbol) {
                                     link = section_ordinal.get(&owner).copied().unwrap_or(0) as u32;
@@ -31072,9 +31101,9 @@ pub mod object {
             &mut self,
             context: &mut AssemblyContext,
             value: &Expression,
+            literal: Option<u32>,
             location: SourceLocation,
         ) {
-            self.arm_mapping(context, true);
             self.visit_used(context, value);
             let offset = {
                 let fragment = self.fragment();
@@ -31084,7 +31113,7 @@ pub mod object {
                 Fixup {
                     offset,
                     expression: value.clone(),
-                    kind: FixupKind::Data4,
+                    kind: literal.map_or(FixupKind::Data4, FixupKind::Literal),
                     pc_relative: false,
                 },
                 Some(location),

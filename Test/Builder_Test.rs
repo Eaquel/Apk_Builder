@@ -76095,7 +76095,11 @@ mod armv8_assembly {
             "{}",
             super::x86_assembly::format_assembly_messages(&diagnostics)
         );
-        print!("{}", String::from_utf8_lossy(&result.output));
+        if let Ok(out) = std::env::var("APK_BUILDER_OUT") {
+            std::fs::write(out, &result.output).expect("the object is written");
+        } else {
+            print!("{}", String::from_utf8_lossy(&result.output));
+        }
     }
 
     #[test]
