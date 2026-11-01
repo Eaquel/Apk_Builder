@@ -548,6 +548,7 @@ pub fn elf_relocation(
     pc_relative: bool,
 ) -> Result<u32, &'static str> {
     let specifier = specifier.to_ascii_lowercase();
+    let original = specifier.clone();
     let specifier = specifier
         .split_once(':')
         .map_or(specifier.clone(), |(_, inner)| inner.to_string());
@@ -661,6 +662,14 @@ pub fn elf_relocation(
         Some(Fixup32::ThumbUpper07) => 134,
         Some(Fixup32::ThumbLower815) => 133,
         Some(Fixup32::ThumbLower07) => 132,
+        Some(Fixup32::ModImm | Fixup32::T2SoImm)
+            if matches!(
+                original.split(':').next().unwrap_or(""),
+                "upper8_15" | "upper0_7" | "lower8_15" | "lower0_7"
+            ) =>
+        {
+            return Err("expected relocatable expression")
+        }
         Some(_) => return Err("unsupported relocation type"),
     })
 }
@@ -7836,6 +7845,16 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm32_parse_prefixed(&mut self) -> Result<Expression, ()> {
+        let start = self.location();
+        let result = self.arm32_parse_prefixed_inner();
+        if let Ok(expression) = &result {
+            self.expression_locations
+                .push((expression.clone(), Some(start)));
+        }
+        result
+    }
+
+    fn arm32_parse_prefixed_inner(&mut self) -> Result<Expression, ()> {
         self.lex();
         if !self.is(TokenKind::Identifier) {
             self.token_error("expected prefix identifier in operand");
@@ -8117,8 +8136,17 @@ impl<'s> Assembler<'s> {
                 mnemonic = "vmullt".to_string();
             } else if converting {
                 if !omit {
+                    let mut code = split.vpt_code;
+                    if mnemonic.starts_with("vcvtt") && end > 2 {
+                        let float_size = |held: &ParsedOperand| held.token_text().starts_with(".f");
+                        if !(float_size(&operands[end - 2]) && float_size(&operands[end - 1])) {
+                            code = 1;
+                            mnemonic = mnemonic[..4].to_string();
+                            operands[0] = ParsedOperand::token(&mnemonic, name_start);
+                        }
+                    }
                     let at = name_start + mnemonic.len() + usize::from(split.carry);
-                    operands.insert(1, parsed(Operand::VectorPredicate(split.vpt_code), at, at));
+                    operands.insert(1, parsed(Operand::VectorPredicate(code), at, at));
                 }
             } else if can_vpt && omit {
                 operands
@@ -11344,6 +11372,76 @@ impl<'s> Assembler<'s> {
                         "Q-register indexes must be 2 and 0 or 3 and 1",
                     );
                 }
+            }
+            "MVE_VQDMULLs32bh" | "MVE_VQDMULLs32th" | "MVE_VCMULf32" | "MVE_VMULLBs32"
+            | "MVE_VMULLTs32" | "MVE_VMULLBu32" | "MVE_VMULLTu32" => {
+                let register_of = |at: usize| match operands.get(at).and_then(operand_of) {
+                    Some(Operand::Register(held)) => *held,
+                    _ => NO_REGISTER,
+                };
+                if register_of(end) == register_of(end + 1) {
+                    return self.error(spot(end), "Qd register and Qn register can't be identical");
+                }
+                if register_of(end) == register_of(end + 2) {
+                    return self.error(spot(end), "Qd register and Qm register can't be identical");
+                }
+            }
+            "MVE_VREV64_8"
+            | "MVE_VREV64_16"
+            | "MVE_VREV64_32"
+            | "MVE_VQDMULL_qr_s32bh"
+            | "MVE_VQDMULL_qr_s32th" => {
+                let register_of = |at: usize| match operands.get(at).and_then(operand_of) {
+                    Some(Operand::Register(held)) => *held,
+                    _ => NO_REGISTER,
+                };
+                if register_of(end) == register_of(end + 1) {
+                    return self.error(spot(end), "Qd register and Qn register can't be identical");
+                }
+            }
+            "MVE_VCADDi32" | "MVE_VCADDf32" | "MVE_VHCADDs32" => {
+                let register_of = |at: usize| match operands.get(at).and_then(operand_of) {
+                    Some(Operand::Register(held)) => *held,
+                    _ => NO_REGISTER,
+                };
+                if register_of(end) == register_of(end + 2) {
+                    return self.error(spot(end), "Qd register and Qm register can't be identical");
+                }
+            }
+            "MVE_VLDRBU8_rq"
+            | "MVE_VLDRBU16_rq"
+            | "MVE_VLDRBS16_rq"
+            | "MVE_VLDRBU32_rq"
+            | "MVE_VLDRBS32_rq"
+            | "MVE_VLDRHU16_rq"
+            | "MVE_VLDRHU16_rq_u"
+            | "MVE_VLDRHU32_rq"
+            | "MVE_VLDRHU32_rq_u"
+            | "MVE_VLDRHS32_rq"
+            | "MVE_VLDRHS32_rq_u"
+            | "MVE_VLDRWU32_rq"
+            | "MVE_VLDRWU32_rq_u"
+            | "MVE_VLDRDU64_rq"
+            | "MVE_VLDRDU64_rq_u"
+            | "MVE_VLDRWU32_qi"
+            | "MVE_VLDRWU32_qi_pre"
+            | "MVE_VLDRDU64_qi"
+            | "MVE_VLDRDU64_qi_pre" => {
+                let (destination, other, pointer) = match record {
+                    "MVE_VLDRWU32_qi" | "MVE_VLDRDU64_qi" => (0, 1, true),
+                    "MVE_VLDRWU32_qi_pre" | "MVE_VLDRDU64_qi_pre" => (1, 2, true),
+                    _ => (0, 2, false),
+                };
+                if instruction.register_at(destination) == instruction.register_at(other) {
+                    return self.error(
+                        spot(end),
+                        &format!(
+                            "destination vector register and vector {} register can't be identical",
+                            if pointer { "pointer" } else { "offset" }
+                        ),
+                    );
+                }
+                return false;
             }
             "MVE_SQRSHR" | "MVE_UQRSHL" => {
                 let register_of = |at: usize| match operands.get(at).and_then(operand_of) {
@@ -15782,6 +15880,7 @@ impl<'a> Assembler<'a> {
                 .streamer
                 .emit_arm32_inst(&mut parser.context, value, current, location);
             parser.arm_it.forward();
+            parser.arm_vpt.forward_vector();
             false
         })
     }

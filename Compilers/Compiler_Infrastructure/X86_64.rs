@@ -7409,6 +7409,22 @@ impl<'t> MatcherBuilder<'t> {
                 }
                 (kind, string)
             })
+            .filter(|(kind, string)| !kind.is_empty() || !string.is_empty())
+            .or_else(|| {
+                named
+                    .iter()
+                    .filter_map(|class| self.target.records.get(&class.record))
+                    .find_map(|record| {
+                        let string = table_text(record, "DiagnosticString");
+                        (!string.is_empty()).then(|| {
+                            let mut kind = table_text(record, "DiagnosticType");
+                            if kind.is_empty() {
+                                kind = record.name.clone();
+                            }
+                            (kind, string)
+                        })
+                    })
+            })
             .unwrap_or_default();
         let made = self.classes.len();
         self.classes.push(MatchClass {
