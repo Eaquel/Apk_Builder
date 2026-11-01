@@ -4635,6 +4635,8 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isCCOut" => matches!(operand, Operand::CarrySet(_)),
         "isImm" => is_immediate,
         "isImmediate" => constant.is_some_and(|value| value >= number(0) && value <= number(1)),
+        "isFBits16" => constant.is_some_and(|value| (0..=17).contains(&value)),
+        "isFBits32" => constant.is_some_and(|value| (1..=33).contains(&value)),
         "isPowerTwoInRange" => constant.is_some_and(|value| {
             value >= number(0) && value <= number(1) && value > 0 && (value & (value - 1)) == 0
         }),
@@ -5832,7 +5834,10 @@ fn accepts_carry(mnemonic: &str, thumb: bool) -> bool {
         ))
 }
 
-fn accepts_condition(mnemonic: &str, thumb: bool) -> bool {
+fn accepts_condition(mnemonic: &str, thumb: bool, full: &str) -> bool {
+    if full.starts_with("vmull") && full.ends_with(".p64") {
+        return false;
+    }
     if matches!(
         mnemonic,
         "bkpt"
@@ -7796,7 +7801,7 @@ impl<'s> Assembler<'s> {
         }
         let can_vpt = is_vpt_predicable(&mnemonic, &extra, mve);
         let can_carry = accepts_carry(&mnemonic, thumb);
-        let can_condition = accepts_condition(&mnemonic, thumb);
+        let can_condition = accepts_condition(&mnemonic, thumb, &lower);
         let location = self.statement_location(name_start);
         if thumb
             && !self.arm_features.contains("FeatureThumb2")
@@ -10382,7 +10387,12 @@ impl<'s> Assembler<'s> {
                 .get(&group.record)
                 .is_some_and(|held| held.is_a("PredicateOp"))
         });
+        let unpredicable = target
+            .records
+            .get(record)
+            .is_some_and(|held| table_bit(held, "isUnpredicable"));
         let predicate_value = predicate_group.map(|group| instruction.immediate_at(group.first));
+        let predicable_value = predicate_value.filter(|_| !unpredicable);
         let vector_group = description.groups.iter().find(|group| {
             target
                 .operand_records
@@ -10400,7 +10410,7 @@ impl<'s> Assembler<'s> {
             }
         };
         if self.arm_it.active() && !breakpoint {
-            let Some(condition) = predicate_value else {
+            let Some(condition) = predicable_value else {
                 return self.error(location, "instructions in IT block must be predicable");
             };
             let expected = self.arm_it.current();
@@ -10431,6 +10441,8 @@ impl<'s> Assembler<'s> {
             && !matches!(record, "tBcc" | "t2Bcc" | "t2BFic")
         {
             return self.error(location, "predicated instructions must be in IT block");
+        } else if unpredicable && predicate_value.is_some_and(|value| value != 14) {
+            return self.error(location, "instruction is not predicable");
         }
         if self.arm_it.explicit_block() && !self.arm_it.last() {
             let held = target.records.get(record);
