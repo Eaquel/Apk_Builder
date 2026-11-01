@@ -728,6 +728,7 @@ pub enum Operand {
     RotateImmediate(u32),
     MemoryBarrier(u32),
     InstructionBarrier(u32),
+    TraceSyncBarrier,
     ItMask(u32),
     VectorList {
         register: RegisterId,
@@ -5134,6 +5135,27 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             }
             _ => false,
         },
+        "isFPSRegListWithVPR" | "isFPDRegListWithVPR" => match operand {
+            Operand::RegisterList(list) => {
+                let vpr = register_named(target, "vpr").unwrap_or(NO_REGISTER);
+                let class = if base == "isFPSRegListWithVPR" {
+                    "SPR"
+                } else {
+                    "DPR"
+                };
+                let body = match list.split_last() {
+                    Some((last, body)) if *last == vpr => body,
+                    _ => return false,
+                };
+                (base == "isFPSRegListWithVPR" && body.is_empty())
+                    || (!body.is_empty()
+                        && in_class(target, class, body[0])
+                        && body.iter().all(|held| {
+                            in_class(target, "SPR", *held) || in_class(target, "DPR", *held)
+                        }))
+            }
+            _ => false,
+        },
         "isSPRRegList" => match operand {
             Operand::RegisterList(list) => list.iter().all(|held| in_class(target, "SPR", *held)),
             _ => false,
@@ -5357,6 +5379,7 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isITMask" => matches!(operand, Operand::ItMask(_)),
         "isMemBarrierOpt" => matches!(operand, Operand::MemoryBarrier(_)),
         "isInstSyncBarrierOpt" => matches!(operand, Operand::InstructionBarrier(_)),
+        "isTraceSyncBarrierOpt" => matches!(operand, Operand::TraceSyncBarrier),
         "isRotImm" => matches!(operand, Operand::RotateImmediate(_)),
         "isCoprocNum" => matches!(operand, Operand::CoprocessorNumber(_)),
         "isCoprocReg" => matches!(operand, Operand::CoprocessorRegister(_)),
@@ -5966,10 +5989,23 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm32_try_register(&mut self) -> Option<RegisterId> {
+        self.arm32_try_register_bound(false)
+    }
+
+    fn arm32_try_register_bound(&mut self, allow_out_of_bound: bool) -> Option<RegisterId> {
         if !self.is(TokenKind::Identifier) {
             return None;
         }
         let register = register_named(self.target, &self.lexer.token.text)?;
+        if !allow_out_of_bound
+            && in_class(self.target, "DPR", register)
+            && !in_class(self.target, "DPR_VFP2", register)
+            && !self
+                .arm32_feature("d32")
+                .is_some_and(|held| self.arm_features.contains(&held))
+        {
+            return None;
+        }
         self.lex();
         Some(register)
     }
@@ -6144,40 +6180,55 @@ impl<'s> Assembler<'s> {
 
     fn arm32_parse_register_list(&mut self, operands: &mut Vec<ParsedOperand>) -> bool {
         let start = self.lexer.token.start;
+        let scrub = operands
+            .first()
+            .is_some_and(|held| held.token_text().eq_ignore_ascii_case("vscclrm"));
+        let lazy = operands.first().is_some_and(|held| {
+            held.token_text().eq_ignore_ascii_case("vlstm")
+                || held.token_text().eq_ignore_ascii_case("vlldm")
+        });
+        let loose = scrub || lazy;
         self.lex();
         let location = self.location();
-        let Some(mut register) = self.arm32_try_register() else {
+        let Some(mut register) = self.arm32_try_register_bound(loose) else {
             return self.error(location, "register expected");
         };
-        let family = if in_class(self.target, "DPR", register) {
+        let vpr = register_named(self.target, "vpr").unwrap_or(NO_REGISTER);
+        let mut family = if in_class(self.target, "DPR", register) {
             "DPR"
         } else if in_class(self.target, "SPR", register) {
             "SPR"
+        } else if register == vpr {
+            "FPV"
         } else {
             "GPR"
         };
-        let belongs = |target: &Target, held: RegisterId| -> bool {
+        let belongs = |target: &Target, family: &str, held: RegisterId| -> bool {
             if family == "GPR" {
                 in_class(target, "GPR", held) || in_class(target, "GPRwithAPSRnosp", held)
+            } else if family == "FPV" {
+                in_class(target, "SPR", held) || in_class(target, "DPR", held) || held == vpr
             } else {
                 in_class(target, family, held)
             }
         };
-        if !belongs(self.target, register) {
+        if !belongs(self.target, family, register) {
             return self.error(location, "invalid register in register list");
         }
         let mut registers: Vec<RegisterId> = vec![register];
+        let mut adjust = false;
+        let mut previous = register_encoding(self.target, register);
         while self.is(TokenKind::Comma) || self.is(TokenKind::Minus) {
             if self.is(TokenKind::Minus) {
                 self.lex();
                 let after = self.location();
-                let Some(end) = self.arm32_try_register() else {
+                let Some(end) = self.arm32_try_register_bound(loose) else {
                     return self.error(after, "register expected");
                 };
                 if register == end {
                     continue;
                 }
-                if !belongs(self.target, end) {
+                if !belongs(self.target, family, register) || !belongs(self.target, family, end) {
                     return self.error(after, "invalid register in register list");
                 }
                 let first = register_encoding(self.target, register);
@@ -6185,10 +6236,13 @@ impl<'s> Assembler<'s> {
                 if first > last {
                     return self.error(after, "bad range in register list");
                 }
+                let double = in_class(self.target, "DPR", register);
                 for encoding in first + 1..=last {
                     let name = match family {
                         "DPR" => format!("d{encoding}"),
                         "SPR" => format!("s{encoding}"),
+                        "FPV" if double => format!("d{encoding}"),
+                        "FPV" => format!("s{encoding}"),
                         _ => match encoding {
                             13 => "sp".to_string(),
                             14 => "lr".to_string(),
@@ -6211,18 +6265,44 @@ impl<'s> Assembler<'s> {
                     }
                     register = next;
                 }
+                previous = last + if adjust { 16 } else { 0 };
                 continue;
             }
             self.lex();
             let location = self.location();
             let written = self.lexer.token.text.clone();
-            let Some(next) = self.arm32_try_register() else {
+            let Some(next) = self.arm32_try_register_bound(loose) else {
                 return self.error(location, "register expected");
             };
-            if !belongs(self.target, next) {
+            if next == vpr && matches!(family, "SPR" | "DPR" | "FPV") {
+                family = "FPV";
+                if registers.contains(&next) {
+                    self.message(
+                        MessageKind::Warning,
+                        location,
+                        &format!("duplicated register ({written}) in register list"),
+                        None,
+                    );
+                } else {
+                    registers.push(next);
+                }
+                register = next;
+                previous = register_encoding(self.target, next);
+                continue;
+            }
+            if scrub
+                && family == "SPR"
+                && register_encoding(self.target, register) == 31
+                && Some(next) == register_named(self.target, "d16")
+            {
+                adjust = true;
+                family = "FPV";
+            }
+            if !belongs(self.target, family, next) {
                 return self.error(location, "invalid register in register list");
             }
-            if register_encoding(self.target, next) < register_encoding(self.target, register) {
+            let encoding = register_encoding(self.target, next) + if adjust { 16 } else { 0 };
+            if encoding < previous {
                 if family != "GPR" {
                     return self.error(location, "register list not in ascending order");
                 }
@@ -6232,6 +6312,9 @@ impl<'s> Assembler<'s> {
                     "register list not in ascending order",
                     None,
                 );
+            }
+            if family != "GPR" && encoding != previous + 1 {
+                return self.error(location, "non-contiguous register range");
             }
             if registers.contains(&next) {
                 self.message(
@@ -6244,6 +6327,7 @@ impl<'s> Assembler<'s> {
                 registers.push(next);
             }
             register = next;
+            previous = encoding;
         }
         if !self.is(TokenKind::RightBrace) {
             return self.token_error("'}' expected");
@@ -6251,7 +6335,15 @@ impl<'s> Assembler<'s> {
         let end = self.lexer.token.end;
         self.lex();
         let target = self.target;
-        registers.sort_by_key(|held| register_encoding(target, *held));
+        let key = |held: &RegisterId| {
+            register_encoding(target, *held)
+                + if adjust && in_class(target, "DPR", *held) {
+                    16
+                } else {
+                    0
+                }
+        };
+        registers.sort_by_key(key);
         operands.push(parsed(Operand::RegisterList(registers), start, end));
         if self.is(TokenKind::Caret) {
             let at = self.lexer.token.start;
@@ -6573,6 +6665,53 @@ impl<'s> Assembler<'s> {
         Parse::Success
     }
 
+    fn arm32_parse_pkh_immediate(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        arithmetic: bool,
+    ) -> Parse {
+        if !self.is(TokenKind::Identifier) {
+            return Parse::NoMatch;
+        }
+        let start = self.lexer.token.start;
+        let wanted = if arithmetic { "asr" } else { "lsl" };
+        let written = self.lexer.token.text.to_ascii_lowercase();
+        if Shift::named(&written).is_none() {
+            return Parse::NoMatch;
+        }
+        if written != wanted {
+            let location = self.location();
+            self.error(location, &format!("{wanted} operand expected."));
+            return Parse::Failure;
+        }
+        self.lex();
+        if !self.is(TokenKind::Hash) && !self.is(TokenKind::Dollar) {
+            return Parse::NoMatch;
+        }
+        self.lex();
+        let location = self.location();
+        let Ok((expression, _)) = self.parse_expression() else {
+            self.error(location, "illegal expression");
+            return Parse::Failure;
+        };
+        let Expression::Constant(value) = expression else {
+            self.error(location, "constant expression expected");
+            return Parse::Failure;
+        };
+        let (low, high) = if arithmetic { (1, 32) } else { (0, 31) };
+        if value < low || value > high {
+            self.error(location, "immediate value out of range");
+            return Parse::Failure;
+        }
+        let end = self.lexer.token.start;
+        operands.push(parsed(
+            Operand::Immediate(Expression::Constant(value)),
+            start,
+            end,
+        ));
+        Parse::Success
+    }
+
     fn arm32_parse_shifter_immediate(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
         if !self.is(TokenKind::Identifier) {
             return Parse::NoMatch;
@@ -6663,6 +6802,17 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm32_parse_system_mask(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        if self.is(TokenKind::Integer) {
+            let value = self.lexer.token.value;
+            if value > 255 {
+                return Parse::NoMatch;
+            }
+            let start = self.lexer.token.start;
+            let end = self.lexer.token.end;
+            self.lex();
+            operands.push(parsed(Operand::SystemMask(value as u32), start, end));
+            return Parse::Success;
+        }
         if !self.is(TokenKind::Identifier) {
             return Parse::NoMatch;
         }
@@ -6857,6 +7007,17 @@ impl<'s> Assembler<'s> {
         Parse::Success
     }
 
+    fn arm32_parse_trace_barrier(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        let start = self.lexer.token.start;
+        if !self.is(TokenKind::Identifier) || !self.lexer.token.text.eq_ignore_ascii_case("csync") {
+            return Parse::NoMatch;
+        }
+        self.lex();
+        let end = self.lexer.token.start;
+        operands.push(parsed(Operand::TraceSyncBarrier, start, end));
+        Parse::Success
+    }
+
     fn arm32_parse_barrier(
         &mut self,
         operands: &mut Vec<ParsedOperand>,
@@ -6988,8 +7149,11 @@ impl<'s> Assembler<'s> {
                 | "CondCodeRestrictedFP" => self.arm32_parse_it_condition(operands),
                 "MemBarrierOpt" => self.arm32_parse_barrier(operands, false),
                 "InstSyncBarrierOpt" => self.arm32_parse_barrier(operands, true),
+                "TraceSyncBarrierOpt" => self.arm32_parse_trace_barrier(operands),
                 "Bitfield" => self.arm32_parse_bitfield(operands),
                 "ShifterImm" => self.arm32_parse_shifter_immediate(operands),
+                "PKHLSLImm" => self.arm32_parse_pkh_immediate(operands, false),
+                "PKHASRImm" => self.arm32_parse_pkh_immediate(operands, true),
                 "RotImm" => self.arm32_parse_rotate_immediate(operands),
                 "SetEndImm" => self.arm32_parse_set_end(operands),
                 "CoprocNum" => self.arm32_parse_coprocessor(operands, 'p'),
@@ -7630,6 +7794,14 @@ impl<'s> Assembler<'s> {
         let can_carry = accepts_carry(&mnemonic, thumb);
         let can_condition = accepts_condition(&mnemonic, thumb);
         let location = self.statement_location(name_start);
+        if thumb
+            && !self.arm_features.contains("FeatureThumb2")
+            && split.condition != CONDITION_AL
+            && mnemonic != "b"
+        {
+            self.error(location, "conditional execution not supported in Thumb1");
+            return Err(());
+        }
         if !can_carry && split.carry {
             self.error(
                 location,
@@ -8131,6 +8303,8 @@ impl<'s> Assembler<'s> {
                 | "addRegListWithAPSROperands"
                 | "addDPRRegListOperands"
                 | "addSPRRegListOperands"
+                | "addFPSRegListWithVPROperands"
+                | "addFPDRegListWithVPROperands"
                 | "addDPR_VFP2RegListOperands"
                 | "addDPR_8RegListOperands",
                 Operand::RegisterList(list),
@@ -8258,6 +8432,7 @@ impl<'s> Assembler<'s> {
             | ("addInstSyncBarrierOptOperands", Operand::InstructionBarrier(value)) => {
                 immediate(into, i64::from(*value))
             }
+            ("addTraceSyncBarrierOptOperands", _) => immediate(into, 0),
             ("addImm1_16Operands" | "addImm1_32Operands", _) => {
                 immediate(into, operand.constant().unwrap_or(1) - 1)
             }
@@ -8509,6 +8684,13 @@ impl<'s> Assembler<'s> {
             }
             ClassKind::Register => match operand_of(operand) {
                 Some(Operand::Register(register)) if held.registers.contains(register) => Ok(()),
+                Some(Operand::Register(register))
+                    if held.diagnostic == "rGPR"
+                        && self.arm_features.contains("HasV8Ops")
+                        && self.target.register_by_name.get("sp") == Some(register) =>
+                {
+                    Ok(())
+                }
                 _ => failure(),
             },
             ClassKind::User => match operand_of(operand) {
@@ -9491,6 +9673,51 @@ impl<'s> Assembler<'s> {
                     None
                 }
             }
+            "LDMIA_UPD" if first_token == "pop" && instruction.operands.len() == 5 => build(
+                "LDR_POST_IMM",
+                vec![
+                    operand(4),
+                    operand(0),
+                    operand(1),
+                    MachineOperand::Register(NO_REGISTER),
+                    MachineOperand::Immediate(4),
+                    operand(2),
+                    operand(3),
+                ],
+            ),
+            "STMDB_UPD" if first_token == "push" && instruction.operands.len() == 5 => build(
+                "STR_PRE_IMM",
+                vec![
+                    operand(0),
+                    operand(4),
+                    operand(1),
+                    MachineOperand::Immediate(-4),
+                    operand(2),
+                    operand(3),
+                ],
+            ),
+            "t2LDMIA_UPD" if instruction.operands.len() == 5 => build(
+                "t2LDR_POST",
+                vec![
+                    operand(4),
+                    operand(0),
+                    operand(1),
+                    MachineOperand::Immediate(4),
+                    operand(2),
+                    operand(3),
+                ],
+            ),
+            "t2STMDB_UPD" if instruction.operands.len() == 5 => build(
+                "t2STR_PRE",
+                vec![
+                    operand(0),
+                    operand(4),
+                    operand(1),
+                    MachineOperand::Immediate(-4),
+                    operand(2),
+                    operand(3),
+                ],
+            ),
             "tLDMIA" => {
                 let base = instruction.register_at(0);
                 let list_contains_base = (3..instruction.operands.len())
@@ -9729,6 +9956,7 @@ impl<'s> Assembler<'s> {
         if self.arm32_fix_pair_operands(&mut operands, location) {
             return true;
         }
+        self.arm32_two_operand_form(&mut operands);
         match self.arm32_match(&operands) {
             Outcome::Success(mut instruction) => {
                 self.arm_mnemonic = operands
@@ -9746,6 +9974,11 @@ impl<'s> Assembler<'s> {
                     .count();
                 self.arm_writeback = operands.iter().any(|held| held.token_text() == "!");
                 let wide = operands.iter().any(|held| held.token_text() == ".w");
+                if !self.options.no_deprecated_warn {
+                    if let Some(information) = self.arm32_deprecation(&instruction) {
+                        self.warning(location, &information);
+                    }
+                }
                 if self.arm32_constant_pool(&mut instruction, location) {
                     return true;
                 }
@@ -9781,6 +10014,162 @@ impl<'s> Assembler<'s> {
             Outcome::NearMisses(misses) => {
                 self.arm32_report_near_misses(&misses, &operands, location)
             }
+        }
+    }
+
+    fn arm32_deprecation(&self, instruction: &MachineInstruction) -> Option<String> {
+        let record = self
+            .target
+            .records
+            .get(&self.target.instructions[instruction.opcode].record)?;
+        let feature = table_record_name(record, "DeprecatedFeatureMask");
+        if !feature.is_empty() && self.arm_features.contains(&feature) {
+            return Some("deprecated".to_string());
+        }
+        let immediate_is = |index: usize, wanted: i64| matches!(instruction.operand(index), MachineOperand::Immediate(held) if *held == wanted);
+        let version7 = self.arm_features.contains("HasV7Ops");
+        let reserved = |index: usize| immediate_is(index, 10) || immediate_is(index, 11);
+        match table_text(record, "ComplexDeprecationPredicate").as_str() {
+            "MCR" => {
+                if version7 && immediate_is(0, 15) && immediate_is(1, 0) && immediate_is(3, 7) {
+                    if immediate_is(5, 4) {
+                        if immediate_is(4, 5) {
+                            return Some("deprecated since v7, use 'isb'".to_string());
+                        }
+                        if immediate_is(4, 10) {
+                            return Some("deprecated since v7, use 'dsb'".to_string());
+                        }
+                    }
+                    if immediate_is(4, 10) && immediate_is(5, 5) {
+                        return Some("deprecated since v7, use 'dmb'".to_string());
+                    }
+                }
+                if version7 && reserved(0) {
+                    return Some(
+                        "since v7, cp10 and cp11 are reserved for advanced SIMD or floating point instructions"
+                            .to_string(),
+                    );
+                }
+                None
+            }
+            "MRC" => (version7 && reserved(1)).then(|| {
+                "since v7, cp10 and cp11 are reserved for advanced SIMD or floating point instructions"
+                    .to_string()
+            }),
+            "ARMStore" => {
+                let counter = register_named(self.target, "pc");
+                (4..instruction.operands.len())
+                    .any(|index| Some(instruction.register_at(index)) == counter)
+                    .then(|| "use of PC in the list is deprecated".to_string())
+            }
+            "ARMLoad" => {
+                let counter = register_named(self.target, "pc");
+                let link = register_named(self.target, "lr");
+                let listed = |wanted: Option<RegisterId>| {
+                    (4..instruction.operands.len())
+                        .any(|index| Some(instruction.register_at(index)) == wanted)
+                };
+                (listed(counter) && listed(link))
+                    .then(|| "use of LR and PC simultaneously in the list is deprecated".to_string())
+            }
+            _ => None,
+        }
+    }
+
+    fn arm32_two_operand_form(&self, operands: &mut Vec<ParsedOperand>) {
+        let end = Self::arm32_mnemonic_operand_end(operands);
+        if operands[..end].iter().any(|held| held.token_text() == ".w") {
+            return;
+        }
+        if operands.len() != end + 3 {
+            return;
+        }
+        let register_of = |held: &ParsedOperand| match operand_of(held) {
+            Some(Operand::Register(register)) => Some(*register),
+            _ => None,
+        };
+        let (Some(first), Some(second)) =
+            (register_of(&operands[end]), register_of(&operands[end + 1]))
+        else {
+            return;
+        };
+        let counter = register_named(self.target, "pc");
+        let stack = register_named(self.target, "sp");
+        let third = register_of(&operands[end + 2]);
+        let third_is_immediate =
+            matches!(operand_of(&operands[end + 2]), Some(Operand::Immediate(_)));
+        let mnemonic = operands[0].token_text().to_ascii_lowercase();
+        let carry = operands[..end]
+            .iter()
+            .any(|held| matches!(operand_of(held), Some(Operand::CarrySet(_))));
+        if self.arm32_thumb_two() {
+            if mnemonic != "add" {
+                return;
+            }
+            let mut attempt = Some(first) == counter
+                || Some(second) == counter
+                || (third.is_some() && third == counter);
+            if !attempt {
+                let stacked = Some(first) == stack
+                    || Some(second) == stack
+                    || (third.is_some() && third == stack);
+                let large = match operand_of(&operands[end + 2]) {
+                    Some(Operand::Immediate(Expression::Constant(value))) => {
+                        !((0..=508).contains(value) && value % 4 == 0)
+                    }
+                    Some(Operand::Immediate(_)) => true,
+                    _ => false,
+                };
+                attempt = stacked
+                    && !(Some(first) == stack
+                        && Some(second) == stack
+                        && third_is_immediate
+                        && large);
+            }
+            if !attempt {
+                return;
+            }
+        } else if !(self.arm_thumb && !self.arm_features.contains("FeatureThumb2")) {
+            return;
+        }
+        if ![
+            "add", "sub", "and", "eor", "lsl", "lsr", "asr", "adc", "sbc", "ror", "orr", "bic",
+        ]
+        .contains(&mnemonic.as_str())
+        {
+            return;
+        }
+        let mut transform = first == second;
+        let mut swap = false;
+        let mut last = end + 2;
+        if !transform
+            && third == Some(first)
+            && ((mnemonic == "add" && Some(second) != stack)
+                || matches!(mnemonic.as_str(), "and" | "eor" | "adc" | "orr"))
+        {
+            swap = true;
+            last = end + 1;
+            transform = true;
+        }
+        if transform {
+            let last_is_register = register_of(&operands[last]).is_some();
+            if ((mnemonic == "add" && carry) || mnemonic == "sub") && last_is_register {
+                transform = false;
+            }
+            if (mnemonic == "add" || mnemonic == "sub")
+                && matches!(
+                    operand_of(&operands[last]),
+                    Some(Operand::Immediate(Expression::Constant(value))) if (0..=7).contains(value)
+                )
+            {
+                transform = false;
+            }
+        }
+        if transform {
+            if swap {
+                operands.swap(end + 1, end + 2);
+            }
+            operands.remove(end);
         }
     }
 
@@ -11462,9 +11851,28 @@ fn operand_value(
             let leading = instruction.register_at(first);
             let singles = in_class(target, "SPR", leading);
             let doubles = in_class(target, "DPR", leading);
-            if singles || doubles {
-                let count = (instruction.operands.len() - first) as u64 & 0xff;
+            let vpr = register_named(target, "vpr") == Some(leading);
+            if singles || doubles || vpr {
+                let mut count = (instruction.operands.len() - first) as u64 & 0xff;
                 let binary = (register(first) & 0x1f) << 8;
+                match target.instructions[instruction.opcode].record.as_str() {
+                    "VSCCLRMD" => count -= 1,
+                    "VSCCLRMS" => {
+                        count = (first..instruction.operands.len())
+                            .map(|index| {
+                                let held = instruction.register_at(index);
+                                if in_class(target, "SPR", held) {
+                                    1
+                                } else if in_class(target, "DPR", held) {
+                                    2
+                                } else {
+                                    0
+                                }
+                            })
+                            .sum();
+                    }
+                    _ => {}
+                }
                 binary | if singles { count } else { count * 2 }
             } else {
                 let mut binary = 0u64;
@@ -12183,6 +12591,16 @@ impl<'t> Printer<'t> {
             self.target.register_by_name.get("sp").copied() == Some(instruction.register_at(index))
         };
         match record {
+            "VLLDM" | "VLLDM_T2" | "VLSTM" | "VLSTM_T2" => Some(format!(
+                "\t{}\t{}, {{d0 - d{}}}",
+                if record.starts_with("VLL") {
+                    "vlldm"
+                } else {
+                    "vlstm"
+                },
+                self.register_text(instruction, 0),
+                if record.ends_with("T2") { 31 } else { 15 }
+            )),
             "MOVsr" => {
                 let shift = (instruction.immediate_at(3) as u32) & 7;
                 Some(format!(
@@ -15174,10 +15592,6 @@ impl<'a> Assembler<'a> {
         let name = ARCHES[index].name;
         self.arm_features = armv8::feature_set(self.target, "", &[format!("+{name}")]);
         self.streamer.set_arm_features(&self.arm_features);
-        if was_thumb {
-            self.arm32_set_features(&["thumb-mode"], &[]);
-            self.arm_thumb = false;
-        }
         self.arm32_fix_mode(was_thumb, location);
         self.arm_attribute_state.architecture = Some(index);
         self.streamer
@@ -15202,10 +15616,6 @@ impl<'a> Assembler<'a> {
         let was_thumb = self.arm_thumb;
         self.arm_features = armv8::feature_set(target, &name, &[]);
         self.streamer.set_arm_features(&self.arm_features);
-        if was_thumb {
-            self.arm32_set_features(&["thumb-mode"], &[]);
-            self.arm_thumb = false;
-        }
         self.arm32_fix_mode(was_thumb, location);
         false
     }

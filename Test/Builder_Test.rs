@@ -71723,6 +71723,8 @@ mod x86_assembly {
                 }
                 "show-encoding" => options.show_encoding = true,
                 "implicit-mapsyms" => options.implicit_mapping_symbols = true,
+                "fatal-warnings" => options.fatal_warnings = true,
+                "no-deprecated-warn" => options.no_deprecated_warn = true,
                 "show-inst-operands" => options.show_instruction_operands = true,
                 "print-imm-hex" => {
                     options.hexadecimal_immediates = value != "false" && value != "0"

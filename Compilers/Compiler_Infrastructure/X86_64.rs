@@ -10592,6 +10592,8 @@ pub struct AssemblerOptions {
     pub masm_integers: bool,
     pub markup: bool,
     pub implicit_mapping_symbols: bool,
+    pub fatal_warnings: bool,
+    pub no_deprecated_warn: bool,
 }
 
 impl AssemblerOptions {
@@ -10622,6 +10624,8 @@ impl AssemblerOptions {
             masm_integers: false,
             markup: false,
             implicit_mapping_symbols: false,
+            fatal_warnings: false,
+            no_deprecated_warn: false,
         }
     }
 }
@@ -11071,7 +11075,17 @@ impl<'s> Assembler<'s> {
         lexer.hash_token = triple.isa != Isa::X86;
         lexer.at_comment = triple.isa == Isa::Armv7;
         let unnamed_temporaries = triple.isa == Isa::Armv8 && options.output == OutputKind::Object;
-        let starts_thumb = triple.is_thumb();
+        let starts_thumb = triple.is_thumb()
+            || (triple.isa == Isa::Armv7
+                && target.records.values().any(|record| {
+                    record.is_a("SubtargetFeature")
+                        && table_text(record, "Name") == "thumb-mode"
+                        && arm_features.contains(&record.name)
+                }));
+        let mut streamer = streamer;
+        if starts_thumb && triple.isa == Isa::Armv7 {
+            streamer.set_arm_thumb(true);
+        }
         Ok(Assembler {
             target,
             matcher,
@@ -11171,6 +11185,11 @@ impl<'s> Assembler<'s> {
         text: &str,
         range: Option<(SourceLocation, SourceLocation)>,
     ) {
+        let kind = if kind == MessageKind::Warning && self.options.fatal_warnings {
+            MessageKind::Error
+        } else {
+            kind
+        };
         let message = AssemblyMessage {
             kind,
             location: Some(location),
