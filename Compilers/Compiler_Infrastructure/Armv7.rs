@@ -76,6 +76,20 @@ pub enum Fixup32 {
 }
 
 impl Fixup32 {
+    pub fn is_half_word_relocation(self) -> bool {
+        matches!(
+            self,
+            Fixup32::MovwLo16
+                | Fixup32::MovtHi16
+                | Fixup32::T2MovwLo16
+                | Fixup32::T2MovtHi16
+                | Fixup32::ThumbUpper815
+                | Fixup32::ThumbUpper07
+                | Fixup32::ThumbLower815
+                | Fixup32::ThumbLower07
+        )
+    }
+
     pub fn name(self) -> &'static str {
         match self {
             Fixup32::LdstPcrel12 => "fixup_arm_ldst_pcrel_12",
@@ -6005,7 +6019,11 @@ impl<'s> Assembler<'s> {
         if !self.is(TokenKind::Identifier) {
             return None;
         }
-        let register = register_named(self.target, &self.lexer.token.text)?;
+        let register = register_named(self.target, &self.lexer.token.text).or_else(|| {
+            self.arm_aliases
+                .get(&self.lexer.token.text.to_ascii_lowercase())
+                .map(|(_, held)| *held)
+        })?;
         if !allow_out_of_bound
             && in_class(self.target, "DPR", register)
             && !in_class(self.target, "DPR_VFP2", register)
@@ -7785,6 +7803,9 @@ impl<'s> Assembler<'s> {
         if self.parse_token(TokenKind::Colon, "unexpected token in operand") {
             return Err(());
         }
+        if self.is(TokenKind::Hash) {
+            self.lex();
+        }
         let (expression, _) = self.parse_expression()?;
         if let Expression::Constant(value) = expression {
             let value = value as i32;
@@ -8994,18 +9015,6 @@ impl<'s> Assembler<'s> {
         }
     }
 
-    fn arm32_text_directive(&mut self, name: &str) -> Option<bool> {
-        let text = self.parse_string_to_end_of_statement();
-        let text = text.trim();
-        let line = if text.is_empty() {
-            format!("\t{name}")
-        } else {
-            format!("\t{name}\t{text}")
-        };
-        self.streamer.emit_arm_directive(&line);
-        Some(false)
-    }
-
     pub(super) fn arm32_directive(
         &mut self,
         identifier: &str,
@@ -9122,6 +9131,15 @@ impl<'s> Assembler<'s> {
                 }
                 Some(false)
             }
+            ".unreq" => {
+                if !self.is(TokenKind::Identifier) {
+                    return Some(self.error(location, "unexpected input in .unreq directive."));
+                }
+                let name = self.lexer.token.text.to_ascii_lowercase();
+                self.arm_aliases.remove(&name);
+                self.lex();
+                Some(self.parse_end_of_line())
+            }
             ".fnstart" => Some(self.arm32_directive_fnstart(location)),
             ".fnend" => Some(self.arm32_directive_fnend(location)),
             ".cantunwind" => Some(self.arm32_directive_cantunwind(location)),
@@ -9134,7 +9152,27 @@ impl<'s> Assembler<'s> {
             ".pad" => Some(self.arm32_directive_pad(location)),
             ".movsp" => Some(self.arm32_directive_movsp(location)),
             ".unwind_raw" => Some(self.arm32_directive_unwind_raw(location)),
-            ".tlsdescseq" => self.arm32_text_directive(identifier),
+            ".tlsdescseq" => {
+                if !self.is(TokenKind::Identifier) {
+                    return Some(
+                        self.token_error("expected variable after '.tlsdescseq' directive"),
+                    );
+                }
+                let name = self.lexer.token.text.clone();
+                self.lex();
+                if self.parse_end_of_line() {
+                    return Some(true);
+                }
+                self.streamer
+                    .emit_arm_directive(&format!("\t.tlsdescseq\t{name}"));
+                let expression = Expression::Symbol {
+                    name,
+                    specifier: Some("tlsdescseq".to_string()),
+                };
+                self.streamer
+                    .emit_arm_marker_fixup(&mut self.context, &expression, location);
+                Some(false)
+            }
             ".eabi_attribute" => Some(self.arm32_directive_eabi_attribute()),
             ".object_arch" => Some(self.arm32_directive_object_arch()),
             ".arch_extension" => Some(self.arm32_directive_arch_extension()),
@@ -10106,6 +10144,30 @@ impl<'s> Assembler<'s> {
         identifier: &str,
         identifier_token: Token,
     ) -> bool {
+        if self.is(TokenKind::Identifier) && self.lexer.token.text.eq_ignore_ascii_case(".req") {
+            self.lex();
+            let register_location = self.location();
+            let Some(register) = self.arm32_try_register() else {
+                return self.error(register_location, "register name expected");
+            };
+            if self.parse_end_of_line() {
+                return true;
+            }
+            let lower = identifier.to_ascii_lowercase();
+            match self.arm_aliases.get(&lower) {
+                Some((_, existing)) if *existing != register => {
+                    return self.error(
+                        register_location,
+                        &format!("redefinition of '{identifier}' does not match original."),
+                    );
+                }
+                _ => {
+                    self.arm_aliases
+                        .insert(lower, (armv8::RegKind::Scalar, register));
+                }
+            }
+            return false;
+        }
         self.arm_suffixes.clear();
         let Ok((operands, _)) = self.arm32_parse_instruction(identifier, identifier_token.start)
         else {
@@ -13462,8 +13524,8 @@ impl<'t> Printer<'t> {
                 }
             }
             "printModImmOperand" => {
-                if let MachineOperand::Expression(expression) = operand {
-                    out.push_str(&self.expression(expression));
+                if let MachineOperand::Expression(_) = operand {
+                    self.call_method("printOperand", instruction, index, out);
                     return;
                 }
                 let held = value(0) as u32;
@@ -15500,8 +15562,11 @@ impl<'a> Assembler<'a> {
             return true;
         }
         let Ok((expression, _)) = self.parse_expression() else {
-            return true;
+            return self.token_error("missing expression");
         };
+        if self.parse_end_of_line() {
+            return true;
+        }
         let symbol = self.context.symbol(&name);
         let defined_source = match &expression {
             Expression::Symbol { name: source, .. } => self
@@ -15945,9 +16010,10 @@ impl<'a> Assembler<'a> {
         let Some(index) = parse_architecture(&name) else {
             return self.error(at, &format!("unknown architecture '{name}'"));
         };
-        if self.parse_end_of_line() {
-            return true;
+        if !self.is(TokenKind::EndOfStatement) {
+            return self.token_error("unexpected token");
         }
+        self.lex();
         self.arm_attribute_state.object_architecture = Some(index);
         self.streamer
             .emit_arm_directive(&format!("\t.object_arch\t{}", ARCHES[index].name));
@@ -17156,7 +17222,6 @@ pub fn variant_specifier(name: &str) -> Option<&'static str> {
         "sbrel" => "sbrel",
         "tlsdesc" => "tlsdesc",
         "tlscall" => "tlscall",
-        "tlsdescseq" => "tlsdescseq",
         "secrel32" => "secrel32",
         _ => return None,
     })

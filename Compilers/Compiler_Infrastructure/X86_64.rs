@@ -9151,7 +9151,9 @@ impl Lexer {
                 return self.lex_float(start);
             }
         }
-        while is_lexer_identifier_byte(self.current()) {
+        while is_lexer_identifier_byte(self.current())
+            && !(self.at_comment && self.current() == b'@')
+        {
             self.state.position += 1;
         }
         if self.state.position == start + 1 && self.byte(start) == b'.' {
@@ -10873,6 +10875,13 @@ pub trait Streamer {
     }
     fn emit_arm_subsection(&mut self, _name: &str, _optional: u8, _kind: u8) {}
     fn emit_arm_directive(&mut self, _text: &str) {}
+    fn emit_arm_marker_fixup(
+        &mut self,
+        _context: &mut AssemblyContext,
+        _value: &Expression,
+        _location: SourceLocation,
+    ) {
+    }
     fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
     fn set_arm_thumb(&mut self, _thumb: bool) {}
     fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
@@ -11522,7 +11531,7 @@ impl<'s> Assembler<'s> {
                 self.parse_binary_right(token_precedence + 1, &mut right, end)?;
             }
             let left = std::mem::replace(expression, Expression::Constant(0));
-            let operator = if self.target.isa == Isa::Armv8
+            let operator = if self.target.isa != Isa::X86
                 && operator == BinaryOperator::ArithmeticShiftRight
             {
                 BinaryOperator::LogicalShiftRight
@@ -11847,7 +11856,12 @@ impl<'s> Assembler<'s> {
             if self.parse_optional_token(TokenKind::EndOfStatement) {
                 return false;
             }
-            if self.parse_comma() {
+            let failed = if self.target.isa == Isa::Armv7 {
+                self.parse_token(TokenKind::Comma, "unexpected token")
+            } else {
+                self.parse_comma()
+            };
+            if failed {
                 return true;
             }
         }
@@ -13053,6 +13067,24 @@ impl<'s> Assembler<'s> {
         let alignment_location = self.location();
         if self.check_for_valid_section() {
             return true;
+        }
+        if power_of_two
+            && value_size == 1
+            && self.is(TokenKind::EndOfStatement)
+            && self.target.isa == Isa::Armv7
+        {
+            if self.parse_end_of_line() {
+                return true;
+            }
+            if self.current_section_is_code() {
+                let mode = self.mode;
+                self.streamer
+                    .emit_code_alignment(&mut self.context, 4, 0, mode);
+            } else {
+                self.streamer
+                    .emit_value_to_alignment(&mut self.context, 4, 0, 1, 0);
+            }
+            return false;
         }
         if power_of_two && value_size == 1 && self.is(TokenKind::EndOfStatement) {
             self.warning(
@@ -14474,8 +14506,12 @@ impl<'s> Assembler<'s> {
         if !self.is(TokenKind::Comma) {
             return self.token_error("expected a comma");
         }
+        let restore = self.lexer.at_comment;
+        self.lexer.at_comment = false;
         self.lex();
-        let Some(name) = self.parse_identifier() else {
+        let name = self.parse_identifier();
+        self.lexer.at_comment = restore;
+        let Some(name) = name else {
             return self.token_error("expected identifier");
         };
         if !name.contains('@') {
@@ -19204,7 +19240,27 @@ impl TextStreamer {
         }
         text.push_str("]\n");
         for (index, fixup) in encoded.fixups.iter().enumerate() {
-            let value = self.expression(&fixup.expression);
+            let value = match (&fixup.expression, fixup.kind) {
+                (Expression::Symbol { name, specifier }, FixupKind::Arm32(kind))
+                    if specifier.as_deref().is_some_and(|held| {
+                        matches!(
+                            held,
+                            "lower16"
+                                | "upper16"
+                                | "lower0_7"
+                                | "lower8_15"
+                                | "upper0_7"
+                                | "upper8_15"
+                        )
+                    }) && kind.is_half_word_relocation() =>
+                {
+                    self.expression(&Expression::Symbol {
+                        name: name.clone(),
+                        specifier: None,
+                    })
+                }
+                _ => self.expression(&fixup.expression),
+            };
             let kind = match fixup.kind {
                 FixupKind::Literal(number) => format!("relocation type: {number}"),
                 FixupKind::Data1 | FixupKind::Data2 | FixupKind::Data4 | FixupKind::Data8
@@ -30927,6 +30983,29 @@ pub mod object {
                 Some(location),
             );
             self.append(&vec![0u8; size as usize]);
+        }
+
+        fn emit_arm_marker_fixup(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: &Expression,
+            location: SourceLocation,
+        ) {
+            self.arm_mapping(context, true);
+            self.visit_used(context, value);
+            let offset = {
+                let fragment = self.fragment();
+                self.fragments[fragment].fixed.len()
+            };
+            self.add_fixup(
+                Fixup {
+                    offset,
+                    expression: value.clone(),
+                    kind: FixupKind::Data4,
+                    pc_relative: false,
+                },
+                Some(location),
+            );
         }
 
         fn emit_leb128(&mut self, context: &mut AssemblyContext, value: &Expression, signed: bool) {

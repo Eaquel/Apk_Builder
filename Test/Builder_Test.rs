@@ -76067,6 +76067,36 @@ mod armv8_assembly {
 
     #[test]
     #[ignore]
+    fn armv7_debug_file() {
+        use crate::compilers::x86_64::{assemble_source, render_messages, AssemblerOptions};
+        let path = std::env::var("APK_BUILDER_FILE").unwrap_or_default();
+        let source = std::fs::read(&path).expect("the file reads");
+        let triple =
+            std::env::var("APK_BUILDER_TRIPLE").unwrap_or_else(|_| "armv7a-linux-gnueabihf".into());
+        let mut options = AssemblerOptions::new(&triple);
+        options.show_encoding = true;
+        options.source_name = path.clone();
+        if let Ok(cpu) = std::env::var("APK_BUILDER_CPU") {
+            options.cpu = cpu;
+        }
+        if let Ok(features) = std::env::var("APK_BUILDER_FEATURES") {
+            options.features = features
+                .split(',')
+                .filter(|held| !held.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        let result = assemble_source(&options, &source, None).expect("the source assembles");
+        let diagnostics = render_messages(&result);
+        eprint!(
+            "{}",
+            super::x86_assembly::format_assembly_messages(&diagnostics)
+        );
+        print!("{}", String::from_utf8_lossy(&result.output));
+    }
+
+    #[test]
+    #[ignore]
     fn armv7_dump_matchables() {
         let name = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
         let matcher = crate::compilers::x86_64::armv7::matcher();
