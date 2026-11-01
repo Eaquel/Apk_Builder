@@ -523,6 +523,9 @@ pub fn elf_relocation(
     pc_relative: bool,
 ) -> Result<u32, &'static str> {
     let specifier = specifier.to_ascii_lowercase();
+    let specifier = specifier
+        .split_once(':')
+        .map_or(specifier.clone(), |(_, inner)| inner.to_string());
     let spec = match specifier.as_str() {
         "lower16" | "upper16" | "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15" => "",
         other => other,
@@ -580,7 +583,7 @@ pub fn elf_relocation(
         None => match (size, spec) {
             (1, "") => 8,
             (2, "") => 5,
-            (4, "") | (4, "plt") => 2,
+            (4, "") => 2,
             (4, "none") => 0,
             (4, "got") => 26,
             (4, "tlsgd") => 104,
@@ -597,6 +600,7 @@ pub fn elf_relocation(
             (4, "tlsdesc") => 90,
             (4, "tlsldm") => 105,
             (4, "tlsdescseq") => 92,
+            (8, _) => return Err("unsupported relocation type"),
             (1, _) => return Err("invalid fixup for 1-byte data relocation"),
             (2, _) => return Err("invalid fixup for 2-byte data relocation"),
             _ => return Err("invalid fixup for 4-byte data relocation"),
@@ -5049,8 +5053,11 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
             Operand::Immediate(Expression::Constant(value)) => {
                 thumb_so_immediate(*value as u32).is_some()
             }
-            Operand::Immediate(Expression::Symbol { specifier, .. }) => {
-                !matches!(specifier.as_deref(), Some("upper16" | "lower16"))
+            Operand::Immediate(Expression::Symbol { specifier, .. }) => !specifier
+                .as_deref()
+                .is_some_and(|held| held.starts_with("upper16") || held.starts_with("lower16")),
+            Operand::Immediate(Expression::Prefixed { prefix, .. }) => {
+                !matches!(prefix.as_str(), "upper16" | "lower16")
             }
             Operand::Immediate(_) => true,
             _ => false,
@@ -7818,6 +7825,25 @@ impl<'s> Assembler<'s> {
                 _ => value & 0xff,
             };
             return Ok(Expression::Constant(i64::from(folded)));
+        }
+        if let Expression::Symbol {
+            name: symbol,
+            specifier: Some(existing),
+        } = &expression
+        {
+            return Ok(Expression::Symbol {
+                name: symbol.clone(),
+                specifier: Some(format!("{name}:{existing}")),
+            });
+        }
+        if matches!(
+            expression,
+            Expression::Binary { .. } | Expression::Unary { .. }
+        ) {
+            return Ok(Expression::Prefixed {
+                prefix: name,
+                operand: Box::new(expression),
+            });
         }
         match self.apply_specifier(&expression, &name) {
             Some(applied) => Ok(applied),
@@ -11050,8 +11076,8 @@ impl<'s> Assembler<'s> {
                     let specified = matches!(
                         expression,
                         Expression::Symbol { specifier: Some(name), .. }
-                            if name == "lower16" || name == "upper16"
-                    );
+                            if name.starts_with("lower16") || name.starts_with("upper16")
+                    ) || matches!(expression, Expression::Prefixed { .. });
                     if !matches!(expression, Expression::Constant(_)) && !specified {
                         return self.error(
                             spot(index),
@@ -12556,10 +12582,16 @@ fn operand_value(
         OperandEncoder::PowerTwo => (immediate(first) as u64).trailing_zeros() as u64,
         OperandEncoder::HighLowImmediate => match operand {
             MachineOperand::Expression(expression) => {
-                let specifier = match expression {
-                    Expression::Symbol { specifier, .. } => specifier.clone().unwrap_or_default(),
-                    _ => String::new(),
+                let (expression, specifier) = match expression {
+                    Expression::Prefixed { prefix, operand } => (operand.as_ref(), prefix.clone()),
+                    Expression::Symbol { specifier, .. } => {
+                        (expression, specifier.clone().unwrap_or_default())
+                    }
+                    _ => (expression, String::new()),
                 };
+                let specifier = specifier
+                    .split_once(':')
+                    .map_or(specifier.clone(), |(prefix, _)| prefix.to_string());
                 let kind = match (specifier.as_str(), thumb) {
                     ("upper16", false) => Fixup32::MovtHi16,
                     ("upper16", true) => Fixup32::T2MovtHi16,

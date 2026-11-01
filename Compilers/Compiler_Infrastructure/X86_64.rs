@@ -1472,6 +1472,22 @@ pub enum Expression {
         right: Box<Expression>,
     },
     Register(RegisterId),
+    Prefixed {
+        prefix: String,
+        operand: Box<Expression>,
+    },
+}
+
+pub fn prefix_fold(prefix: &str, value: i64) -> i64 {
+    let value = value as i32;
+    i64::from(match prefix {
+        "upper16" => (value & !0xffff) >> 16,
+        "lower16" => value & 0xffff,
+        "upper8_15" => (value & !0x00ff_ffff) >> 24,
+        "upper0_7" => (value & 0x00ff_0000) >> 16,
+        "lower8_15" => (value & 0xff00) >> 8,
+        _ => value & 0xff,
+    })
 }
 
 impl Expression {
@@ -4326,6 +4342,14 @@ pub fn expression_text(
                 }
             }
             out
+        }
+        Expression::Prefixed { prefix, operand } => {
+            let inner = expression_text(target, operand, 0, syntax);
+            if matches!(operand.as_ref(), Expression::Binary { .. }) {
+                format!(":{prefix}:({inner})")
+            } else {
+                format!(":{prefix}:{inner}")
+            }
         }
         Expression::Register(register) => {
             if syntax == Syntax::Att {
@@ -10239,6 +10263,17 @@ impl AssemblyContext {
         match expression {
             Expression::Constant(value) => Some(RelocatableValue::constant(*value)),
             Expression::Register(_) => None,
+            Expression::Prefixed { prefix, operand } => {
+                let inner = self.evaluate_relocatable(operand, layout, in_set)?;
+                if inner.is_absolute() {
+                    Some(RelocatableValue::constant(prefix_fold(
+                        prefix,
+                        inner.constant,
+                    )))
+                } else {
+                    Some(inner)
+                }
+            }
             Expression::Symbol { name, specifier } => {
                 let index = match self.lookup(name) {
                     Some(index) => index,
@@ -11464,7 +11499,7 @@ impl<'s> Assembler<'s> {
 
     fn apply_specifier(&mut self, expression: &Expression, specifier: &str) -> Option<Expression> {
         match expression {
-            Expression::Constant(_) | Expression::Register(_) => None,
+            Expression::Constant(_) | Expression::Register(_) | Expression::Prefixed { .. } => None,
             Expression::Symbol {
                 name,
                 specifier: existing,
@@ -12806,6 +12841,18 @@ impl<'s> Assembler<'s> {
             if parser.check_for_valid_section() {
                 return true;
             }
+            let location = if parser.target.isa == Isa::Armv7 {
+                let mut position = location.position;
+                while parser.lexer.byte(position) == b'(' {
+                    position += 1;
+                }
+                SourceLocation {
+                    buffer: location.buffer,
+                    position,
+                }
+            } else {
+                location
+            };
             let Ok((value, _)) = parser.parse_expression() else {
                 return true;
             };
@@ -26341,7 +26388,7 @@ pub mod object {
                     Some(symbol) => self.place_inner(context, symbol, visiting),
                     None => Place::Undefined,
                 },
-                Expression::Unary { operand, .. } => {
+                Expression::Unary { operand, .. } | Expression::Prefixed { operand, .. } => {
                     self.expression_place(context, operand, visiting)
                 }
                 Expression::Binary {
@@ -26409,6 +26456,9 @@ pub mod object {
             match expression {
                 Expression::Constant(value) => Some(*value),
                 Expression::Register(_) => None,
+                Expression::Prefixed { prefix, operand } => self
+                    .expression_offset(context, operand, visiting)
+                    .map(|value| prefix_fold(prefix, value)),
                 Expression::Symbol { name, .. } => {
                     let symbol = context.lookup(name)?;
                     self.symbol_value_inner(context, symbol, visiting)
@@ -28267,6 +28317,23 @@ pub mod object {
                     FixupKind::Arm32(held) => Some(held),
                     _ => None,
                 };
+                if matches!(
+                    arm_kind,
+                    Some(
+                        armv7::Fixup32::MovwLo16
+                            | armv7::Fixup32::MovtHi16
+                            | armv7::Fixup32::T2MovwLo16
+                            | armv7::Fixup32::T2MovtHi16
+                    )
+                ) && !(-32768..=32767).contains(&target.constant)
+                {
+                    context.report(
+                        MessageKind::Error,
+                        fixup.location,
+                        "Relocation Not In Range",
+                    );
+                    return 0;
+                }
                 return match armv7::elf_relocation(arm_kind, kind.size(), &specifier, pc_relative) {
                     Ok(number) => number,
                     Err(message) => {
@@ -30961,6 +31028,22 @@ pub mod object {
                 }
                 self.emit_integer(constant as u64, size as usize);
                 return;
+            }
+            if context.triple.isa == Isa::Armv7 && size != 4 {
+                if let Expression::Symbol {
+                    specifier: Some(held),
+                    ..
+                } = value
+                {
+                    if held != "none" {
+                        context.report(
+                            MessageKind::Error,
+                            Some(location),
+                            "relocated expression must be 32-bit",
+                        );
+                        return;
+                    }
+                }
             }
             let kind = match size {
                 1 => FixupKind::Data1,

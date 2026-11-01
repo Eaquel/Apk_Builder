@@ -76075,6 +76075,9 @@ mod armv8_assembly {
             std::env::var("APK_BUILDER_TRIPLE").unwrap_or_else(|_| "armv7a-linux-gnueabihf".into());
         let mut options = AssemblerOptions::new(&triple);
         options.show_encoding = true;
+        if std::env::var("APK_BUILDER_OBJECT").is_ok() {
+            options.output = crate::compilers::x86_64::OutputKind::Object;
+        }
         options.source_name = path.clone();
         if let Ok(cpu) = std::env::var("APK_BUILDER_CPU") {
             options.cpu = cpu;
