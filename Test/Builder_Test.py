@@ -42,9 +42,15 @@ BASELINE = TEST / "Builder_Test_Baseline.json"
 REFERENCE_SUITES = ["bundles", "filecheck", "tablegen-lit"]
 ORACLE_SUITES = ["regex-oracle", "tablegen-oracle"]
 SUITE_HOMES = {"tablegen-lit": "table_gen", "tablegen-oracle": "table_gen"}
-KOTLIN_SUITES = ["kotlin-omni"]
+KOTLIN_SUITES = ["kotlin-omni", "kotlin-omni-native"]
 LINKER_SUITES = ["lld-elf", "lld-coff"]
-ASSEMBLER_SUITES = ["mc-x86", "mc-x86-disassembler"]
+ASSEMBLER_SUITES = [
+    "mc-x86",
+    "mc-x86-disassembler",
+    "mc-aarch64",
+    "mc-aarch64-disassembler",
+    "mc-arm",
+]
 RECORDING = {"on": False}
 KOTLIN = ROOT / "Builder/Source/Main/Kotlin/com/apk/builder/Builder.kt"
 KOTLIN_ROOT = ROOT / "Builder/Source/Main/Kotlin"
@@ -918,6 +924,19 @@ def run_suites(names: list[str], threads: int | None = None,
         raise AssertionError(f"these suites printed no result: {silent}")
     return found
 
+def failing_tests(name: str) -> str:
+    """The first few tests a suite failed, read from the report the run just wrote."""
+    report = ROOT / "Tests" / "suites" / f"{name}.txt"
+    try:
+        lines = report.read_text(encoding="utf-8", errors="replace").splitlines()
+    except OSError:
+        return ""
+    failed = [line[len("FAILED "):].strip() for line in lines if line.startswith("FAILED ")]
+    if not failed:
+        return ""
+    shown = ", ".join(failed[:8])
+    return f" ({shown}{', ...' if len(failed) > 8 else ''})"
+
 def hold_ground(found: dict[str, dict]) -> str:
     """No suite may give back a test it once passed.
 
@@ -943,7 +962,10 @@ def hold_ground(found: dict[str, dict]) -> str:
         if now["passed"] < was["passed"]:
             trouble.append(f"{name} passes {now['passed']}, the baseline says {was['passed']}")
         if now["failed"] > was["failed"]:
-            trouble.append(f"{name} fails {now['failed']}, the baseline allows {was['failed']}")
+            trouble.append(
+                f"{name} fails {now['failed']}, the baseline allows {was['failed']}"
+                + failing_tests(name)
+            )
         if now["passed"] > was["passed"] or now["failed"] < was["failed"]:
             gains.append(name)
     if trouble:
@@ -990,7 +1012,7 @@ def check_linker() -> str:
     return hold_ground(run_suites(LINKER_SUITES, module="linker_lit"))
 
 def check_assembler() -> str:
-    """Our x86 assembler keeps every LLVM MC test it has ever passed."""
+    """Our x86 and AArch64 assemblers keep every LLVM MC test they have ever passed."""
     if shutil.which("cargo") is None:
         raise Skip("cargo is not on this machine")
     if not bundles_present():
@@ -1007,7 +1029,7 @@ def kotlin_standard_library() -> Path | None:
     return found[-1] if found else None
 
 def check_kotlin_omni() -> str:
-    """Every Kotlin box test the JVM answers OK answers OK on Omni IR too."""
+    """Every Kotlin box test the JVM answers OK answers OK on Omni IR too, and natively as interpreted."""
     if shutil.which("cargo") is None:
         raise Skip("cargo is not on this machine")
     if not bundles_present():
@@ -1052,7 +1074,7 @@ CHECKS: dict[str, tuple[str, object]] = {
     "determinism": ("the same verdicts on one worker and many", check_determinism),
     "kotlin-omni": ("Kotlin answers the same on Omni IR as on the JVM", check_kotlin_omni),
     "linker": ("our linkers hold their ground on the LLD tests", check_linker),
-    "assembler": ("our x86 assembler holds its ground on the LLVM MC tests", check_assembler),
+    "assembler": ("our x86 and AArch64 assemblers hold their ground on the LLVM MC tests", check_assembler),
 }
 
 DEFAULT = [

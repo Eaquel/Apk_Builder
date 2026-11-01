@@ -56,8 +56,9 @@ Bu bileşenlerin doğruluğu, LLVM/LLD/GCC'nin kendi test paketleriyle ölçül�
 - TableGen: `tablegen-lit` 190/456, `tablegen-oracle` 152/459 (kapsam dışılar listeli, 0 hata); dört komut tablosu.
 - Bağlayıcı: `lld-elf` 1375/2056, `lld-coff` 341/565 (0 hata).
 - x86 (Claude-A, sürüyor): kodlayıcı ve AT&T/Intel yazıcı tamam; AT&T ve Intel assembler
-  tamam; karıştırma/FMA/PTERNLOG/FPCLASS yorumları tamam; `mc-x86` 513/642, kapsam içi %100 (129 kapsam dışı:
-  nesne dosyası çıktısı, COFF/Mach-O/LFI). Disassembler (`X86_64.rs` içinde `decoder` modülü: LLVM
+  tamam; karıştırma/FMA/PTERNLOG/FPCLASS yorumları tamam; ELF nesne dosyası çıktısı (`X86_64.rs` içinde
+  `object` modülü) tamam; `mc-x86` 598/642, kapsam içi %100 (44 kapsam dışı: COFF/Mach-O/LFI, birkaç
+  seçenek ve host LLVM 18 okuyucusunun tanımadığı 5 test, gerekçeleri listeli). Disassembler (`X86_64.rs` içinde `decoder` modülü: LLVM
   X86DisassemblerTables/RecognizableInstr tabloları tablolardan üretilir, X86DisassemblerDecoder portu,
   `llvm-mc --disassemble/--hex/--mdis`) tamam; `mc-x86-disassembler` 188/188, kapsam dışı yok;
   kodla→çöz→aynı komut gidiş-dönüş testi var.
@@ -151,8 +152,21 @@ Not: `pkill -f "cargo test"` kullanma (kendi kabuğunu öldürür); `pgrep -x ru
 ## 9. Güncel durum
 
 - Her hesapta tek oturum çalışır: Claude-A ve Claude-B. Eski `claude/...` dalları silinebilir.
-- Claude-A: x86 assembler ve disassembler tamam: `mc-x86` 513/642 (kapsam içi %100, 129 kapsam dışı),
-  `mc-x86-disassembler` 188/188. Sıradaki adım assembler'dan ELF/COFF nesne dosyası çıktısı.
+- Claude-A: x86 assembler, disassembler ve ELF nesne dosyası çıktısı tamam: `mc-x86` 598/642 (kapsam içi
+  %100, 44 kapsam dışı), `mc-x86-disassembler` 188/188; assembler çıktısı bizim bağlayıcıyla bağlanıp bu
+  makinede çalışıyor. Omni IR → x86_64 arka ucu (`X86_64.rs` içinde `codegen`, çalışma zamanı Omni IR
+  metniyle) ilk sürümde: `kotlin-omni-native` 3846/7711, 0 başarısız (yorumlayıcıda OK veren kutu testleri
+  yerel kodda da OK). ARMv8 (`Armv8.rs`, X86_64.rs'in alt modülü) sürüyor: hedef/eşleyici genelleştirildi
+  ve tablo güdümlü AArch64 kodlayıcı tamam (8871 komutun hepsi için kodlama planı); AArch64 ayrıştırıcı ve ELF
+  nesne çıktısı çalışıyor (46 örnek komut ve etiketli/yeniden konumlandırmalı bir program host llvm-mc ile örtüşüyor);
+  yazıcı (metin çıktısı), yönergeler (.arch/.cpu/.inst/.req...) ve sistem takma adları (dc/ic/at/tlbi) tamam;
+  `mc-aarch64` (ignored test `suite_mc_aarch64`): 345 geçti, 0 başarısız, 2013 kapsam dışı (SVE/SME 1811, big-endian/ILP32/LFI/COFF
+  üçlüleri, host LLVM 18 okuyucu sınırları) ve taban çizgisine yazıldı; AArch64 disassembler (tablo güdümlü kod çözücü + Apple
+  yazım türü + işaretli çıktı) `mc-aarch64-disassembler` 91/95 (0 başarısız, 4 kapsam dışı) ve taban çizgisinde.
+  Eşleme sembolleri ($x/$d, `-implicit-mapsyms`), CFI kayıt adları ve yazım denetimi önerileri tamam.
+  Omni IR → arm64 arka ucu ilk sürümde (`Armv8.rs` içinde `native`: derleme, bağlama ve host llvm-objdump ile çözme
+  doğrulandı; test içinde yazılan AArch64 emülatörü (`mod arm_emulator`, disassembler çıktısını yorumlar) arm64 programlarını çalıştırıp
+  yorumlayıcıyla aynı çıktıyı ve çıkış kodunu verdiğini doğruluyor). İki yerel arka uç da paylaşımlı kütüphane (`.so`, ET_DYN) üretiyor: x86_64 çıktısı `dlopen`/`dlsym` ile, arm64 çıktısı emülatörle çalıştırılıp doğrulandı. ARMv7 (`Armv7.rs`): A32 ayrıştırıcı, eşleyici ve kodlayıcı ilk sürümde (79 komut host llvm-mc ile bayt bayt aynı); sırada Thumb, VFP/NEON, yazıcı, etiket/fixup ve ELF32 REL. Sırada: SVE/SME ve big-endian/ILP32. SVE/SME ilk aşamada kapsam dışı. Çalışma zamanı sayı biçimlendirme/matematik bekliyor.
 - Claude-B: C ön yüzü (`Compilers/Cpp.rs` içinde C kısmı): önişlemci, sözcük çözümleyici, ayrıştırıcı,
   anlam çözümlemesi ve Omni IR'ye indirgeme. Ölçü: Clang'ın `test/Preprocessor`, `test/Lexer`, `test/Parser`,
   `test/Sema` lit testlerinden C olanları, yeni ratchet paketleri (`clang-c-*`), kapsam dışılar gerekçeli listeli.

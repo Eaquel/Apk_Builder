@@ -63610,14 +63610,18 @@ mod reference_checks {
             const { std::cell::RefCell::new(None) };
     }
 
-    fn omni_answer(
+    fn omni_lowered(
         made: &[(String, Vec<u8>)],
         facade: &str,
         library: &[u8],
-    ) -> Result<String, String> {
-        use crate::compilers::compiler_infrastructure::{
-            Datum, Finish, Interpreter, Layout, Limits, Object, StandardHost,
-        };
+    ) -> Result<
+        (
+            crate::compilers::compiler_infrastructure::Module,
+            crate::compilers::compiler_infrastructure::FunctionId,
+        ),
+        String,
+    > {
+        use crate::compilers::compiler_infrastructure::Layout;
         use crate::compilers::kotlin::native::{class_files::ClassFiles, lowering};
         let base = OMNI_BASE.with(|held| {
             let mut held = held.borrow_mut();
@@ -63652,10 +63656,27 @@ mod reference_checks {
         let roots = vec![(facade.to_string(), "box".to_string(), descriptor, true)];
         let lowered = lowering::lower(&mut files, &roots, Layout::Lp64, "box")
             .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
+        Ok((lowered.module, lowered.entries[0]))
+    }
+
+    fn omni_answer(
+        module: &crate::compilers::compiler_infrastructure::Module,
+        entry: crate::compilers::compiler_infrastructure::FunctionId,
+    ) -> Result<String, String> {
+        omni_answer_and_output(module, entry).map(|(answer, _)| answer)
+    }
+
+    fn omni_answer_and_output(
+        module: &crate::compilers::compiler_infrastructure::Module,
+        entry: crate::compilers::compiler_infrastructure::FunctionId,
+    ) -> Result<(String, Vec<u8>), String> {
+        use crate::compilers::compiler_infrastructure::{
+            Datum, Finish, Interpreter, Limits, Object, StandardHost,
+        };
         let mut host = StandardHost;
-        let mut interpreter = Interpreter::new(&lowered.module, &mut host, Limits::default())
+        let mut interpreter = Interpreter::new(module, &mut host, Limits::default())
             .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
-        let handle = match interpreter.call(lowered.entries[0], Vec::new()) {
+        let handle = match interpreter.call(entry, Vec::new()) {
             Ok(Finish::Returned(Some(Datum::Reference(handle)))) => handle,
             Ok(other) => return Err(format!("finishes with {other:?}")),
             Err(problem) => return Err(format!("{} {:?}", problem.code, problem.context)),
@@ -63671,7 +63692,7 @@ mod reference_checks {
                         .iter()
                         .map(|item| item.as_integer().unwrap_or(0) as u16)
                         .collect();
-                    return Ok(String::from_utf16_lossy(&units));
+                    return Ok((String::from_utf16_lossy(&units), machine.stdout().to_vec()));
                 }
             }
         }
@@ -63779,7 +63800,9 @@ mod reference_checks {
                 Some(_) => return Verdict::OutOfScope("the JVM does not answer OK".to_string()),
                 None => return Verdict::OutOfScope("the JVM does not answer in time".to_string()),
             }
-            match omni_answer(&made, &facade, &library) {
+            let answer = omni_lowered(&made, &facade, &library)
+                .and_then(|(module, entry)| omni_answer(&module, entry));
+            match answer {
                 Ok(answer) if answer == "OK" => Verdict::Passed,
                 Ok(answer) => Verdict::Failed(format!("Omni answers {answer}")),
                 Err(problem) => Verdict::Failed(problem),
@@ -63790,6 +63813,184 @@ mod reference_checks {
             outcomes,
         };
         report.publish();
+    }
+
+    fn native_main(
+        module: &mut crate::compilers::compiler_infrastructure::Module,
+        entry: crate::compilers::compiler_infrastructure::FunctionId,
+    ) -> Result<(), String> {
+        use crate::compilers::compiler_infrastructure::{
+            Function, FunctionBuilder, Linkage, Operation, Signature, Type,
+        };
+        let string = module
+            .class_named("java/lang/String")
+            .ok_or_else(|| "the module has no java/lang/String".to_string())?;
+        let field = module
+            .field_types(string)
+            .iter()
+            .position(|ty| *ty == Type::REFERENCE)
+            .ok_or_else(|| "java/lang/String holds no characters".to_string())?;
+        let write = match module.function_named("omni.write_chars") {
+            Some(found) => found,
+            None => module.add_function(Function::new(
+                "omni.write_chars",
+                Signature::new(vec![Type::I32, Type::REFERENCE, Type::I32, Type::I32], None),
+                Linkage::Import,
+            )),
+        };
+        let mut main = Function::new(
+            "omni.main",
+            Signature::new(Vec::new(), Some(Type::I32)),
+            Linkage::Export,
+        );
+        {
+            let mut builder = FunctionBuilder::new(&mut main);
+            let block = builder.create_block();
+            builder.switch_to(block);
+            let answer = builder
+                .call(entry, Some(Type::REFERENCE), Vec::new())
+                .ok_or("box answers nothing")?;
+            let characters = builder
+                .push(
+                    Operation::LoadField(string, field as u32),
+                    vec![answer],
+                    Some(Type::REFERENCE),
+                )
+                .ok_or("no characters")?;
+            let length = builder
+                .push(Operation::ArrayLength, vec![characters], Some(Type::I32))
+                .ok_or("no length")?;
+            let out = builder.integer(Type::I32, 1);
+            let zero = builder.integer(Type::I32, 0);
+            builder.call(write, None, vec![out, characters, zero, length]);
+            builder.ret(Some(zero));
+            builder
+                .finish()
+                .map_err(|problem| format!("{} {:?}", problem.code, problem.context))?;
+        }
+        module.add_function(main);
+        Ok(())
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_kotlin_omni_native() {
+        use crate::compilers::x86_64::codegen;
+        let Some((_, library)) = super::kotlin::standard_library() else {
+            panic!("the kotlin-omni-native suite needs a kotlin-stdlib");
+        };
+        let names = bundle_names("Test_13");
+        let named: Vec<&str> = names.iter().map(String::as_str).collect();
+        let tree = Tree::of(&named).expect("the Kotlin box tests are present");
+        let mut tests: Vec<String> = tree
+            .paths_under(BOX_ROOT)
+            .into_iter()
+            .filter(|path| path.ends_with(".kt"))
+            .collect();
+        if let Ok(filter) = std::env::var("APK_BUILDER_NATIVE_FILTER") {
+            tests.retain(|path| path.contains(&filter));
+        }
+        let outcomes = run_parallel(tests, &|path| {
+            let Some(bytes) = tree.file(path) else {
+                return Verdict::Failed("the test cannot be read".to_string());
+            };
+            let text = String::from_utf8_lossy(bytes).to_string();
+            if let Some(reason) = box_scope(&text) {
+                return Verdict::OutOfScope(reason.to_string());
+            }
+            let file = path.rsplit('/').next().unwrap_or("Main.kt");
+            let (mut kotlin, java_sources) = box_files(file, &text);
+            let Some((box_file, box_text)) = kotlin
+                .iter()
+                .find(|(_, body)| body.contains("fun box()"))
+                .cloned()
+            else {
+                return Verdict::OutOfScope("the test has no box function".to_string());
+            };
+            let facade = super::kotlin::facade_of(&box_file, &box_text);
+            if text.contains("kotlin.test") {
+                kotlin.push((
+                    "Test.kt".to_string(),
+                    super::kotlin::KOTLIN_TEST.to_string(),
+                ));
+            }
+            let made = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+                super::kotlin::compiled(&kotlin, &java_sources, &library)
+            }));
+            let Ok(Ok(made)) = made else {
+                return Verdict::OutOfScope("our compiler does not build it yet".to_string());
+            };
+            let Ok((mut module, entry)) = omni_lowered(&made, &facade, &library) else {
+                return Verdict::OutOfScope("it does not lower to Omni IR yet".to_string());
+            };
+            let printed = match omni_answer_and_output(&module, entry) {
+                Ok((answer, printed)) if answer == "OK" => printed,
+                _ => return Verdict::OutOfScope("the interpreter does not answer OK".to_string()),
+            };
+            if let Err(problem) = native_main(&mut module, entry) {
+                return Verdict::Failed(problem);
+            }
+            let program = match codegen::build_executable(&module, "omni.main") {
+                Ok(program) => program,
+                Err(problem) if problem.code == "EI500" => {
+                    let feature = problem
+                        .context
+                        .iter()
+                        .find_map(|line| line.strip_prefix("Feature: "))
+                        .unwrap_or("something")
+                        .to_string();
+                    let feature = match feature.strip_prefix("the runtime function ") {
+                        Some(name) => format!("the runtime function {name}"),
+                        None => feature,
+                    };
+                    return Verdict::OutOfScope(format!("native code: {feature}"));
+                }
+                Err(problem) => {
+                    return Verdict::Failed(format!("{} {:?}", problem.message, problem.context))
+                }
+            };
+            let name: String = path[BOX_ROOT.len()..]
+                .chars()
+                .map(|character| {
+                    if character.is_ascii_alphanumeric() {
+                        character
+                    } else {
+                        '_'
+                    }
+                })
+                .collect();
+            let Some((code, said, complained)) = super::native_x86_64::run_native(&program, &name)
+            else {
+                return Verdict::OutOfScope(
+                    "this machine cannot run x86_64 Linux programs".to_string(),
+                );
+            };
+            let complained = String::from_utf8_lossy(&complained).to_string();
+            if code == Some(135) {
+                if let Some(missing) = complained
+                    .lines()
+                    .find_map(|line| line.strip_prefix("omni: missing function "))
+                {
+                    return Verdict::OutOfScope(format!(
+                        "native code: the runtime function {missing}"
+                    ));
+                }
+            }
+            let said = String::from_utf8_lossy(&said).to_string();
+            let expected = format!("{}OK", String::from_utf8_lossy(&printed));
+            if code == Some(0) && said == expected {
+                Verdict::Passed
+            } else {
+                Verdict::Failed(format!(
+                    "the native program exits {code:?} and says {said:?}"
+                ))
+            }
+        });
+        let report = SuiteReport {
+            name: "kotlin-omni-native".to_string(),
+            outcomes,
+        };
+        super::table_gen::publish_with_scope(&report);
     }
 
     #[test]
@@ -67511,7 +67712,7 @@ def op {
         assert!(has(&x86_64, "GR32") && has(&x86_64, "EAX") && has(&x86_64, "MRMDestReg"));
         let armv7 = read("Armv7");
         assert!(has(&armv7, "t2ADDri") && has(&armv7, "VADDfq") && has(&armv7, "SDIV"));
-        assert!(!has(&armv7, "MVE_VADDf32") && !has(&armv7, "LDA") && !has(&armv7, "VSELEQD"));
+        assert!(has(&armv7, "MVE_VADDf32") && has(&armv7, "LDA") && has(&armv7, "VSELEQD"));
         let inst = armv7
             .record("t2ADDri")
             .and_then(|record| record.field("Inst"));
@@ -70167,6 +70368,14 @@ mod linker_lit {
                                 ));
                             }
                         }
+                        if arguments[0].as_str() == "llvm-objdump"
+                            && said.contains("is not a recognized feature for this target")
+                        {
+                            world.missing_tool.get_or_insert(
+                                "llvm-objdump on this machine does not know the requested feature"
+                                    .to_string(),
+                            );
+                        }
                         if status != 0 && said.contains("SHT_CREL") {
                             world.missing_tool.get_or_insert(format!(
                                 "{} on this machine does not know SHT_CREL",
@@ -71493,10 +71702,7 @@ mod x86_assembly {
                 "filetype" => match value.as_str() {
                     "asm" => options.output = OutputKind::Assembly,
                     "null" => options.output = OutputKind::Null,
-                    "obj" => {
-                        options.output = OutputKind::Object;
-                        unsupported.get_or_insert("llvm-mc -filetype=obj".to_string());
-                    }
+                    "obj" => options.output = OutputKind::Object,
                     _ => {
                         unsupported.get_or_insert(format!("llvm-mc -filetype={value}"));
                     }
@@ -71516,6 +71722,10 @@ mod x86_assembly {
                     });
                 }
                 "show-encoding" => options.show_encoding = true,
+                "implicit-mapsyms" => options.implicit_mapping_symbols = true,
+                "fatal-warnings" => options.fatal_warnings = true,
+                "no-deprecated-warn" => options.no_deprecated_warn = true,
+                "fdpic" => options.fdpic = true,
                 "show-inst-operands" => options.show_instruction_operands = true,
                 "print-imm-hex" => {
                     options.hexadecimal_immediates = value != "false" && value != "0"
@@ -71548,12 +71758,29 @@ mod x86_assembly {
                     disassemble = true;
                     unsupported.get_or_insert("llvm-mc --cdis".to_string());
                 }
-                "x86-align-branch-boundary"
-                | "x86-align-branch"
-                | "x86-pad-max-prefix-size"
-                | "x86-pad-for-align"
-                | "x86-branches-within-32B-boundaries" => {
-                    unsupported.get_or_insert(format!("llvm-mc -{name}"));
+                "x86-align-branch-boundary" => match value.parse::<u64>() {
+                    Ok(boundary) => options.align_branch_boundary = boundary,
+                    Err(_) => {
+                        unsupported.get_or_insert(format!("llvm-mc -{name}={value}"));
+                    }
+                },
+                "x86-align-branch" => {
+                    options.align_branch = value.split('+').map(str::to_string).collect();
+                }
+                "x86-pad-max-prefix-size" => match value.parse::<u32>() {
+                    Ok(size) => options.pad_max_prefix_size = Some(size),
+                    Err(_) => {
+                        unsupported.get_or_insert(format!("llvm-mc -{name}={value}"));
+                    }
+                },
+                "x86-pad-for-align" => {
+                    options.pad_for_align = value != "0" && value != "false";
+                }
+                "x86-relax-relocations" => {
+                    options.relax_relocations = value != "0" && value != "false";
+                }
+                "x86-branches-within-32B-boundaries" => {
+                    options.branches_within_32_byte_boundaries = value != "0" && value != "false";
                 }
                 "masm-integers" => options.masm_integers = true,
                 _ => {
@@ -71562,9 +71789,26 @@ mod x86_assembly {
             }
         }
         let triple = match (triple, architecture) {
-            (Some(triple), _) => triple,
+            (Some(triple), Some(architecture)) => {
+                let replaced = match architecture.as_str() {
+                    "x86" => Some("i386"),
+                    "x86-64" => Some("x86_64"),
+                    "aarch64" => Some("aarch64"),
+                    "arm64" => Some("arm64"),
+                    "arm" => Some("arm"),
+                    "thumb" => Some("thumb"),
+                    _ => None,
+                };
+                match (replaced, triple.split_once('-')) {
+                    (Some(name), Some((_, rest))) => format!("{name}-{rest}"),
+                    (Some(name), None) => name.to_string(),
+                    (None, _) => triple,
+                }
+            }
+            (Some(triple), None) => triple,
             (None, Some(architecture)) => match architecture.as_str() {
                 "x86" => "i386-unknown-unknown".to_string(),
+                "aarch64" | "arm64" => format!("{architecture}-unknown-unknown"),
                 _ => "x86_64-unknown-unknown".to_string(),
             },
             (None, None) => "x86_64-unknown-linux-gnu".to_string(),
@@ -71575,11 +71819,43 @@ mod x86_assembly {
             || triple.starts_with("i586")
             || triple.starts_with("i486")
             || triple.starts_with("x86-")
-            || triple.starts_with("amd64"))
+            || triple.starts_with("amd64")
+            || triple == "aarch64"
+            || triple == "arm64"
+            || triple.starts_with("aarch64-")
+            || triple.starts_with("arm64-")
+            || (triple.starts_with("arm")
+                && !triple.starts_with("arm64")
+                && !triple.starts_with("armeb"))
+            || (triple.starts_with("thumb") && !triple.starts_with("thumbeb")))
         {
             unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
         }
+        if (triple.starts_with("arm") || triple.starts_with("thumb"))
+            && triple
+                .split('-')
+                .next()
+                .is_some_and(|name| name.ends_with("eb"))
+        {
+            unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
+        }
+        if triple.starts_with("aarch64") || triple.starts_with("arm64") {
+            if options.features.iter().any(|feature| {
+                let name = feature.trim_start_matches(['+', '-']);
+                name.starts_with("sve") || name.starts_with("sme") || name.starts_with("ssve")
+            }) {
+                unsupported.get_or_insert("llvm-mc AArch64 SVE and SME".to_string());
+            }
+            if triple.contains("_be") || triple.contains("ilp32") || triple.contains("arm64_32") {
+                unsupported.get_or_insert(format!("llvm-mc -triple {triple}"));
+            }
+        }
         let parsed = TargetTriple::parse(&triple);
+        if (triple.contains("darwin") || triple.contains("apple") || triple.contains("macos"))
+            && !disassemble
+        {
+            unsupported.get_or_insert("llvm-mc Mach-O triple".to_string());
+        }
         if parsed.format == ObjectFormat::MachObject && !disassemble {
             unsupported.get_or_insert("llvm-mc Mach-O triple".to_string());
         }
@@ -71626,7 +71902,7 @@ mod x86_assembly {
                     text.push_str(&field("Marker").unwrap_or_default());
                     text.push('\n');
                 }
-                None => text.push_str(&format!("llvm-mc: {kind}: {cause}\n")),
+                None => text.push_str(&format!("<unknown>:0: {kind}: {cause}\n")),
             }
         }
         text
@@ -71674,7 +71950,20 @@ mod x86_assembly {
             }
         };
         let diagnostics = render_messages(&result);
-        let stderr = format_assembly_messages(&diagnostics);
+        let mut stderr = format_assembly_messages(&diagnostics);
+        if options.triple.starts_with("aarch64") || options.triple.starts_with("arm64") {
+            if let Ok(target) = crate::compilers::x86_64::armv8::target() {
+                let mut notices = String::new();
+                for name in
+                    crate::compilers::x86_64::armv8::unknown_features(target, &options.features)
+                {
+                    notices.push_str(&format!(
+                        "'{name}' is not a recognized feature for this target (ignoring feature)\n"
+                    ));
+                }
+                stderr.insert_str(0, &notices);
+            }
+        }
         let status = if result.failed { 1 } else { 0 };
         let mut stdout = Vec::new();
         match parsed.output.as_deref() {
@@ -71702,6 +71991,140 @@ mod x86_assembly {
         tools
     }
 
+    const MC_VECTOR_EXTENSION_TESTS: &[&str] = &[
+        "MC/AArch64/directive-arch_extension.s",
+        "MC/AArch64/FP8/directive-arch.s",
+        "MC/AArch64/FP8/directive-arch-negative.s",
+        "MC/Disassembler/AArch64/mattr-all.txt",
+    ];
+
+    const MC_HOST_READER_LIMITS: &[(&str, &str)] = &[
+        (
+            "MC/AArch64/armv9a-tlbip.s",
+            "llvm-objdump 18 prints the TLBIP nXS operations as generic SYSP instructions",
+        ),
+        (
+            "MC/AArch64/data-directive-specifier.s",
+            "llvm-readobj 18 does not name R_AARCH64_FUNCINIT64, whose number is not in the available sources",
+        ),
+        (
+            "MC/AArch64/arm64-elf-relocs.s",
+            "llvm-objdump 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
+            "MC/AArch64/adrp-auth-relocation.s",
+            "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
+            "MC/AArch64/elf-reloc-ptrauth.s",
+            "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
+            "MC/AArch64/tls-auth-relocs.s",
+            "llvm-readobj 18 does not name the R_AARCH64_AUTH_* relocations, whose numbers are not in the available sources",
+        ),
+        (
+            "MC/AArch64/build-attributes-asm-arch-specific-empty.s",
+            "llvm-readelf 18 prints nothing for --arch-specific on AArch64 objects",
+        ),
+        (
+            "MC/AArch64/build-attributes-asm-arch-specific.s",
+            "llvm-readelf 18 prints nothing for --arch-specific on AArch64 objects",
+        ),
+        (
+            "MC/AArch64/armv9.4a-gcs.s",
+            "llvm-objdump 18 prints the GCSSTR operand without the brackets the test names",
+        ),
+        (
+            "MC/AArch64/armv9.5a-pauthlr.s",
+            "llvm-objdump 18 does not decode the PAuth_LR instructions the test lists",
+        ),
+        (
+            "MC/AArch64/armv9.5a-tlbiw.s",
+            "llvm-objdump 18 prints the TLBIW operations as generic SYS instructions",
+        ),
+        (
+            "MC/AArch64/armv9.6a-mpam.s",
+            "llvm-objdump 18 prints the Armv9.6-A MPAM system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.6a-pcdphint.s",
+            "llvm-objdump 18 does not decode STSHH",
+        ),
+        (
+            "MC/AArch64/armv9.6a-rme-gpc3.s",
+            "llvm-objdump 18 prints APAS as a generic SYS instruction",
+        ),
+        (
+            "MC/AArch64/armv9.6a-srmask.s",
+            "llvm-objdump 18 prints the SCTLRMASK system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.6a-statistical-profiling.s",
+            "llvm-objdump 18 prints the Armv9.6-A statistical profiling system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.6a-trbe-exception.s",
+            "llvm-objdump 18 prints the TRBE exception system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9.7-scr2.s",
+            "llvm-objdump 18 prints SCR2_EL3 by its encoding",
+        ),
+        (
+            "MC/AArch64/armv8.3a-signed-pointer.s",
+            "llvm-mc 18 prints the blank source lines after the initial .text that the expected output omits",
+        ),
+        (
+            "MC/AArch64/cfi_val_offset.s",
+            "llvm-dwarfdump 18 prints DW_CFA_advance_loc without the target address",
+        ),
+        (
+            "MC/AArch64/cfi_set_ra_state.s",
+            "llvm-dwarfdump 18 does not know DW_CFA_AARCH64_set_ra_state",
+        ),
+        (
+            "MC/AArch64/patchinst.s",
+            "llvm-objdump 18 does not know R_AARCH64_PATCHINST",
+        ),
+        (
+            "MC/AArch64/armv9.6a-lsui.s",
+            "llvm-objdump 18 does not decode the LSUI instructions",
+        ),
+        (
+            "MC/AArch64/armv9.7a-mpamv2.s",
+            "llvm-objdump 18 prints the MPAMv2 system registers by their encoding",
+        ),
+        (
+            "MC/AArch64/armv9-mrrs.s",
+            "llvm-objdump 18 does not decode MRRS",
+        ),
+        (
+            "MC/AArch64/armv9-msrr.s",
+            "llvm-objdump 18 does not decode MSRR",
+        ),
+        (
+            "MC/X86/gotpcrelx.s",
+            "llvm-readobj prints relocation 43 as Unknown; the test names it R_X86_64_CODE_4_GOTPCRELX",
+        ),
+        (
+            "MC/X86/elf-reloc-tls.s",
+            "llvm-readobj prints relocations 44 and 50 as Unknown; the test names them R_X86_64_CODE_4_GOTTPOFF and R_X86_64_CODE_6_GOTTPOFF",
+        ),
+        (
+            "MC/X86/tlsdesc-64.s",
+            "llvm-objdump prints relocation 45 as Unknown; the test names it R_X86_64_CODE_4_GOTPC32_TLSDESC",
+        ),
+        (
+            "MC/X86/reloc-directive-elf-64.s",
+            "llvm-readobj prints relocation 43 as Unknown; the test names it R_X86_64_CODE_4_GOTPCRELX",
+        ),
+        (
+            "MC/X86/Relocations/evex-mem.s",
+            "llvm-objdump does not decode the AVX10.2 instructions the test lists",
+        ),
+    ];
+
     fn mc_suite(name: &str, folder: &str) {
         let names: Vec<String> = catalogue()
             .unwrap_or_default()
@@ -71723,6 +72146,8 @@ mod x86_assembly {
             "host-byteorder-little-endian",
             "non-root-user",
             "x86-registered-target",
+            "aarch64-registered-target",
+            "arm-registered-target",
             "asserts",
         ];
         let suite = LitSuite {
@@ -71731,7 +72156,35 @@ mod x86_assembly {
             substitutions: vec![("%python".to_string(), "python3".to_string())],
             tools: mc_tools(),
         };
-        let outcomes = run_parallel(tests, &|path| suite.run_test(path));
+        let outcomes: BTreeMap<String, Verdict> = run_parallel(tests, &|path| suite.run_test(path))
+            .into_iter()
+            .map(|(path, verdict)| {
+                let limit = MC_HOST_READER_LIMITS
+                    .iter()
+                    .find(|(test, _)| path.ends_with(test));
+                let vector_extension = path
+                    .split("/MC/AArch64/")
+                    .nth(1)
+                    .and_then(|rest| rest.split('/').next())
+                    .is_some_and(|folder| folder.starts_with("SVE") || folder.starts_with("SME"))
+                    || MC_VECTOR_EXTENSION_TESTS
+                        .iter()
+                        .any(|test| path.ends_with(test));
+                match (verdict, limit) {
+                    (Verdict::Failed(_), _) if vector_extension => (
+                        path,
+                        Verdict::OutOfScope(
+                            "AArch64 SVE and SME are not implemented yet".to_string(),
+                        ),
+                    ),
+                    (Verdict::Failed(_), Some((_, reason))) => (
+                        path,
+                        Verdict::OutOfScope(format!("host LLVM 18.1.3 reader: {reason}")),
+                    ),
+                    (verdict, _) => (path, verdict),
+                }
+            })
+            .collect();
         let mut listing = String::new();
         for (path, verdict) in &outcomes {
             if let Verdict::OutOfScope(reason) = verdict {
@@ -71752,6 +72205,24 @@ mod x86_assembly {
     #[ignore]
     fn suite_mc_x86() {
         mc_suite("mc-x86", "MC/X86");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_aarch64() {
+        mc_suite("mc-aarch64", "MC/AArch64");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_arm() {
+        mc_suite("mc-arm", "MC/ARM");
+    }
+
+    #[test]
+    #[ignore]
+    fn suite_mc_aarch64_disassembler() {
+        mc_suite("mc-aarch64-disassembler", "MC/Disassembler/AArch64");
     }
 
     #[test]
@@ -72032,6 +72503,18 @@ mod x86_assembly {
         if std::env::var("APK_BUILDER_MC_INTEL").is_ok() {
             options.input_syntax = Syntax::Intel;
         }
+        if let Ok(path) = std::env::var("APK_BUILDER_MC_OBJECT") {
+            options.output = OutputKind::Object;
+            options.show_encoding = false;
+            if let Ok(cpu) = std::env::var("APK_BUILDER_MC_CPU") {
+                options.cpu = cpu;
+            }
+            let result =
+                assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+            std::fs::write(&path, &result.output).expect("the object is written");
+            eprintln!("{}", format_assembly_messages(&render_messages(&result)));
+            return;
+        }
         let result = if std::env::var("APK_BUILDER_MC_DISASSEMBLE").is_ok() {
             options.show_encoding = std::env::var("APK_BUILDER_MC_ENCODING").is_ok();
             disassemble_source(&options, source.as_bytes(), false)
@@ -72041,5 +72524,3800 @@ mod x86_assembly {
         .expect("the assembler starts");
         eprintln!("{}", String::from_utf8_lossy(&result.output));
         eprintln!("{}", format_assembly_messages(&render_messages(&result)));
+    }
+
+    #[test]
+    fn an_object_we_assemble_links_with_our_linker_and_runs_here() {
+        let source = "    .text\n\
+                      \x20   .globl _start\n\
+                      \x20   .type _start, @function\n\
+                      _start:\n\
+                      \x20   call compute\n\
+                      \x20   movl %eax, %edi\n\
+                      \x20   movl $60, %eax\n\
+                      \x20   syscall\n\
+                      compute:\n\
+                      \x20   .cfi_startproc\n\
+                      \x20   movl $40, %eax\n\
+                      \x20   addl value(%rip), %eax\n\
+                      \x20   jmp done\n\
+                      \x20   .p2align 4\n\
+                      done:\n\
+                      \x20   ret\n\
+                      \x20   .cfi_endproc\n\
+                      \x20   .data\n\
+                      value:\n\
+                      \x20   .long 2\n";
+        let mut options = AssemblerOptions::new("x86_64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        let result =
+            assemble_source(&options, source.as_bytes(), None).expect("the assembler starts");
+        let messages = format_assembly_messages(&render_messages(&result));
+        assert!(messages.is_empty(), "the assembler complains:\n{messages}");
+        let object = result.output;
+        assert_eq!(
+            &object[..4],
+            b"\x7fELF",
+            "the assembler writes an ELF object"
+        );
+        let arguments: Vec<String> = ["-o", "program", "program.o"]
+            .iter()
+            .map(|word| word.to_string())
+            .collect();
+        let reader = |path: &str| (path == "program.o").then(|| object.clone());
+        let outcome = crate::compilers::linker::link(&arguments, &reader);
+        assert!(
+            outcome.succeeded(),
+            "our linker refuses the object: {:?}",
+            outcome.messages
+        );
+        let (_, program) = outcome
+            .outputs
+            .iter()
+            .find(|(name, _)| name == "program")
+            .expect("the linker writes the program");
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return;
+        }
+        let path =
+            std::env::temp_dir().join(format!("apk_builder_assembled_{}", std::process::id()));
+        std::fs::write(&path, program).expect("the program is written");
+        {
+            use std::os::unix::fs::PermissionsExt;
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755))
+                .expect("the program becomes executable");
+        }
+        let status = std::process::Command::new(&path)
+            .status()
+            .expect("the program starts");
+        let _ = std::fs::remove_file(&path);
+        assert_eq!(status.code(), Some(42), "the program computes 40 + 2");
+    }
+}
+
+mod arm_emulator {
+    use crate::compilers::x86_64::armv8;
+    use crate::compilers::x86_64::{MachineInstruction, MachineOperand, Target};
+    use std::collections::BTreeMap;
+
+    pub(super) struct Outcome {
+        pub(super) exit: Option<i32>,
+        pub(super) stdout: Vec<u8>,
+    }
+
+    struct Memory {
+        pages: BTreeMap<u64, Box<[u8; 4096]>>,
+    }
+
+    impl Memory {
+        fn page(&mut self, address: u64) -> &mut [u8; 4096] {
+            self.pages
+                .entry(address >> 12)
+                .or_insert_with(|| Box::new([0u8; 4096]))
+        }
+
+        fn read(&mut self, address: u64, size: usize) -> u64 {
+            let mut value = 0u64;
+            for index in 0..size {
+                let at = address.wrapping_add(index as u64);
+                let byte = self.page(at)[(at & 0xfff) as usize];
+                value |= u64::from(byte) << (8 * index);
+            }
+            value
+        }
+
+        fn write(&mut self, address: u64, size: usize, value: u64) {
+            for index in 0..size {
+                let at = address.wrapping_add(index as u64);
+                self.page(at)[(at & 0xfff) as usize] = (value >> (8 * index)) as u8;
+            }
+        }
+
+        fn bytes(&mut self, address: u64, count: usize) -> Vec<u8> {
+            (0..count)
+                .map(|index| self.read(address.wrapping_add(index as u64), 1) as u8)
+                .collect()
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Register {
+        General { number: usize, wide: bool },
+        Zero { wide: bool },
+        Stack { wide: bool },
+        Vector { number: usize, bits: u32 },
+    }
+
+    struct Machine<'t> {
+        target: &'t Target,
+        memory: Memory,
+        x: [u64; 32],
+        sp: u64,
+        v: [[u64; 2]; 32],
+        n: bool,
+        z: bool,
+        c: bool,
+        overflow: bool,
+        pc: u64,
+        break_address: u64,
+        map_address: u64,
+        stdout: Vec<u8>,
+        stderr: Vec<u8>,
+        exit: Option<i32>,
+    }
+
+    fn register_of(target: &Target, operand: &MachineOperand) -> Register {
+        let record = target.registers[operand.register() as usize]
+            .record
+            .as_str();
+        match record {
+            "XZR" => Register::Zero { wide: true },
+            "WZR" => Register::Zero { wide: false },
+            "SP" => Register::Stack { wide: true },
+            "WSP" => Register::Stack { wide: false },
+            "FP" => Register::General {
+                number: 29,
+                wide: true,
+            },
+            "LR" => Register::General {
+                number: 30,
+                wide: true,
+            },
+            _ => {
+                let (letter, digits) = record.split_at(1);
+                let number: usize = digits
+                    .parse()
+                    .unwrap_or_else(|_| panic!("a register the emulator knows: {record}"));
+                match letter {
+                    "X" => Register::General { number, wide: true },
+                    "W" => Register::General {
+                        number,
+                        wide: false,
+                    },
+                    "B" => Register::Vector { number, bits: 8 },
+                    "H" => Register::Vector { number, bits: 16 },
+                    "S" => Register::Vector { number, bits: 32 },
+                    "D" => Register::Vector { number, bits: 64 },
+                    "Q" => Register::Vector { number, bits: 128 },
+                    _ => panic!("a register the emulator knows: {record}"),
+                }
+            }
+        }
+    }
+
+    fn mask(wide: bool) -> u64 {
+        if wide {
+            u64::MAX
+        } else {
+            0xffff_ffff
+        }
+    }
+
+    fn sign_extend(value: u64, bits: u32) -> i64 {
+        let shift = 64 - bits;
+        ((value << shift) as i64) >> shift
+    }
+
+    fn add_with_carry(
+        left: u64,
+        right: u64,
+        carry: bool,
+        wide: bool,
+    ) -> (u64, bool, bool, bool, bool) {
+        let bits = if wide { 64 } else { 32 };
+        let left = left & mask(wide);
+        let right = right & mask(wide);
+        let total = u128::from(left) + u128::from(right) + u128::from(carry);
+        let result = (total as u64) & mask(wide);
+        let carry_out = (total >> bits) & 1 == 1;
+        let signed =
+            sign_extend(left, bits) as i128 + sign_extend(right, bits) as i128 + i128::from(carry);
+        let overflow = signed != sign_extend(result, bits) as i128;
+        let negative = (result >> (bits - 1)) & 1 == 1;
+        (result, negative, result == 0, carry_out, overflow)
+    }
+
+    fn decode_shift(kind: u64, value: u64, amount: u32, wide: bool) -> u64 {
+        let bits = if wide { 64 } else { 32 };
+        let value = value & mask(wide);
+        let amount = amount % bits;
+        let result = match kind {
+            0 => value << amount,
+            1 => value >> amount,
+            2 => (sign_extend(value, bits) >> amount) as u64,
+            _ => {
+                if amount == 0 {
+                    value
+                } else {
+                    (value >> amount) | (value << (bits - amount))
+                }
+            }
+        };
+        result & mask(wide)
+    }
+
+    fn replicate_bit_mask(value: u64, wide: bool) -> u64 {
+        armv8::decode_logical_immediate(value, if wide { 64 } else { 32 })
+    }
+
+    impl<'t> Machine<'t> {
+        fn read(&self, register: Register) -> u64 {
+            match register {
+                Register::General { number, wide } => self.x[number] & mask(wide),
+                Register::Zero { .. } => 0,
+                Register::Stack { wide } => self.sp & mask(wide),
+                Register::Vector { number, bits } => {
+                    if bits >= 64 {
+                        self.v[number][0]
+                    } else {
+                        self.v[number][0] & ((1u64 << bits) - 1)
+                    }
+                }
+            }
+        }
+
+        fn write(&mut self, register: Register, value: u64) {
+            match register {
+                Register::General { number, wide } => self.x[number] = value & mask(wide),
+                Register::Zero { .. } => {}
+                Register::Stack { wide } => self.sp = value & mask(wide),
+                Register::Vector { number, bits } => {
+                    self.v[number][0] = if bits >= 64 {
+                        value
+                    } else {
+                        value & ((1u64 << bits) - 1)
+                    };
+                    self.v[number][1] = 0;
+                }
+            }
+        }
+
+        fn condition(&self, code: i64) -> bool {
+            let base = match code >> 1 {
+                0 => self.z,
+                1 => self.c,
+                2 => self.n,
+                3 => self.overflow,
+                4 => self.c && !self.z,
+                5 => self.n == self.overflow,
+                6 => self.n == self.overflow && !self.z,
+                _ => true,
+            };
+            if code & 1 == 1 && code != 15 {
+                !base
+            } else {
+                base
+            }
+        }
+
+        fn set_flags(&mut self, flags: (u64, bool, bool, bool, bool)) {
+            self.n = flags.1;
+            self.z = flags.2;
+            self.c = flags.3;
+            self.overflow = flags.4;
+        }
+
+        fn syscall(&mut self) {
+            let number = self.x[8];
+            let (a0, a1, a2) = (self.x[0], self.x[1], self.x[2]);
+            match number {
+                64 => {
+                    let data = self.memory.bytes(a1, a2 as usize);
+                    match a0 {
+                        1 => self.stdout.extend_from_slice(&data),
+                        2 => self.stderr.extend_from_slice(&data),
+                        _ => {}
+                    }
+                    self.x[0] = a2;
+                }
+                93 | 94 => self.exit = Some(a0 as u32 as i32),
+                214 => {
+                    if a0 != 0 {
+                        self.break_address = a0;
+                    }
+                    self.x[0] = self.break_address;
+                }
+                222 => {
+                    let length = (a1 + 0xfff) & !0xfff;
+                    self.x[0] = self.map_address;
+                    self.map_address += length;
+                }
+                215 => self.x[0] = 0,
+                113 => {
+                    self.memory.write(a1, 8, 0);
+                    self.memory.write(a1 + 8, 8, 0);
+                    self.x[0] = 0;
+                }
+                _ => panic!("the emulator knows system call {number}"),
+            }
+        }
+
+        fn step(&mut self, instruction: &MachineInstruction) {
+            let target = self.target;
+            let record = target.instructions[instruction.opcode].record.clone();
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            let next = self.pc.wrapping_add(4);
+            let mut jump: Option<u64> = None;
+            let name = record.as_str();
+            let wide_of = |register: Register| match register {
+                Register::General { wide, .. }
+                | Register::Zero { wide }
+                | Register::Stack { wide } => wide,
+                Register::Vector { bits, .. } => bits == 64,
+            };
+            match name {
+                "NOP" | "HINT" | "DMB" | "DSB" | "ISB" | "CLREX" => {}
+                "SVC" => self.syscall(),
+                "BRK" | "UDF" => panic!("the program executed a trap at {:#x}", self.pc),
+                "B" => jump = Some(self.pc.wrapping_add((imm(0) * 4) as u64)),
+                "BL" => {
+                    self.x[30] = next;
+                    jump = Some(self.pc.wrapping_add((imm(0) * 4) as u64));
+                }
+                "BR" => jump = Some(self.read(reg(0))),
+                "BLR" => {
+                    let destination = self.read(reg(0));
+                    self.x[30] = next;
+                    jump = Some(destination);
+                }
+                "RET" => jump = Some(self.read(reg(0))),
+                "Bcc" => {
+                    if self.condition(imm(0)) {
+                        jump = Some(self.pc.wrapping_add((imm(1) * 4) as u64));
+                    }
+                }
+                "CBZW" | "CBZX" | "CBNZW" | "CBNZX" => {
+                    let register = reg(0);
+                    let zero = self.read(register) == 0;
+                    if zero == name.starts_with("CBZ") {
+                        jump = Some(self.pc.wrapping_add((imm(1) * 4) as u64));
+                    }
+                }
+                "TBZW" | "TBZX" | "TBNZW" | "TBNZX" => {
+                    let set = (self.read(reg(0)) >> imm(1)) & 1 == 1;
+                    if set == name.starts_with("TBNZ") {
+                        jump = Some(self.pc.wrapping_add((imm(2) * 4) as u64));
+                    }
+                }
+                "ADR" => {
+                    let value = self.pc.wrapping_add(imm(1) as u64);
+                    self.write(reg(0), value);
+                }
+                "ADRP" => {
+                    let value = (self.pc & !0xfff).wrapping_add((imm(1) << 12) as u64);
+                    self.write(reg(0), value);
+                }
+                _ => self.execute(name, instruction, &mut jump, &wide_of),
+            }
+            self.pc = jump.unwrap_or(next);
+        }
+
+        #[allow(clippy::cognitive_complexity)]
+        fn execute(
+            &mut self,
+            name: &str,
+            instruction: &MachineInstruction,
+            jump: &mut Option<u64>,
+            wide_of: &dyn Fn(Register) -> bool,
+        ) {
+            let _ = jump;
+            let target = self.target;
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            let family = |prefixes: &[&str], suffixes: &[&str]| -> Option<(String, String)> {
+                for prefix in prefixes {
+                    if let Some(rest) = name.strip_prefix(prefix) {
+                        for suffix in suffixes {
+                            if rest == *suffix {
+                                return Some((prefix.to_string(), suffix.to_string()));
+                            }
+                        }
+                    }
+                }
+                None
+            };
+            let arithmetic = family(
+                &["ADDS", "SUBS", "ADD", "SUB"],
+                &["Wri", "Xri", "Wrs", "Xrs", "Wrx", "Xrx", "Xrx64"],
+            );
+            if let Some((operation, form)) = arithmetic {
+                let wide = form.starts_with('X');
+                let rd = reg(0);
+                let left = self.read(reg(1));
+                let right = match form.as_str() {
+                    "Wri" | "Xri" => (imm(2) as u64) << imm(3),
+                    "Wrs" | "Xrs" => {
+                        let amount = (imm(3) & 0x3f) as u32;
+                        decode_shift(((imm(3) >> 6) & 3) as u64, self.read(reg(2)), amount, wide)
+                    }
+                    _ => {
+                        let extend = imm(3) as u64;
+                        let option = (extend >> 3) & 7;
+                        let amount = (extend & 7) as u32;
+                        let value = self.read(reg(2));
+                        let extended = match option {
+                            0 => value & 0xff,
+                            1 => value & 0xffff,
+                            2 => value & 0xffff_ffff,
+                            3 => value,
+                            4 => sign_extend(value & 0xff, 8) as u64,
+                            5 => sign_extend(value & 0xffff, 16) as u64,
+                            6 => sign_extend(value & 0xffff_ffff, 32) as u64,
+                            _ => value,
+                        };
+                        extended << amount
+                    }
+                };
+                let subtract = operation.starts_with("SUB");
+                let flags = if subtract {
+                    add_with_carry(left, !right, true, wide)
+                } else {
+                    add_with_carry(left, right, false, wide)
+                };
+                if operation.ends_with('S') {
+                    self.set_flags(flags);
+                }
+                self.write(rd, flags.0);
+                return;
+            }
+            let logical = family(
+                &["ANDS", "AND", "ORR", "EOR", "BICS", "BIC", "ORN", "EON"],
+                &["Wri", "Xri", "Wrs", "Xrs"],
+            );
+            if let Some((operation, form)) = logical {
+                let wide = form.starts_with('X');
+                let left = self.read(reg(1));
+                let mut right = if form.ends_with("ri") {
+                    replicate_bit_mask(imm(2) as u64, wide)
+                } else {
+                    let amount = (imm(3) & 0x3f) as u32;
+                    decode_shift(((imm(3) >> 6) & 3) as u64, self.read(reg(2)), amount, wide)
+                };
+                if matches!(operation.as_str(), "BIC" | "BICS" | "ORN" | "EON") {
+                    right = !right & mask(wide);
+                }
+                let result = match operation.as_str() {
+                    "AND" | "ANDS" | "BIC" | "BICS" => left & right,
+                    "ORR" | "ORN" => left | right,
+                    _ => left ^ right,
+                } & mask(wide);
+                if operation.ends_with('S') {
+                    let bits = if wide { 64 } else { 32 };
+                    self.set_flags((
+                        result,
+                        (result >> (bits - 1)) & 1 == 1,
+                        result == 0,
+                        false,
+                        false,
+                    ));
+                }
+                self.write(reg(0), result);
+                return;
+            }
+            if let Some((operation, form)) = family(&["MOVZ", "MOVN", "MOVK"], &["Wi", "Xi"]) {
+                let wide = form.starts_with('X');
+                let rd = reg(0);
+                if operation == "MOVK" {
+                    let shift = imm(3) as u32;
+                    let held = self.read(rd);
+                    let cleared = held & !(0xffffu64 << shift);
+                    self.write(rd, cleared | ((imm(2) as u64 & 0xffff) << shift));
+                } else {
+                    let value = (imm(1) as u64 & 0xffff) << imm(2);
+                    let value = if operation == "MOVN" { !value } else { value };
+                    self.write(rd, value & mask(wide));
+                }
+                return;
+            }
+            if let Some((operation, form)) = family(&["SBFM", "UBFM", "BFM"], &["Wri", "Xri"]) {
+                let wide = form.starts_with('X');
+                let bits = if wide { 64u32 } else { 32 };
+                let rd = reg(0);
+                let (source, immr, imms) = if operation == "BFM" {
+                    (self.read(reg(2)), imm(3) as u32, imm(4) as u32)
+                } else {
+                    (self.read(reg(1)), imm(2) as u32, imm(3) as u32)
+                };
+                let source = source & mask(wide);
+                let result = if imms >= immr {
+                    let width = imms - immr + 1;
+                    let field = (source >> immr)
+                        & (if width >= 64 {
+                            u64::MAX
+                        } else {
+                            (1u64 << width) - 1
+                        });
+                    match operation.as_str() {
+                        "SBFM" => sign_extend(field, width) as u64 & mask(wide),
+                        "UBFM" => field,
+                        _ => {
+                            let held = self.read(rd);
+                            let field_mask = if width >= 64 {
+                                u64::MAX
+                            } else {
+                                (1u64 << width) - 1
+                            };
+                            (held & !field_mask) | field
+                        }
+                    }
+                } else {
+                    let width = imms + 1;
+                    let position = bits - immr;
+                    let field = source & ((1u64 << width) - 1);
+                    match operation.as_str() {
+                        "SBFM" => (sign_extend(field, width) as u64) << position & mask(wide),
+                        "UBFM" => field << position,
+                        _ => {
+                            let held = self.read(rd);
+                            let field_mask = ((1u64 << width) - 1) << position;
+                            (held & !field_mask) | (field << position)
+                        }
+                    }
+                };
+                self.write(rd, result & mask(wide));
+                return;
+            }
+            if let Some((operation, form)) =
+                family(&["LSLV", "LSRV", "ASRV", "RORV"], &["Wr", "Xr"])
+            {
+                let wide = form.starts_with('X');
+                let kind = match operation.as_str() {
+                    "LSLV" => 0,
+                    "LSRV" => 1,
+                    "ASRV" => 2,
+                    _ => 3,
+                };
+                let amount = (self.read(reg(2)) % if wide { 64 } else { 32 }) as u32;
+                let value = decode_shift(kind, self.read(reg(1)), amount, wide);
+                self.write(reg(0), value);
+                return;
+            }
+            if let Some((operation, form)) = family(&["SDIV", "UDIV"], &["Wr", "Xr"]) {
+                let wide = form.starts_with('X');
+                let bits = if wide { 64 } else { 32 };
+                let left = self.read(reg(1));
+                let right = self.read(reg(2));
+                let result = if right == 0 {
+                    0
+                } else if operation == "SDIV" {
+                    let (a, b) = (sign_extend(left, bits), sign_extend(right, bits));
+                    a.wrapping_div(b) as u64
+                } else {
+                    left / right
+                };
+                self.write(reg(0), result & mask(wide));
+                return;
+            }
+            if let Some((operation, form)) = family(&["MADD", "MSUB"], &["Wrrr", "Xrrr"]) {
+                let wide = form.starts_with('X');
+                let product = self.read(reg(1)).wrapping_mul(self.read(reg(2)));
+                let accumulator = self.read(reg(3));
+                let result = if operation == "MADD" {
+                    accumulator.wrapping_add(product)
+                } else {
+                    accumulator.wrapping_sub(product)
+                };
+                self.write(reg(0), result & mask(wide));
+                return;
+            }
+            match name {
+                "SMADDLrrr" | "SMSUBLrrr" | "UMADDLrrr" | "UMSUBLrrr" => {
+                    let signed = name.starts_with('S');
+                    let (a, b) = (
+                        self.read(reg(1)) & 0xffff_ffff,
+                        self.read(reg(2)) & 0xffff_ffff,
+                    );
+                    let product = if signed {
+                        (sign_extend(a, 32).wrapping_mul(sign_extend(b, 32))) as u64
+                    } else {
+                        a.wrapping_mul(b)
+                    };
+                    let accumulator = self.read(reg(3));
+                    let result = if name.contains("ADD") {
+                        accumulator.wrapping_add(product)
+                    } else {
+                        accumulator.wrapping_sub(product)
+                    };
+                    self.write(reg(0), result);
+                }
+                "SMULHrr" | "UMULHrr" => {
+                    let (a, b) = (self.read(reg(1)), self.read(reg(2)));
+                    let high = if name.starts_with('S') {
+                        ((i128::from(a as i64) * i128::from(b as i64)) >> 64) as u64
+                    } else {
+                        ((u128::from(a) * u128::from(b)) >> 64) as u64
+                    };
+                    self.write(reg(0), high);
+                }
+                "CSELWr" | "CSELXr" | "CSINCWr" | "CSINCXr" | "CSINVWr" | "CSINVXr" | "CSNEGWr"
+                | "CSNEGXr" => {
+                    let wide = name.ends_with("Xr");
+                    let taken = self.condition(imm(3));
+                    let value = if taken {
+                        self.read(reg(1))
+                    } else {
+                        let other = self.read(reg(2));
+                        if name.starts_with("CSINC") {
+                            other.wrapping_add(1)
+                        } else if name.starts_with("CSINV") {
+                            !other
+                        } else if name.starts_with("CSNEG") {
+                            other.wrapping_neg()
+                        } else {
+                            other
+                        }
+                    };
+                    self.write(reg(0), value & mask(wide));
+                }
+                "CLZWr" | "CLZXr" => {
+                    let wide = name.ends_with("Xr");
+                    let value = self.read(reg(1));
+                    let count = if wide {
+                        value.leading_zeros()
+                    } else {
+                        (value as u32).leading_zeros()
+                    };
+                    self.write(reg(0), u64::from(count));
+                }
+                "RBITWr" | "RBITXr" => {
+                    let wide = name.ends_with("Xr");
+                    let value = self.read(reg(1));
+                    let result = if wide {
+                        value.reverse_bits()
+                    } else {
+                        u64::from((value as u32).reverse_bits())
+                    };
+                    self.write(reg(0), result);
+                }
+                "REVWr" | "REVXr" => {
+                    let wide = name.ends_with("Xr");
+                    let value = self.read(reg(1));
+                    let result = if wide {
+                        value.swap_bytes()
+                    } else {
+                        u64::from((value as u32).swap_bytes())
+                    };
+                    self.write(reg(0), result);
+                }
+                _ => self.memory_and_float(name, instruction, wide_of),
+            }
+        }
+
+        fn memory_and_float(
+            &mut self,
+            name: &str,
+            instruction: &MachineInstruction,
+            wide_of: &dyn Fn(Register) -> bool,
+        ) {
+            let _ = wide_of;
+            let target = self.target;
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            if let Some(access) = memory_access(name) {
+                let rt_index = if access.writeback { 1 } else { 0 };
+                let register = reg(rt_index);
+                let base = reg(rt_index + 1);
+                let base_value = self.read(base);
+                let (address, update) = match access.mode {
+                    Mode::Unsigned => (
+                        base_value.wrapping_add((imm(rt_index + 2) as u64) * access.size as u64),
+                        None,
+                    ),
+                    Mode::Unscaled => (base_value.wrapping_add(imm(rt_index + 2) as u64), None),
+                    Mode::Pre => {
+                        let address = base_value.wrapping_add(imm(rt_index + 2) as u64);
+                        (address, Some(address))
+                    }
+                    Mode::Post => {
+                        let address = base_value;
+                        (
+                            address,
+                            Some(base_value.wrapping_add(imm(rt_index + 2) as u64)),
+                        )
+                    }
+                    Mode::Register => {
+                        let index_register = reg(rt_index + 2);
+                        let index_value = self.read(index_register);
+                        let signed = imm(rt_index + 3) == 1;
+                        let scaled = imm(rt_index + 4) == 1;
+                        let offset = if wide_of_register(index_register) {
+                            index_value
+                        } else if signed {
+                            sign_extend(index_value, 32) as u64
+                        } else {
+                            index_value & 0xffff_ffff
+                        };
+                        let offset = if scaled {
+                            offset << access.size.trailing_zeros()
+                        } else {
+                            offset
+                        };
+                        (base_value.wrapping_add(offset), None)
+                    }
+                    Mode::Literal => (self.pc.wrapping_add((imm(rt_index + 1) * 4) as u64), None),
+                };
+                if access.load {
+                    let raw = self.memory.read(address, access.size);
+                    let value = if access.sign_bits > 0 {
+                        sign_extend(raw, access.sign_bits) as u64
+                    } else {
+                        raw
+                    };
+                    let value = match register {
+                        Register::General { wide, .. } | Register::Zero { wide } => {
+                            value & mask(wide)
+                        }
+                        _ => value,
+                    };
+                    if access.size == 16 {
+                        let high = self.memory.read(address + 8, 8);
+                        if let Register::Vector { number, .. } = register {
+                            self.v[number] = [self.memory.read(address, 8), high];
+                        }
+                    } else {
+                        self.write(register, value);
+                    }
+                } else if access.size == 16 {
+                    if let Register::Vector { number, .. } = register {
+                        let held = self.v[number];
+                        self.memory.write(address, 8, held[0]);
+                        self.memory.write(address + 8, 8, held[1]);
+                    }
+                } else {
+                    let value = self.read(register);
+                    self.memory.write(address, access.size, value);
+                }
+                if let Some(new_base) = update {
+                    self.write(base, new_base);
+                }
+                return;
+            }
+            if let Some(pair) = pair_access(name) {
+                let (first, second, base_index, offset_index) = if pair.writeback {
+                    (1, 2, 3, 4)
+                } else {
+                    (0, 1, 2, 3)
+                };
+                let base = reg(base_index);
+                let base_value = self.read(base);
+                let offset = (imm(offset_index) as u64).wrapping_mul(pair.size as u64);
+                let (address, update) = match pair.mode {
+                    Mode::Pre => (
+                        base_value.wrapping_add(offset),
+                        Some(base_value.wrapping_add(offset)),
+                    ),
+                    Mode::Post => (base_value, Some(base_value.wrapping_add(offset))),
+                    _ => (base_value.wrapping_add(offset), None),
+                };
+                let registers = [reg(first), reg(second)];
+                for (slot, register) in registers.iter().enumerate() {
+                    let at = address + (slot * pair.size) as u64;
+                    if pair.load {
+                        if pair.size == 16 {
+                            if let Register::Vector { number, .. } = register {
+                                self.v[*number] =
+                                    [self.memory.read(at, 8), self.memory.read(at + 8, 8)];
+                            }
+                        } else {
+                            let raw = self.memory.read(at, pair.size);
+                            let value = if pair.signed_word {
+                                sign_extend(raw, 32) as u64
+                            } else {
+                                raw
+                            };
+                            self.write(*register, value);
+                        }
+                    } else if pair.size == 16 {
+                        if let Register::Vector { number, .. } = register {
+                            let held = self.v[*number];
+                            self.memory.write(at, 8, held[0]);
+                            self.memory.write(at + 8, 8, held[1]);
+                        }
+                    } else {
+                        let value = self.read(*register);
+                        self.memory.write(at, pair.size, value);
+                    }
+                }
+                if let Some(new_base) = update {
+                    self.write(base, new_base);
+                }
+                return;
+            }
+            self.floating(name, instruction);
+        }
+
+        fn floating(&mut self, name: &str, instruction: &MachineInstruction) {
+            let target = self.target;
+            let operands = &instruction.operands;
+            let reg = |index: usize| register_of(target, &operands[index]);
+            let imm = |index: usize| operands[index].immediate();
+            let single = |value: u64| f32::from_bits(value as u32);
+            let double = f64::from_bits;
+            match name {
+                "FADDSrr" | "FSUBSrr" | "FMULSrr" | "FDIVSrr" | "FNMULSrr" => {
+                    let (a, b) = (single(self.read(reg(1))), single(self.read(reg(2))));
+                    let result = match &name[..4] {
+                        "FADD" => a + b,
+                        "FSUB" => a - b,
+                        "FMUL" => a * b,
+                        "FDIV" => a / b,
+                        _ => -(a * b),
+                    };
+                    self.write(reg(0), u64::from(result.to_bits()));
+                }
+                "FADDDrr" | "FSUBDrr" | "FMULDrr" | "FDIVDrr" | "FNMULDrr" => {
+                    let (a, b) = (double(self.read(reg(1))), double(self.read(reg(2))));
+                    let result = match &name[..4] {
+                        "FADD" => a + b,
+                        "FSUB" => a - b,
+                        "FMUL" => a * b,
+                        "FDIV" => a / b,
+                        _ => -(a * b),
+                    };
+                    self.write(reg(0), result.to_bits());
+                }
+                "FNEGSr" => {
+                    let value = self.read(reg(1)) ^ 0x8000_0000;
+                    self.write(reg(0), value);
+                }
+                "FNEGDr" => {
+                    let value = self.read(reg(1)) ^ 0x8000_0000_0000_0000;
+                    self.write(reg(0), value);
+                }
+                "FABSSr" => {
+                    let value = self.read(reg(1)) & 0x7fff_ffff;
+                    self.write(reg(0), value);
+                }
+                "FABSDr" => {
+                    let value = self.read(reg(1)) & 0x7fff_ffff_ffff_ffff;
+                    self.write(reg(0), value);
+                }
+                "FSQRTSr" => {
+                    let value = single(self.read(reg(1))).sqrt();
+                    self.write(reg(0), u64::from(value.to_bits()));
+                }
+                "FSQRTDr" => {
+                    let value = double(self.read(reg(1))).sqrt();
+                    self.write(reg(0), value.to_bits());
+                }
+                "FMOVSr" | "FMOVDr" => {
+                    let value = self.read(reg(1));
+                    self.write(reg(0), value);
+                }
+                "FMOVWSr" | "FMOVSWr" | "FMOVXDr" | "FMOVDXr" => {
+                    let value = self.read(reg(1));
+                    self.write(reg(0), value);
+                }
+                "FMOVSi" | "FMOVDi" => {
+                    let encoded = imm(1) as u32;
+                    let value = armv8::float_from_immediate(encoded);
+                    if name == "FMOVSi" {
+                        self.write(reg(0), u64::from((value as f32).to_bits()));
+                    } else {
+                        self.write(reg(0), value.to_bits());
+                    }
+                }
+                "FCMPSrr" | "FCMPESrr" | "FCMPDrr" | "FCMPEDrr" | "FCMPSri" | "FCMPESri"
+                | "FCMPDri" | "FCMPEDri" => {
+                    let is_single = name.contains('S');
+                    let zero_form = name.ends_with("ri");
+                    let (a, b) = if is_single {
+                        let a = f64::from(single(self.read(reg(0))));
+                        let b = if zero_form {
+                            0.0
+                        } else {
+                            f64::from(single(self.read(reg(1))))
+                        };
+                        (a, b)
+                    } else {
+                        let a = double(self.read(reg(0)));
+                        let b = if zero_form {
+                            0.0
+                        } else {
+                            double(self.read(reg(1)))
+                        };
+                        (a, b)
+                    };
+                    if a.is_nan() || b.is_nan() {
+                        self.n = false;
+                        self.z = false;
+                        self.c = true;
+                        self.overflow = true;
+                    } else if a == b {
+                        self.n = false;
+                        self.z = true;
+                        self.c = true;
+                        self.overflow = false;
+                    } else if a < b {
+                        self.n = true;
+                        self.z = false;
+                        self.c = false;
+                        self.overflow = false;
+                    } else {
+                        self.n = false;
+                        self.z = false;
+                        self.c = true;
+                        self.overflow = false;
+                    }
+                }
+                "FCVTDSr" => {
+                    let value = f64::from(single(self.read(reg(1))));
+                    self.write(reg(0), value.to_bits());
+                }
+                "FCVTSDr" => {
+                    let value = double(self.read(reg(1))) as f32;
+                    self.write(reg(0), u64::from(value.to_bits()));
+                }
+                _ if name.starts_with("SCVTFU") || name.starts_with("UCVTFU") => {
+                    let source_wide = name.as_bytes()[6] == b'X';
+                    let to_single = name.as_bytes()[7] == b'S';
+                    let raw = self.read(reg(1));
+                    let signed = name.starts_with('S');
+                    if to_single {
+                        let converted = if signed {
+                            if source_wide {
+                                raw as i64 as f32
+                            } else {
+                                raw as u32 as i32 as f32
+                            }
+                        } else if source_wide {
+                            raw as f32
+                        } else {
+                            raw as u32 as f32
+                        };
+                        self.write(reg(0), u64::from(converted.to_bits()));
+                    } else {
+                        let converted = if signed {
+                            if source_wide {
+                                raw as i64 as f64
+                            } else {
+                                raw as u32 as i32 as f64
+                            }
+                        } else if source_wide {
+                            raw as f64
+                        } else {
+                            raw as u32 as f64
+                        };
+                        self.write(reg(0), converted.to_bits());
+                    }
+                }
+                _ if name.starts_with("FCVTZSU") || name.starts_with("FCVTZUU") => {
+                    let wide = name.as_bytes()[7] == b'X';
+                    let from_single = name.as_bytes()[8] == b'S';
+                    let value = if from_single {
+                        f64::from(single(self.read(reg(1))))
+                    } else {
+                        double(self.read(reg(1)))
+                    };
+                    let signed = name.starts_with("FCVTZS");
+                    let result = if signed {
+                        if wide {
+                            (value as i64) as u64
+                        } else {
+                            (value as i32) as u32 as u64
+                        }
+                    } else if wide {
+                        value as u64
+                    } else {
+                        (value as u32) as u64
+                    };
+                    self.write(reg(0), result);
+                }
+                "FRINTZSr" | "FRINTMSr" | "FRINTPSr" | "FRINTNSr" | "FRINTASr" => {
+                    let value = single(self.read(reg(1)));
+                    let rounded = match &name[..6] {
+                        "FRINTZ" => value.trunc(),
+                        "FRINTM" => value.floor(),
+                        "FRINTP" => value.ceil(),
+                        "FRINTA" => value.round(),
+                        _ => value.round_ties_even(),
+                    };
+                    self.write(reg(0), u64::from(rounded.to_bits()));
+                }
+                "FRINTZDr" | "FRINTMDr" | "FRINTPDr" | "FRINTNDr" | "FRINTADr" => {
+                    let value = double(self.read(reg(1)));
+                    let rounded = match &name[..6] {
+                        "FRINTZ" => value.trunc(),
+                        "FRINTM" => value.floor(),
+                        "FRINTP" => value.ceil(),
+                        "FRINTA" => value.round(),
+                        _ => value.round_ties_even(),
+                    };
+                    self.write(reg(0), rounded.to_bits());
+                }
+                "FMINSrr" | "FMAXSrr" | "FMINNMSrr" | "FMAXNMSrr" | "FMINDrr" | "FMAXDrr"
+                | "FMINNMDrr" | "FMAXNMDrr" => {
+                    let is_single = name.ends_with("Srr");
+                    let (a, b) = if is_single {
+                        (
+                            f64::from(single(self.read(reg(1)))),
+                            f64::from(single(self.read(reg(2)))),
+                        )
+                    } else {
+                        (double(self.read(reg(1))), double(self.read(reg(2))))
+                    };
+                    let numeric = name.contains("NM");
+                    let maximum = name.starts_with("FMAX");
+                    let result = if a.is_nan() || b.is_nan() {
+                        if numeric && !(a.is_nan() && b.is_nan()) {
+                            if a.is_nan() {
+                                b
+                            } else {
+                                a
+                            }
+                        } else {
+                            f64::NAN
+                        }
+                    } else if a == b {
+                        if maximum {
+                            if a.is_sign_negative() {
+                                b
+                            } else {
+                                a
+                            }
+                        } else if a.is_sign_negative() {
+                            a
+                        } else {
+                            b
+                        }
+                    } else if (a < b) == maximum {
+                        b
+                    } else {
+                        a
+                    };
+                    if is_single {
+                        self.write(reg(0), u64::from((result as f32).to_bits()));
+                    } else {
+                        self.write(reg(0), result.to_bits());
+                    }
+                }
+                "FMADDSrrr" | "FMSUBSrrr" | "FNMADDSrrr" | "FNMSUBSrrr" => {
+                    let (a, b, c) = (
+                        single(self.read(reg(1))),
+                        single(self.read(reg(2))),
+                        single(self.read(reg(3))),
+                    );
+                    let result = match &name[..5] {
+                        "FMADD" => a.mul_add(b, c),
+                        "FMSUB" => (-a).mul_add(b, c),
+                        "FNMAD" => (-a).mul_add(b, -c),
+                        _ => a.mul_add(b, -c),
+                    };
+                    self.write(reg(0), u64::from(result.to_bits()));
+                }
+                "FMADDDrrr" | "FMSUBDrrr" | "FNMADDDrrr" | "FNMSUBDrrr" => {
+                    let (a, b, c) = (
+                        double(self.read(reg(1))),
+                        double(self.read(reg(2))),
+                        double(self.read(reg(3))),
+                    );
+                    let result = match &name[..5] {
+                        "FMADD" => a.mul_add(b, c),
+                        "FMSUB" => (-a).mul_add(b, c),
+                        "FNMAD" => (-a).mul_add(b, -c),
+                        _ => a.mul_add(b, -c),
+                    };
+                    self.write(reg(0), result.to_bits());
+                }
+                "CNTv8i8" => {
+                    let value = self.read(reg(1));
+                    let mut result = 0u64;
+                    for byte in 0..8 {
+                        let count = ((value >> (8 * byte)) & 0xff).count_ones() as u64;
+                        result |= count << (8 * byte);
+                    }
+                    self.write(reg(0), result);
+                }
+                "ADDVv8i8v" => {
+                    let value = self.read(reg(1));
+                    let total: u64 = (0..8).map(|byte| (value >> (8 * byte)) & 0xff).sum();
+                    self.write(reg(0), total & 0xff);
+                }
+                _ => panic!(
+                    "the emulator knows the instruction {name} at {:#x}",
+                    self.pc
+                ),
+            }
+        }
+    }
+
+    fn wide_of_register(register: Register) -> bool {
+        match register {
+            Register::General { wide, .. } | Register::Zero { wide } | Register::Stack { wide } => {
+                wide
+            }
+            Register::Vector { bits, .. } => bits == 64,
+        }
+    }
+
+    #[derive(Clone, Copy, PartialEq)]
+    enum Mode {
+        Unsigned,
+        Unscaled,
+        Pre,
+        Post,
+        Register,
+        Literal,
+    }
+
+    struct Access {
+        load: bool,
+        size: usize,
+        sign_bits: u32,
+        mode: Mode,
+        writeback: bool,
+    }
+
+    struct Pair {
+        load: bool,
+        size: usize,
+        mode: Mode,
+        writeback: bool,
+        signed_word: bool,
+    }
+
+    fn memory_access(name: &str) -> Option<Access> {
+        let (load, rest) = if let Some(rest) = name.strip_prefix("LDUR") {
+            (true, format!("U{rest}"))
+        } else if let Some(rest) = name.strip_prefix("STUR") {
+            (false, format!("U{rest}"))
+        } else if let Some(rest) = name.strip_prefix("LDR") {
+            (true, rest.to_string())
+        } else {
+            (false, name.strip_prefix("STR")?.to_string())
+        };
+        let (mode, stem) = if let Some(stem) = rest.strip_prefix('U') {
+            (Mode::Unscaled, stem.strip_suffix('i')?.to_string())
+        } else if let Some(stem) = rest.strip_suffix("ui") {
+            (Mode::Unsigned, stem.to_string())
+        } else if let Some(stem) = rest.strip_suffix("pre") {
+            (Mode::Pre, stem.to_string())
+        } else if let Some(stem) = rest.strip_suffix("post") {
+            (Mode::Post, stem.to_string())
+        } else if let Some(stem) = rest
+            .strip_suffix("roX")
+            .or_else(|| rest.strip_suffix("roW"))
+        {
+            (Mode::Register, stem.to_string())
+        } else {
+            (Mode::Literal, rest.strip_suffix('l')?.to_string())
+        };
+        let (size, sign_bits) = match stem.as_str() {
+            "BB" | "B" => (1, 0),
+            "HH" | "H" => (2, 0),
+            "W" | "S" => (4, 0),
+            "X" | "D" => (8, 0),
+            "Q" => (16, 0),
+            "SBW" | "SBX" => (1, 8),
+            "SHW" | "SHX" => (2, 16),
+            "SW" => (4, 32),
+            _ => return None,
+        };
+        Some(Access {
+            load,
+            size,
+            sign_bits,
+            mode,
+            writeback: matches!(mode, Mode::Pre | Mode::Post),
+        })
+    }
+
+    fn pair_access(name: &str) -> Option<Pair> {
+        let (load, rest) = if let Some(rest) = name.strip_prefix("LDP") {
+            (true, rest)
+        } else {
+            (false, name.strip_prefix("STP")?)
+        };
+        let (kind, tail) = if let Some(tail) = rest.strip_prefix("SW") {
+            ("SW", tail)
+        } else {
+            rest.split_at(1)
+        };
+        let size = match kind {
+            "W" | "S" | "SW" => 4,
+            "X" | "D" => 8,
+            "Q" => 16,
+            _ => return None,
+        };
+        let mode = match tail {
+            "i" => Mode::Unsigned,
+            "pre" => Mode::Pre,
+            "post" => Mode::Post,
+            _ => return None,
+        };
+        Some(Pair {
+            load,
+            size,
+            mode,
+            writeback: matches!(mode, Mode::Pre | Mode::Post),
+            signed_word: kind == "SW",
+        })
+    }
+
+    fn load(target: &'static Target, program: &[u8]) -> (Machine<'static>, u64) {
+        let mut machine = Machine {
+            target,
+            memory: Memory {
+                pages: BTreeMap::new(),
+            },
+            x: [0; 32],
+            sp: 0x7fff_0000_0000,
+            v: [[0; 2]; 32],
+            n: false,
+            z: false,
+            c: false,
+            overflow: false,
+            pc: 0,
+            break_address: 0x4000_0000_0000,
+            map_address: 0x3000_0000_0000,
+            stdout: Vec::new(),
+            stderr: Vec::new(),
+            exit: None,
+        };
+        let entry = u64::from_le_bytes(program[24..32].try_into().expect("an entry"));
+        let header_offset = u64::from_le_bytes(program[32..40].try_into().expect("headers"));
+        let header_size = u16::from_le_bytes(program[54..56].try_into().expect("size")) as u64;
+        let header_count = u16::from_le_bytes(program[56..58].try_into().expect("count")) as u64;
+        for index in 0..header_count {
+            let at = (header_offset + index * header_size) as usize;
+            let kind = u32::from_le_bytes(program[at..at + 4].try_into().expect("kind"));
+            if kind != 1 {
+                continue;
+            }
+            let offset = u64::from_le_bytes(program[at + 8..at + 16].try_into().expect("offset"));
+            let address =
+                u64::from_le_bytes(program[at + 16..at + 24].try_into().expect("address"));
+            let file_size = u64::from_le_bytes(program[at + 32..at + 40].try_into().expect("size"));
+            let memory_size =
+                u64::from_le_bytes(program[at + 40..at + 48].try_into().expect("size"));
+            for byte in 0..memory_size {
+                let value = if byte < file_size {
+                    program[(offset + byte) as usize]
+                } else {
+                    0
+                };
+                machine.memory.write(address + byte, 1, u64::from(value));
+            }
+            machine.break_address = machine.break_address.max(address + memory_size);
+        }
+        (machine, entry)
+    }
+
+    impl Machine<'static> {
+        fn run_until(&mut self, features: &std::collections::BTreeSet<String>, stop: Option<u64>) {
+            let target = self.target;
+            let mut cache: BTreeMap<u64, MachineInstruction> = BTreeMap::new();
+            let mut steps = 0u64;
+            while self.exit.is_none() && Some(self.pc) != stop {
+                steps += 1;
+                assert!(steps < 200_000_000, "the program runs to its end");
+                let instruction = match cache.get(&self.pc) {
+                    Some(found) => found.clone(),
+                    None => {
+                        let word = self.memory.read(self.pc, 4) as u32;
+                        let decoded = armv8::disassembler::decode(target, features, word)
+                            .unwrap_or_else(|| {
+                                panic!("a decodable instruction {word:#010x} at {:#x}", self.pc)
+                            });
+                        cache.insert(self.pc, decoded.instruction.clone());
+                        decoded.instruction
+                    }
+                };
+                self.step(&instruction);
+            }
+        }
+    }
+
+    pub(super) fn run(program: &[u8]) -> Outcome {
+        let target = armv8::target().expect("the ARMv8 tables load");
+        let features = armv8::feature_set(target, "", &["+all".to_string()]);
+        let (mut machine, entry) = load(target, program);
+        machine.pc = entry;
+        machine.run_until(&features, None);
+        Outcome {
+            exit: machine.exit,
+            stdout: machine.stdout,
+        }
+    }
+
+    fn export_address(program: &[u8], name: &str) -> Option<u64> {
+        let word = |at: usize, size: usize| {
+            let mut bytes = [0u8; 8];
+            bytes[..size].copy_from_slice(&program[at..at + size]);
+            u64::from_le_bytes(bytes)
+        };
+        let table = word(40, 8) as usize;
+        let entry_size = word(58, 2) as usize;
+        let count = word(60, 2) as usize;
+        for index in 0..count {
+            let header = table + index * entry_size;
+            if word(header + 4, 4) != 11 {
+                continue;
+            }
+            let symbols = word(header + 24, 8) as usize;
+            let size = word(header + 32, 8) as usize;
+            let strings_header = table + word(header + 40, 4) as usize * entry_size;
+            let strings = word(strings_header + 24, 8) as usize;
+            for symbol in (symbols..symbols + size).step_by(24) {
+                let start = strings + word(symbol, 4) as usize;
+                let end = start + program[start..].iter().position(|byte| *byte == 0)?;
+                if &program[start..end] == name.as_bytes() && word(symbol + 6, 2) != 0 {
+                    return Some(word(symbol + 8, 8));
+                }
+            }
+        }
+        None
+    }
+
+    pub(super) fn call(program: &[u8], name: &str, arguments: &[u64]) -> u64 {
+        let target = armv8::target().expect("the ARMv8 tables load");
+        let features = armv8::feature_set(target, "", &["+all".to_string()]);
+        let (mut machine, _) = load(target, program);
+        let address = export_address(program, name).expect("the library exports the symbol");
+        let sentinel = 0x5000_0000_0000u64;
+        machine.pc = address;
+        machine.x[30] = sentinel;
+        for (index, value) in arguments.iter().enumerate() {
+            machine.x[index] = *value;
+        }
+        machine.run_until(&features, Some(sentinel));
+        machine.x[0]
+    }
+}
+
+mod native_x86_64 {
+    use crate::compilers::compiler_infrastructure::{
+        Datum, Finish, Interpreter, Limits, Module, StandardHost,
+    };
+    use crate::compilers::x86_64::codegen;
+
+    fn interpreted(module: &Module, entry: &str) -> (Option<i32>, Vec<u8>) {
+        let mut host = StandardHost;
+        let mut interpreter =
+            Interpreter::new(module, &mut host, Limits::default()).expect("the module loads");
+        let id = module.function_named(entry).expect("the entry exists");
+        let code = match interpreter.call(id, Vec::new()) {
+            Ok(Finish::Returned(Some(Datum::Integer(value)))) => Some(value as u32 as i32),
+            Ok(Finish::Exited(code)) => Some(code),
+            _ => None,
+        };
+        (code, interpreter.machine().stdout().to_vec())
+    }
+
+    pub(super) fn run_native(
+        program: &[u8],
+        name: &str,
+    ) -> Option<(Option<i32>, Vec<u8>, Vec<u8>)> {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return None;
+        }
+        let folder = std::env::temp_dir().join(format!(
+            "apk_builder_native_{name}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&folder).expect("a work folder");
+        let path = folder.join("program");
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            let mut file = std::fs::OpenOptions::new()
+                .write(true)
+                .create(true)
+                .truncate(true)
+                .mode(0o755)
+                .open(&path)
+                .expect("the program is written");
+            std::io::Write::write_all(&mut file, program).expect("the program is written");
+        }
+        let mut attempts = 0;
+        let mut child = loop {
+            match std::process::Command::new(&path)
+                .stdout(std::process::Stdio::piped())
+                .stderr(std::process::Stdio::piped())
+                .spawn()
+            {
+                Ok(child) => break child,
+                Err(error) if error.raw_os_error() == Some(26) && attempts < 50 => {
+                    attempts += 1;
+                    std::thread::sleep(std::time::Duration::from_millis(20));
+                }
+                Err(error) => panic!("the program starts: {error}"),
+            }
+        };
+        let mut out = child.stdout.take().expect("a stdout pipe");
+        let mut error = child.stderr.take().expect("a stderr pipe");
+        let reader = std::thread::spawn(move || {
+            let mut said = Vec::new();
+            std::io::Read::read_to_end(&mut out, &mut said).ok();
+            said
+        });
+        let complainer = std::thread::spawn(move || {
+            let mut said = Vec::new();
+            std::io::Read::read_to_end(&mut error, &mut said).ok();
+            said
+        });
+        let started = std::time::Instant::now();
+        let status = loop {
+            match child.try_wait() {
+                Ok(Some(status)) => break Some(status),
+                Ok(None) if started.elapsed() < std::time::Duration::from_secs(20) => {
+                    std::thread::sleep(std::time::Duration::from_millis(5));
+                }
+                _ => {
+                    child.kill().ok();
+                    child.wait().ok();
+                    break None;
+                }
+            }
+        };
+        let said = reader.join().unwrap_or_default();
+        let complained = complainer.join().unwrap_or_default();
+        let _ = std::fs::remove_dir_all(&folder);
+        Some((status.and_then(|status| status.code()), said, complained))
+    }
+
+    fn arm_program_decodes(module: &Module, entry: &str, name: &str) {
+        let program = crate::compilers::x86_64::armv8::native::build_executable(module, entry)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        assert_eq!(&program[..4], b"\x7fELF");
+        assert_eq!(
+            &program[18..20],
+            &183u16.to_le_bytes(),
+            "an AArch64 program"
+        );
+        let path = std::env::temp_dir().join(format!(
+            "apk_builder_arm_{name}_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, &program).expect("the program is written");
+        let listing = std::process::Command::new("llvm-objdump-18")
+            .arg("-d")
+            .arg(&path)
+            .output();
+        let _ = std::fs::remove_file(&path);
+        let Ok(listing) = listing else {
+            return;
+        };
+        let text = String::from_utf8_lossy(&listing.stdout);
+        assert!(
+            listing.status.success(),
+            "the host disassembler reads the program"
+        );
+        assert!(
+            !text.contains("<unknown>") && !text.contains(".inst"),
+            "the host disassembler decodes every instruction: {}",
+            text.lines()
+                .find(|line| line.contains("<unknown>") || line.contains(".inst"))
+                .unwrap_or("")
+        );
+    }
+
+    fn agree(text: &str, entry: &str, name: &str) {
+        let module = Module::from_text(text).expect("the program reads");
+        module.verify().expect("the program keeps every rule");
+        arm_program_decodes(&module, entry, name);
+        let expected = interpreted(&module, entry);
+        let arm = crate::compilers::x86_64::armv8::native::build_executable(&module, entry)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        let emulated = super::arm_emulator::run(&arm);
+        assert_eq!(
+            String::from_utf8_lossy(&emulated.stdout),
+            String::from_utf8_lossy(&expected.1),
+            "the emulated arm64 program prints what the interpreter prints"
+        );
+        assert_eq!(
+            emulated.exit, expected.0,
+            "the emulated arm64 program exits as the interpreter does"
+        );
+        let program = codegen::build_executable(&module, entry)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        let Some(native) = run_native(&program, name) else {
+            return;
+        };
+        assert_eq!(
+            String::from_utf8_lossy(&native.1),
+            String::from_utf8_lossy(&expected.1),
+            "the native program prints what the interpreter prints"
+        );
+        assert_eq!(
+            native.0, expected.0,
+            "the native program exits as the interpreter does"
+        );
+    }
+
+    mod loader {
+        use std::ffi::{c_char, c_int, c_void};
+
+        unsafe extern "C" {
+            pub(super) fn dlopen(path: *const c_char, flags: c_int) -> *mut c_void;
+            pub(super) fn dlsym(handle: *mut c_void, name: *const c_char) -> *mut c_void;
+            pub(super) fn dlclose(handle: *mut c_void) -> c_int;
+        }
+    }
+
+    #[test]
+    fn a_shared_library_loads_and_runs_as_the_interpreter_does() {
+        if !cfg!(all(target_os = "linux", target_arch = "x86_64")) {
+            return;
+        }
+        let text = r#"omni 1
+module "library"
+layout lp64
+global @counter size 4 align 4 mutable export zero
+function @add(i32, i32) -> i32 export {
+block0(%left: i32, %right: i32):
+    %sum: i32 = add %left, %right
+    return %sum
+}
+function @bump(i32) -> i32 export {
+block0(%step: i32):
+    %address: ptr = global_address @counter
+    %before: i32 = load align 4 %address
+    %after: i32 = add %before, %step
+    store align 4 %after, %address
+    return %after
+}
+"#;
+        let module = Module::from_text(text).expect("the library reads");
+        module.verify().expect("the library keeps every rule");
+        let library = codegen::build_shared_library(&module)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        assert_eq!(&library[..4], b"\x7fELF");
+        assert_eq!(&library[16..18], &3u16.to_le_bytes(), "a shared object");
+        let path = std::env::temp_dir().join(format!(
+            "apk_builder_library_{}_{:?}.so",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::write(&path, &library).expect("the library is written");
+        let name = std::ffi::CString::new(path.to_str().expect("a text path")).expect("a path");
+        let handle = unsafe { loader::dlopen(name.as_ptr(), 2) };
+        assert!(!handle.is_null(), "the system loader accepts the library");
+        let add = unsafe { loader::dlsym(handle, c"add".as_ptr()) };
+        let bump = unsafe { loader::dlsym(handle, c"bump".as_ptr()) };
+        assert!(!add.is_null() && !bump.is_null(), "the exports are found");
+        let add: extern "C" fn(i32, i32) -> i32 = unsafe { std::mem::transmute(add) };
+        let bump: extern "C" fn(i32) -> i32 = unsafe { std::mem::transmute(bump) };
+        assert_eq!(add(40, 2), 42);
+        assert_eq!(add(-7, 3), -4);
+        assert_eq!(bump(5), 5);
+        assert_eq!(bump(6), 11);
+        unsafe { loader::dlclose(handle) };
+        let _ = std::fs::remove_file(&path);
+    }
+
+    #[test]
+    fn an_arm64_shared_library_exports_and_runs_as_the_interpreter_does() {
+        let text = r#"omni 1
+module "library"
+layout lp64
+global @counter size 4 align 4 mutable export zero
+function @add(i32, i32) -> i32 export {
+block0(%left: i32, %right: i32):
+    %sum: i32 = add %left, %right
+    return %sum
+}
+function @bump(i32) -> i32 export {
+block0(%step: i32):
+    %address: ptr = global_address @counter
+    %before: i32 = load align 4 %address
+    %after: i32 = add %before, %step
+    store align 4 %after, %address
+    return %after
+}
+"#;
+        let module = Module::from_text(text).expect("the library reads");
+        module.verify().expect("the library keeps every rule");
+        let library = crate::compilers::x86_64::armv8::native::build_shared_library(&module)
+            .unwrap_or_else(|problem| panic!("{} {:?}", problem.message, problem.context));
+        assert_eq!(&library[..4], b"\x7fELF");
+        assert_eq!(&library[16..18], &3u16.to_le_bytes(), "a shared object");
+        assert_eq!(&library[18..20], &183u16.to_le_bytes(), "an AArch64 object");
+        let result = |name: &str, arguments: &[u64]| {
+            super::arm_emulator::call(&library, name, arguments) as u32 as i32
+        };
+        assert_eq!(result("add", &[40, 2]), 42);
+        assert_eq!(result("add", &[(-7i64) as u64, 3]), -4);
+        assert_eq!(result("bump", &[5]), 5);
+    }
+
+    #[test]
+    fn the_native_runtime_reads_keeps_its_rules_and_assembles() {
+        let runtime = codegen::runtime_module().expect("the runtime reads");
+        runtime.verify().expect("the runtime keeps every rule");
+        let text = codegen::emit_assembly(&runtime).expect("the runtime compiles");
+        let object = codegen::assemble(&text).expect("the runtime assembles");
+        assert_eq!(&object[..4], b"\x7fELF");
+    }
+
+    const PRINTER: &str = r#"function @putchar(i32) -> i32 c import
+function @print(i64) internal {
+block0(%value: i64):
+    %zero: i64 = const 0
+    %negative: bool = icmp slt %value, %zero
+    branch %negative, block1, block2(%value)
+block1:
+    %minus: i32 = const 45
+    %ignored: i32 = call @putchar(%minus)
+    %positive: i64 = sub %zero, %value
+    jump block2(%positive)
+block2(%magnitude: i64):
+    %ten: i64 = const 10
+    %higher: i64 = udiv %magnitude, %ten
+    %more: bool = icmp ne %higher, %zero
+    branch %more, block3, block4
+block3:
+    call @print(%higher)
+    jump block4
+block4:
+    %digit: i64 = urem %magnitude, %ten
+    %base: i64 = const 48
+    %character: i64 = add %digit, %base
+    %narrow: i32 = trunc %character
+    %shown: i32 = call @putchar(%narrow)
+    return
+}
+function @line(i64) internal {
+block0(%value: i64):
+    call @print(%value)
+    %newline: i32 = const 10
+    %shown: i32 = call @putchar(%newline)
+    return
+}
+"#;
+
+    fn program(body: &str) -> String {
+        format!("omni 1\nmodule \"native\"\nlayout lp64\n{PRINTER}{body}")
+    }
+
+    #[test]
+    fn integer_arithmetic_runs_natively_as_it_interprets() {
+        let body = r#"function @main() -> i32 export {
+block0:
+    %a: i32 = const -7
+    %b: i32 = const 3
+    %sum: i32 = add %a, %b
+    %s1: i64 = sext %sum
+    call @line(%s1)
+    %quotient: i32 = sdiv %a, %b
+    %s2: i64 = sext %quotient
+    call @line(%s2)
+    %remainder: i32 = srem %a, %b
+    %s3: i64 = sext %remainder
+    call @line(%s3)
+    %uq: i32 = udiv %a, %b
+    %s4: i64 = zext %uq
+    call @line(%s4)
+    %ur: i32 = urem %a, %b
+    %s5: i64 = zext %ur
+    call @line(%s5)
+    %five: i8 = const 5
+    %two: i8 = const 2
+    %nine: i8 = const 9
+    %shifted: i8 = shl %five, %nine
+    %s6: i64 = zext %shifted
+    call @line(%s6)
+    %big: i8 = const -100
+    %arith: i8 = ashr %big, %two
+    %s7: i64 = sext %arith
+    call @line(%s7)
+    %logic: i8 = lshr %big, %two
+    %s8: i64 = zext %logic
+    call @line(%s8)
+    %rotated: i8 = rotl %big, %two
+    %s9: i64 = zext %rotated
+    call @line(%s9)
+    %rr: i16 = const 4660
+    %four: i16 = const 4
+    %rotr: i16 = rotr %rr, %four
+    %s10: i64 = zext %rotr
+    call @line(%s10)
+    %low: i32 = smin %a, %b
+    %s11: i64 = sext %low
+    call @line(%s11)
+    %high: i32 = umax %a, %b
+    %s12: i64 = zext %high
+    call @line(%s12)
+    %max: i32 = const 2147483647
+    %one: i32 = const 1
+    %saturated: i32 = sadd_sat %max, %one
+    %s13: i64 = sext %saturated
+    call @line(%s13)
+    %over: bool = sadd_overflows %max, %one
+    %s14: i64 = zext %over
+    call @line(%s14)
+    %wide_max: i64 = const 9223372036854775807
+    %wide_one: i64 = const 1
+    %wide_sat: i64 = sadd_sat %wide_max, %wide_one
+    call @line(%wide_sat)
+    %wide_over: bool = sadd_overflows %wide_max, %wide_one
+    %s15: i64 = zext %wide_over
+    call @line(%s15)
+    %product_high: i64 = umulh %wide_max, %wide_max
+    call @line(%product_high)
+    %small: i32 = const 40000
+    %mul_over: bool = smul_overflows %small, %small
+    %s16: i64 = zext %mul_over
+    call @line(%s16)
+    %usub: bool = usub_overflows %b, %a
+    %s17: i64 = zext %usub
+    call @line(%s17)
+    %bits: i32 = const 1311768467
+    %count: i32 = popcount %bits
+    %s18: i64 = zext %count
+    call @line(%s18)
+    %leading: i32 = clz %bits
+    %s19: i64 = zext %leading
+    call @line(%s19)
+    %trailing: i32 = ctz %bits
+    %s20: i64 = zext %trailing
+    call @line(%s20)
+    %nothing: i32 = const 0
+    %none: i32 = ctz %nothing
+    %s21: i64 = zext %none
+    call @line(%s21)
+    %swapped: i32 = bswap %bits
+    %s22: i64 = zext %swapped
+    call @line(%s22)
+    %reversed: i32 = bitreverse %bits
+    %s23: i64 = zext %reversed
+    call @line(%s23)
+    %minimum: i32 = const -2147483648
+    %absolute: i32 = abs %minimum
+    %s24: i64 = zext %absolute
+    call @line(%s24)
+    %minus_one: i32 = const -1
+    %wrapped: i32 = sdiv %minimum, %minus_one
+    %s25: i64 = sext %wrapped
+    call @line(%s25)
+    %negated: i32 = neg %a
+    %s26: i64 = sext %negated
+    call @line(%s26)
+    %inverted: i16 = not %rr
+    %s27: i64 = zext %inverted
+    call @line(%s27)
+    %less: bool = icmp slt %a, %b
+    %below: bool = icmp ult %a, %b
+    %l1: i64 = zext %less
+    %l2: i64 = zext %below
+    call @line(%l1)
+    call @line(%l2)
+    %picked: i32 = select %less, %a, %b
+    %s28: i64 = sext %picked
+    call @line(%s28)
+    %code: i32 = const 17
+    return %code
+}
+"#;
+        agree(&program(body), "main", "integers");
+    }
+
+    #[test]
+    fn floating_point_runs_natively_as_it_interprets() {
+        let body = r#"function @main() -> i32 export {
+block0:
+    %x: f64 = fconst 0x4024000000000000
+    %y: f64 = fconst 0x4008000000000000
+    %sum: f64 = fadd %x, %y
+    %product: f64 = fmul %sum, %y
+    %quotient: f64 = fdiv %product, %y
+    %remainder: f64 = frem %x, %y
+    %million: f64 = fconst 0x412e848000000000
+    %scaled: f64 = fmul %quotient, %million
+    %i1: i64 = fptosi %scaled
+    call @line(%i1)
+    %scaled2: f64 = fmul %remainder, %million
+    %i2: i64 = fptosi %scaled2
+    call @line(%i2)
+    %root: f64 = sqrt %x
+    %scaled3: f64 = fmul %root, %million
+    %i3: i64 = fptosi %scaled3
+    call @line(%i3)
+    %negative: f64 = fneg %root
+    %down: f64 = floor %negative
+    %i4: i64 = fptosi %down
+    call @line(%i4)
+    %up: f64 = ceil %negative
+    %i5: i64 = fptosi %up
+    call @line(%i5)
+    %half: f64 = fconst 0x4004000000000000
+    %even: f64 = nearest %half
+    %i6: i64 = fptosi %even
+    call @line(%i6)
+    %zero: f64 = fconst 0x0
+    %nan: f64 = fdiv %zero, %zero
+    %bits: i64 = bitcast %nan
+    call @line(%bits)
+    %saturated: i32 = fptosi_sat %nan
+    %i7: i64 = sext %saturated
+    call @line(%i7)
+    %huge: f64 = fconst 0x7ff0000000000000
+    %clamped: i32 = fptosi_sat %huge
+    %i8: i64 = sext %clamped
+    call @line(%i8)
+    %unsigned: i64 = fptoui_sat %huge
+    call @line(%unsigned)
+    %neg_zero: f64 = fneg %zero
+    %smallest: f64 = fmin %zero, %neg_zero
+    %b9: i64 = bitcast %smallest
+    call @line(%b9)
+    %largest: f64 = fmax %zero, %neg_zero
+    %b10: i64 = bitcast %largest
+    call @line(%b10)
+    %minnum: f64 = fminnum %nan, %y
+    %b11: i64 = bitcast %minnum
+    call @line(%b11)
+    %signed: f64 = copysign %x, %neg_zero
+    %b12: i64 = bitcast %signed
+    call @line(%b12)
+    %single: f32 = fptrunc %x
+    %third: f32 = fconst 0x40400000
+    %fsum: f32 = fdiv %single, %third
+    %fbits: i32 = bitcast %fsum
+    %b13: i64 = zext %fbits
+    call @line(%b13)
+    %back: f64 = fpext %fsum
+    %b14: i64 = bitcast %back
+    call @line(%b14)
+    %count: i64 = const -3
+    %from_int: f64 = sitofp %count
+    %b15: i64 = bitcast %from_int
+    call @line(%b15)
+    %all: i64 = const -1
+    %from_unsigned: f64 = uitofp %all
+    %b16: i64 = bitcast %from_unsigned
+    call @line(%b16)
+    %ordered: bool = fcmp olt %x, %y
+    %unordered: bool = fcmp ult %nan, %y
+    %notequal: bool = fcmp une %nan, %nan
+    %equal: bool = fcmp oeq %nan, %nan
+    %c1: i64 = zext %ordered
+    %c2: i64 = zext %unordered
+    %c3: i64 = zext %notequal
+    %c4: i64 = zext %equal
+    call @line(%c1)
+    call @line(%c2)
+    call @line(%c3)
+    call @line(%c4)
+    %code: i32 = const 0
+    return %code
+}
+"#;
+        agree(&program(body), "main", "floats");
+    }
+
+    #[test]
+    fn control_calls_and_memory_run_natively_as_they_interpret() {
+        let body = r#"global @table size 16 align 8 internal bytes "00000000000000000000000000000000" relocate 0 function @square 0 relocate 8 function @twice 0
+global @counter size 8 align 8 mutable internal zero
+function @square(i64) -> i64 internal {
+block0(%x: i64):
+    %y: i64 = mul %x, %x
+    return %y
+}
+function @twice(i64) -> i64 internal {
+block0(%x: i64):
+    %y: i64 = add %x, %x
+    return %y
+}
+function @fib(i64) -> i64 internal {
+block0(%n: i64):
+    %two: i64 = const 2
+    %small: bool = icmp slt %n, %two
+    branch %small, block1, block2
+block1:
+    return %n
+block2:
+    %one: i64 = const 1
+    %a: i64 = sub %n, %one
+    %b: i64 = sub %n, %two
+    %fa: i64 = call @fib(%a)
+    %fb: i64 = call @fib(%b)
+    %sum: i64 = add %fa, %fb
+    return %sum
+}
+function @many(i64, f64, i64, i64, i64, i64, i64, i64, f64, i64) -> i64 internal {
+block0(%a: i64, %b: f64, %c: i64, %d: i64, %e: i64, %f: i64, %g: i64, %h: i64, %i: f64, %j: i64):
+    %ib: i64 = fptosi %b
+    %ii: i64 = fptosi %i
+    %s1: i64 = add %a, %ib
+    %s2: i64 = add %s1, %c
+    %s3: i64 = add %s2, %d
+    %s4: i64 = add %s3, %e
+    %s5: i64 = add %s4, %f
+    %s6: i64 = add %s5, %g
+    %s7: i64 = add %s6, %h
+    %s8: i64 = add %s7, %ii
+    %ten: i64 = const 10
+    %s9: i64 = mul %s8, %ten
+    %s10: i64 = add %s9, %j
+    return %s10
+}
+function @main() -> i32 export {
+block0:
+    %ten: i64 = const 10
+    %f: i64 = call @fib(%ten)
+    call @line(%f)
+    %zero: i64 = const 0
+    %one: i64 = const 1
+    jump block1(%zero, %one, %zero)
+block1(%i: i64, %a: i64, %b: i64):
+    %done: bool = icmp eq %i, %ten
+    branch %done, block3, block2
+block2:
+    %next: i64 = add %i, %one
+    jump block1(%next, %b, %a)
+block3:
+    call @line(%a)
+    call @line(%b)
+    %which: i64 = const 2
+    switch %which, [1: block4, 2: block5], default block6
+block4:
+    call @line(%one)
+    jump block7
+block5:
+    %two: i64 = const 2
+    call @line(%two)
+    jump block7
+block6:
+    call @line(%zero)
+    jump block7
+block7:
+    %table: ptr = global_address @table
+    %first: ptr = load align 8 %table
+    %eight: i64 = const 8
+    %second_slot: ptr = offset %table, %eight
+    %second: ptr = load align 8 %second_slot
+    %seven: i64 = const 7
+    %r1: i64 = call_indirect (i64) -> i64 %first(%seven)
+    %r2: i64 = call_indirect (i64) -> i64 %second(%seven)
+    call @line(%r1)
+    call @line(%r2)
+    %slot: ptr = stack_slot size 16 align 8
+    %byte: i8 = const -1
+    store align 1 %byte, %slot
+    %word: i16 = load align 2 %slot
+    %w1: i64 = zext %word
+    call @line(%w1)
+    %counter: ptr = global_address @counter
+    %old: i64 = atomic_update add seq_cst %counter, %seven
+    %new: i64 = atomic_update xchg seq_cst %counter, %ten
+    call @line(%old)
+    call @line(%new)
+    %seen: i64 = compare_exchange seq_cst seq_cst %counter, %ten, %one
+    %final: i64 = load align 8 %counter
+    call @line(%seen)
+    call @line(%final)
+    %fill: i8 = const 65
+    %sixteen: i64 = const 16
+    memory_fill %slot, %fill, %sixteen
+    %piece: i64 = load align 8 %slot
+    call @line(%piece)
+    %half: f64 = fconst 0x3ff8000000000000
+    %m: i64 = call @many(%one, %half, %one, %one, %one, %one, %one, %one, %half, %seven)
+    call @line(%m)
+    %code: i32 = const 3
+    return %code
+}
+"#;
+        agree(&program(body), "main", "control");
+    }
+
+    #[test]
+    fn objects_dispatch_and_exceptions_run_natively_as_they_interpret() {
+        let body = r#"class %Object { fields [] methods [@Object.value] }
+class %Valued interface { fields [] methods [@Valued.extra] }
+class %Box : %Object { fields [i32, ref, f64] methods [@Box.value] implements %Valued [-] }
+class %Problem : %Object { fields [i64] methods [@Object.value] }
+class %Numbers array i64 : %Object { fields [] methods [@Object.value] }
+function @Object.value(ref) -> i64 internal {
+block0(%self: ref):
+    %v: i64 = const 1
+    return %v
+}
+function @Box.value(ref) -> i64 internal {
+block0(%self: ref):
+    %field: i32 = load_field %Box 0 %self
+    %wide: i64 = sext %field
+    return %wide
+}
+function @Valued.extra(ref) -> i64 internal {
+block0(%self: ref):
+    %v: i64 = const 99
+    return %v
+}
+function @risky(i64) -> i64 internal {
+block0(%x: i64):
+    %zero: i64 = const 0
+    %bad: bool = icmp slt %x, %zero
+    branch %bad, block1, block2
+block1:
+    %problem: ref = allocate %Problem
+    store_field %Problem 0 %problem, %x
+    throw %problem
+block2:
+    %y: i64 = add %x, %x
+    return %y
+}
+function @relay(i64) -> i64 internal {
+block0(%x: i64):
+    %y: i64 = call @risky(%x)
+    %one: i64 = const 1
+    %z: i64 = add %y, %one
+    return %z
+}
+function @main() -> i32 export {
+block0:
+    %box: ref = allocate %Box
+    %v: i32 = const -42
+    store_field %Box 0 %box, %v
+    %method: ptr = virtual_method %Object 0 %box
+    %r1: i64 = call_indirect (ref) -> i64 %method(%box)
+    call @line(%r1)
+    %other: ref = allocate %Problem
+    %method2: ptr = virtual_method %Object 0 %other
+    %r2: i64 = call_indirect (ref) -> i64 %method2(%other)
+    call @line(%r2)
+    %extra: ptr = interface_method %Valued 0 %box
+    %r3: i64 = call_indirect (ref) -> i64 %extra(%box)
+    call @line(%r3)
+    %is_box: bool = instance_of %Box %box
+    %is_valued: bool = instance_of %Valued %box
+    %not_box: bool = instance_of %Box %other
+    %nothing: ref = null
+    %null_box: bool = instance_of %Box %nothing
+    %i1: i64 = zext %is_box
+    %i2: i64 = zext %is_valued
+    %i3: i64 = zext %not_box
+    %i4: i64 = zext %null_box
+    call @line(%i1)
+    call @line(%i2)
+    call @line(%i3)
+    call @line(%i4)
+    %length: i32 = const 5
+    %array: ref = allocate_array %Numbers %length
+    %count: i32 = array_length %array
+    %c1: i64 = zext %count
+    call @line(%c1)
+    %two: i32 = const 2
+    %value: i64 = const 1234567890123
+    store_element i64 %array, %two, %value
+    %back: i64 = load_element i64 %array, %two
+    call @line(%back)
+    %same: bool = same_object %box, %box
+    %s1: i64 = zext %same
+    call @line(%s1)
+    %ok: i64 = const 5
+    %r4: i64 = invoke call @relay(%ok) to block1(%r4) unwind block2
+block1(%got: i64):
+    call @line(%got)
+    %bad: i64 = const -3
+    %r5: i64 = invoke call @relay(%bad) to block3(%r5) unwind block2
+block2(%caught: ref):
+    %what: i64 = load_field %Problem 0 %caught
+    call @line(%what)
+    %code: i32 = const 9
+    return %code
+block3(%unexpected: i64):
+    call @line(%unexpected)
+    %zero: i32 = const 0
+    return %zero
+}
+"#;
+        agree(&program(body), "main", "objects");
+    }
+}
+
+mod armv8_assembly {
+    use crate::compilers::table_gen::TableValue;
+    use crate::compilers::x86_64::armv7;
+    use crate::compilers::x86_64::armv8;
+
+    fn value_text(value: &TableValue) -> String {
+        match value {
+            TableValue::Unset => "?".to_string(),
+            TableValue::Bit(bit) => (*bit as u8).to_string(),
+            TableValue::Integer(number) => number.to_string(),
+            TableValue::String(text) => format!("{text:?}"),
+            TableValue::Code(text) => format!("code {text:?}"),
+            TableValue::Bits(bits) => {
+                let listed: Vec<String> = bits.iter().map(value_text).collect();
+                format!("{{{}}}", listed.join(", "))
+            }
+            TableValue::List(items) => {
+                let listed: Vec<String> = items.iter().map(value_text).collect();
+                format!("[{}]", listed.join(", "))
+            }
+            TableValue::Dag {
+                operator,
+                name,
+                arguments,
+            } => {
+                let listed: Vec<String> = arguments
+                    .iter()
+                    .map(|(argument, label)| match label {
+                        Some(label) => format!("{}:${label}", value_text(argument)),
+                        None => value_text(argument),
+                    })
+                    .collect();
+                format!(
+                    "({}{} {})",
+                    value_text(operator),
+                    name.as_ref()
+                        .map(|name| format!(":{name}"))
+                        .unwrap_or_default(),
+                    listed.join(", ")
+                )
+            }
+            TableValue::Record(name) => name.clone(),
+            TableValue::Variable(name) => format!("${name}"),
+            TableValue::VariableBit { variable, bit } => format!("{variable}{{{bit}}}"),
+            TableValue::Expression(text) => format!("expr {text:?}"),
+        }
+    }
+
+    #[test]
+    fn the_armv8_tables_load_and_hold_the_instructions() {
+        let table = armv8::table().expect("the table reads");
+        assert_eq!(table.target, "AArch64");
+        let add = table.record("ADDWrr").expect("ADDWrr is a record");
+        assert!(add.is_a("Instruction"));
+        assert!(table.records.len() > 10_000);
+    }
+
+    #[test]
+    fn the_armv8_matcher_is_built_from_the_tables() {
+        let target = armv8::target().expect("the target loads");
+        assert!(target.instructions.len() > 5_000);
+        let matcher = armv8::matcher();
+        eprintln!(
+            "instructions {} matchables {} classes {} maximum operands {}",
+            target.instructions.len(),
+            matcher.matchables.len(),
+            matcher.classes.len(),
+            matcher.maximum_operands
+        );
+        for mnemonic in [
+            "add", "ldr", "b", "movz", "fadd", "mov", "cmp", "ld1b", "pfalse", "smstart", "zero",
+        ] {
+            assert!(
+                matcher.ranges.contains_key(&(0, mnemonic.to_string())),
+                "{mnemonic} has matchables"
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_operand_classes() {
+        let table = armv8::table().expect("the table reads");
+        let mut seen = std::collections::BTreeSet::new();
+        for record in &table.records {
+            if !record.is_a("AsmOperandClass") {
+                continue;
+            }
+            let text = |name: &str| match record.field(name) {
+                Some(TableValue::String(text)) => text.clone(),
+                Some(other) => value_text(other),
+                None => String::new(),
+            };
+            seen.insert(format!(
+                "{} | name={} | pred={} | render={} | parse={} | diag={} | super={}",
+                record.name,
+                text("Name"),
+                text("PredicateMethod"),
+                text("RenderMethod"),
+                text("ParserMethod"),
+                text("DiagnosticType"),
+                text("SuperClasses")
+            ));
+        }
+        for line in seen {
+            eprintln!("{line}");
+        }
+    }
+
+    fn encode_word(record: &str, operands: &[&str]) -> u32 {
+        use crate::compilers::x86_64::MachineOperand;
+        let target = armv8::target().expect("the target loads");
+        let built: Vec<MachineOperand> = operands
+            .iter()
+            .map(|text| match text.parse::<i64>() {
+                Ok(value) => MachineOperand::Immediate(value),
+                Err(_) => armv8::register(target, text).expect("the register exists"),
+            })
+            .collect();
+        let instruction = armv8::instruction(target, record, built).expect("the record exists");
+        let encoded = armv8::encode(target, &instruction).expect("the instruction encodes");
+        assert!(encoded.fixups.is_empty());
+        u32::from_le_bytes(encoded.bytes.try_into().expect("four bytes"))
+    }
+
+    #[test]
+    fn the_armv8_encoder_writes_the_words_llvm_writes() {
+        assert_eq!(encode_word("ADDXri", &["x0", "x1", "1", "0"]), 0x9100_0420);
+        assert_eq!(encode_word("ADDXri", &["x0", "x1", "1", "12"]), 0x9140_0420);
+        assert_eq!(encode_word("ADDWrs", &["w0", "w1", "w2", "3"]), 0x0b02_0c20);
+        assert_eq!(
+            encode_word("ADDXrx", &["x0", "sp", "w1", "18"]),
+            0x8b21_4be0
+        );
+        assert_eq!(encode_word("RET", &["x30"]), 0xd65f_03c0);
+        assert_eq!(encode_word("MOVZXi", &["x0", "1", "0"]), 0xd280_0020);
+        assert_eq!(encode_word("MOVZXi", &["x0", "1", "16"]), 0xd2a0_0020);
+        assert_eq!(encode_word("LDRXui", &["x0", "x1", "1"]), 0xf940_0420);
+        assert_eq!(encode_word("B", &["2"]), 0x1400_0002);
+        assert_eq!(encode_word("FADDDrr", &["d0", "d1", "d2"]), 0x1e62_2820);
+        assert_eq!(
+            encode_word("SUBSXri", &["xzr", "x0", "0", "0"]),
+            0xf100_001f
+        );
+        assert_eq!(
+            encode_word("LDPXpost", &["sp", "x29", "x30", "sp", "2"]),
+            0xa8c1_7bfd
+        );
+        assert_eq!(
+            encode_word("STRXpre", &["sp", "x30", "sp", "-16"]),
+            0xf81f_0ffe
+        );
+    }
+
+    #[test]
+    fn every_armv8_instruction_has_an_encoding_plan() {
+        let target = armv8::target().expect("the target loads");
+        let missing = armv8::coverage(target);
+        for (record, cause) in missing.iter().take(40) {
+            eprintln!("{record}: {cause}");
+        }
+        assert!(
+            missing.is_empty(),
+            "{} instructions lack a plan",
+            missing.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_instruction_groups() {
+        let target = armv8::target().expect("the target loads");
+        let names = std::env::var("APK_BUILDER_RECORDS").unwrap_or_default();
+        for name in names.split(',').filter(|name| !name.is_empty()) {
+            let Some(index) = target.instruction_by_record.get(name) else {
+                eprintln!("{name}: no such instruction");
+                continue;
+            };
+            let instruction = &target.instructions[*index];
+            eprintln!(
+                "{name}: operands {:?} groups {:?}",
+                instruction.operand_records, instruction.groups
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_records_of_class() {
+        let table = armv8::table().expect("the table reads");
+        let class = std::env::var("APK_BUILDER_CLASS").unwrap_or_default();
+        let limit: usize = std::env::var("APK_BUILDER_LIMIT")
+            .ok()
+            .and_then(|text| text.parse().ok())
+            .unwrap_or(3);
+        let mut count = 0;
+        for record in table.records.iter().filter(|record| record.is_a(&class)) {
+            count += 1;
+            if count > limit {
+                continue;
+            }
+            eprintln!("def {} : {}", record.name, record.classes.join(", "));
+            for field in &record.fields {
+                eprintln!("  {} = {}", field.name, value_text(&field.value));
+            }
+        }
+        eprintln!("records of {class}: {count}");
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_table_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        eprintln!(
+            "registers {} classes {} instructions {} aliases {} classes-asm {}",
+            target.registers.len(),
+            target.register_classes.len(),
+            target.instructions.len(),
+            target.aliases.len(),
+            target.assembly_operand_classes.len()
+        );
+        let matcher = armv7::matcher();
+        eprintln!(
+            "matchables {} classes {} maximum {}",
+            matcher.matchables.len(),
+            matcher.classes.len(),
+            matcher.maximum_operands
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_matchables_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        let matcher = armv7::matcher();
+        let wanted = std::env::var("MNEMONIC").unwrap_or_else(|_| "add".to_string());
+        for entry in &matcher.matchables {
+            if entry.mnemonic != wanted {
+                continue;
+            }
+            let operands: Vec<String> = entry
+                .operands
+                .iter()
+                .map(|operand| format!("{}:{}", operand.token, matcher.classes[operand.class].name))
+                .collect();
+            eprintln!(
+                "E v{} {} [{}] {:?} alias={:?} pred={:?}",
+                entry.variant,
+                entry.record,
+                operands.join(" "),
+                entry.conversions,
+                entry.alias,
+                target.instructions[entry.result].predicates
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_registers_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        let names: Vec<String> = target
+            .registers
+            .iter()
+            .enumerate()
+            .map(|(index, register)| {
+                format!(
+                    "{index}:{}:{}:{}",
+                    register.record, register.assembly_name, register.encoding
+                )
+            })
+            .collect();
+        eprintln!("R {}", names.join(" "));
+        for class in &target.register_classes {
+            eprintln!("K {} {}", class.0, class.1.members.len());
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_record_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        let name = std::env::var("RECORD").unwrap_or_else(|_| "SUBri".to_string());
+        let index = target.instruction_by_record[&name];
+        let held = &target.instructions[index];
+        eprintln!(
+            "R {} two={:?} asm={:?} ns={:?} size={} preds={:?} groups={:?}",
+            held.record,
+            held.two_operand_alias_constraint,
+            held.assembly,
+            held.decoder_namespace,
+            held.size,
+            held.predicates,
+            held.groups
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_classes_debug() {
+        let target = armv7::target().expect("the ARMv7 target loads");
+        for class in &target.assembly_operand_classes {
+            eprintln!(
+                "C {} | pred={} | render={} | parser={} | supers={:?} | diag={} | opt={} | def={}",
+                class.name,
+                class.predicate_method,
+                class.render_method,
+                class.parser_method,
+                class.super_classes,
+                class.diagnostic_type,
+                class.optional,
+                class.default_method
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_methods_debug() {
+        let table = armv7::table().expect("the table reads");
+        let mut counts: std::collections::BTreeMap<String, usize> = Default::default();
+        for record in table.records.iter() {
+            for key in [
+                "EncoderMethod",
+                "DecoderMethod",
+                "PrintMethod",
+                "PredicateMethod",
+                "RenderMethod",
+                "ParserMethod",
+                "PostEncoderMethod",
+            ] {
+                if let Some(value) = record.field(key) {
+                    let text = value_text(value);
+                    if text != "\"\"" {
+                        *counts.entry(format!("{key}={text}")).or_default() += 1;
+                    }
+                }
+            }
+        }
+        for (name, count) in counts {
+            eprintln!("M {name} {count}");
+        }
+    }
+
+    fn assemble_object(source: &str) -> Result<Vec<u8>, String> {
+        use crate::compilers::x86_64::{
+            assemble_source, AssemblerOptions, MessageKind, OutputKind,
+        };
+        let mut options = AssemblerOptions::new("aarch64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        let result = assemble_source(&options, source.as_bytes(), None)
+            .map_err(|diagnostic| diagnostic.message)?;
+        let errors: Vec<String> = result
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Error)
+            .map(|message| message.text.clone())
+            .collect();
+        if result.failed || !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        Ok(result.output)
+    }
+
+    fn armv7_settings(spec: &str) -> (String, String, Vec<String>) {
+        let mut parts = spec.split('|');
+        let triple = parts.next().unwrap_or_default().to_string();
+        let cpu = parts.next().unwrap_or("cortex-a15").to_string();
+        let attributes = match parts.next() {
+            Some(held) => held
+                .split(',')
+                .filter(|piece| !piece.is_empty())
+                .map(str::to_string)
+                .collect(),
+            None => vec!["+neon".to_string()],
+        };
+        (triple, cpu, attributes)
+    }
+
+    fn armv7_expected(source: &str, spec: &str) -> Option<Vec<u8>> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
+        let triple = triple.as_str();
+        use std::io::Write;
+        let folder = std::env::temp_dir().join(format!(
+            "apk_builder_armv7_{}_{:?}",
+            std::process::id(),
+            std::thread::current().id()
+        ));
+        std::fs::create_dir_all(&folder).ok()?;
+        let object = folder.join("expected.o");
+        let binary = folder.join("expected.bin");
+        let mut child = std::process::Command::new("llvm-mc-18")
+            .args([
+                &format!("-triple={triple}"),
+                &format!("-mcpu={cpu}"),
+                &format!("-mattr={}", attributes.join(",")),
+                "-filetype=obj",
+                "-o",
+            ])
+            .arg(&object)
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(format!("{source}\n").as_bytes())
+            .ok()?;
+        if !child.wait().ok()?.success() {
+            let _ = std::fs::remove_dir_all(&folder);
+            return None;
+        }
+        let status = std::process::Command::new("llvm-objcopy-18")
+            .args(["-O", "binary", "--only-section=.text"])
+            .arg(&object)
+            .arg(&binary)
+            .status()
+            .ok()?;
+        let bytes = if status.success() {
+            std::fs::read(&binary).ok()
+        } else {
+            None
+        };
+        let _ = std::fs::remove_dir_all(&folder);
+        bytes
+    }
+
+    fn armv7_text_expected(source: &str, spec: &str) -> Option<String> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
+        use std::io::Write;
+        let mut child = std::process::Command::new("llvm-mc-18")
+            .args([
+                &format!("-triple={triple}"),
+                &format!("-mcpu={cpu}"),
+                &format!("-mattr={}", attributes.join(",")),
+            ])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::piped())
+            .stderr(std::process::Stdio::null())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(format!("{source}\n").as_bytes())
+            .ok()?;
+        let output = child.wait_with_output().ok()?;
+        let text = String::from_utf8_lossy(&output.stdout).to_string();
+        text.lines()
+            .find(|line| line.starts_with('\t') && !line.trim_start().starts_with('.'))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+    }
+
+    fn armv7_text(source: &str, spec: &str) -> Result<String, String> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
+        use crate::compilers::x86_64::{
+            assemble_source, AssemblerOptions, MessageKind, OutputKind,
+        };
+        let mut options = AssemblerOptions::new(&triple);
+        options.output = OutputKind::Assembly;
+        options.cpu = cpu;
+        options.features = attributes;
+        let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
+            .map_err(|diagnostic| diagnostic.message)?;
+        let errors: Vec<String> = result
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Error)
+            .map(|message| message.text.clone())
+            .collect();
+        if result.failed || !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        let text = String::from_utf8_lossy(&result.output).to_string();
+        text.lines()
+            .find(|line| line.starts_with('\t') && !line.trim_start().starts_with('.'))
+            .map(|line| line.split_whitespace().collect::<Vec<_>>().join(" "))
+            .ok_or_else(|| "no instruction line".to_string())
+    }
+
+    fn armv7_object(source: &str, spec: &str) -> Result<Vec<u8>, String> {
+        let (triple, cpu, attributes) = armv7_settings(spec);
+        use crate::compilers::x86_64::{
+            assemble_source, AssemblerOptions, MessageKind, OutputKind,
+        };
+        let mut options = AssemblerOptions::new(&triple);
+        options.output = OutputKind::Object;
+        options.cpu = cpu;
+        options.features = attributes;
+        let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
+            .map_err(|diagnostic| diagnostic.message)?;
+        let errors: Vec<String> = result
+            .messages
+            .iter()
+            .filter(|message| message.kind == MessageKind::Error)
+            .map(|message| message.text.clone())
+            .collect();
+        if result.failed || !errors.is_empty() {
+            return Err(errors.join("; "));
+        }
+        let parsed = crate::compilers::elf::ElfFile::parse(&result.output)
+            .map_err(|diagnostic| diagnostic.message)?;
+        Ok(parsed
+            .section_named(".text")
+            .map(|index| parsed.sections[index].data.clone())
+            .unwrap_or_default())
+    }
+
+    fn compare_armv7(cases: &[&str], triple: &str) {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let mut failures = Vec::new();
+        let mut printed = 0;
+        for source in cases {
+            if armv7_text_expected(source, triple).is_some() {
+                printed += 1;
+            }
+            let Some(expected) = armv7_expected(source, triple) else {
+                failures.push(format!("{source}: llvm-mc rejects it"));
+                continue;
+            };
+            if let Some(want) = armv7_text_expected(source, triple) {
+                match armv7_text(source, triple) {
+                    Ok(got) if got == want => {}
+                    Ok(got) => failures.push(format!(
+                        "{source}: prints `{got}` but llvm-mc prints `{want}`"
+                    )),
+                    Err(message) => failures.push(format!("{source}: text output: {message}")),
+                }
+            }
+            match armv7_object(source, triple) {
+                Err(message) => failures.push(format!("{source}: {message}")),
+                Ok(bytes) => {
+                    if bytes != expected {
+                        failures.push(format!(
+                            "{source}: {bytes:02x?} but llvm-mc gives {expected:02x?}"
+                        ));
+                    }
+                }
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert_eq!(printed, cases.len(), "llvm-mc prints every case");
+        assert!(
+            failures.is_empty(),
+            "{} of {} failed",
+            failures.len(),
+            cases.len()
+        );
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_arm_mode_instructions() {
+        let cases: &[&str] = &[
+            "mrc p14, #0, r1, c1, c2, #4",
+            "push {sp}",
+            "pop {r1}",
+            "vpush {q4, q5}",
+            "vcvt.f32.u32 s0, s0, #20",
+            "pkhbt r1, r2, r3, lsl #24",
+            "ldc p14, c1, [r0]",
+            "mcrr p7, #15, r5, r4, c1",
+            "ldc2l p6, c5, [r1, #4]!",
+            "stc p5, c1, [r0], {7}",
+            "mrc2 p14, #0, r1, c1, c2, #4",
+            "ldcl p14, c1, [r0, #-4]",
+            "cdp p7, #1, c1, c2, c3, #2",
+            "msr cpsr_fc, r0",
+            "mrs r1, r8_usr",
+            "msr SPSR_fiq, r3",
+            "msr cpsr_f, #1",
+            "msr spsr_fsxc, r2",
+            "ldrt r1, [r0]",
+            "ldrbt r1, [r0], #4",
+            "strt r1, [r0]",
+            "ldrht r1, [r0]",
+            "add r0, pc, #123",
+            "ldrd r0, [r10, #32]!",
+            "ldrexd r2, r3, [r0]",
+            "cpsie if",
+            "cpsid a, #5",
+            "mul r0, r1, r2",
+            "add r0, r1, r2",
+            "add r0, r1, #1",
+            "adds r0, r1, r2",
+            "addeq r0, r1, r2",
+            "addseq r0, r1, #255",
+            "sub r0, r1, r2, lsl #3",
+            "sub r0, r1, r2, lsr r3",
+            "mov r0, r1",
+            "mov r0, #0xff000000",
+            "mvn r0, #1",
+            "cmp r0, r1",
+            "cmp r0, #4",
+            "tst r0, r1, ror #8",
+            "orr r0, r1, r2",
+            "eor r0, r1, r2, asr #4",
+            "and r0, r1, #0xf0",
+            "bic r0, r1, r2",
+            "rsb r0, r1, #0",
+            "mul r0, r1, r2",
+            "mla r0, r1, r2, r3",
+            "ldr r0, [r1]",
+            "ldr r0, [r1, #4]",
+            "ldr r0, [r1, #-4]",
+            "ldr r0, [r1, r2]",
+            "ldr r0, [r1, -r2, lsl #2]",
+            "ldr r0, [r1, #4]!",
+            "ldr r0, [r1], #4",
+            "ldr r0, [r1], r2",
+            "str r0, [r1, #8]",
+            "strb r0, [r1], #1",
+            "ldrb r0, [r1, r2]",
+            "ldrh r0, [r1, #2]",
+            "ldrsh r0, [r1, r2]",
+            "strh r0, [r1], #2",
+            "push {r4, r5, lr}",
+            "pop {r4, r5, pc}",
+            "ldm r0, {r1, r2}",
+            "stmdb sp!, {r4-r7}",
+            "bx lr",
+            "blx r3",
+            "nop",
+            "svc #0",
+            "movw r0, #0x1234",
+            "movt r0, #0x5678",
+            "uxtb r0, r1",
+            "clz r0, r1",
+            "bfc r0, #4, #8",
+            "bfi r0, r1, #4, #8",
+            "bl foo",
+            "b foo",
+            "beq foo",
+            "blx foo",
+            "adr r0, foo",
+            "ldr r0, foo",
+            "ldrh r0, foo",
+            "movw r0, #:lower16:foo",
+            "movt r0, #:upper16:foo",
+            "ldr r0, [pc, #8]",
+            "ubfx r0, r1, #3, #5",
+            "ssat r0, #8, r1",
+            "ssat r0, #8, r1, lsl #4",
+            "uxtb r0, r1, ror #8",
+            "sxth r0, r1, ror #16",
+            "setend be",
+            "rev r0, r1",
+            "smull r0, r1, r2, r3",
+            "umlal r0, r1, r2, r3",
+            "sdiv r0, r1, r2",
+            "movs r0, r1",
+            "mov r0, r1, lsl #2",
+            "mov r0, r1, lsl r2",
+            "mov r0, r1, rrx",
+            "lsl r0, r1, #4",
+            "asr r0, r1, r2",
+            "ldrd r0, r1, [r2]",
+            "strd r0, r1, [r2, #8]",
+            "ldrex r0, [r1]",
+            "strex r0, r1, [r2]",
+            "ldmia sp!, {r0, r1}",
+            "stmia r0, {r1, r2}",
+            "bkpt #1",
+            "dmb ish",
+            "dsb",
+            "isb",
+            "wfi",
+            "yield",
+            "movne r0, #1",
+            "ldrne r0, [r1, #4]",
+            "pld [r0, #4]",
+        ];
+        compare_armv7(cases, "armv7a-linux-gnueabihf");
+    }
+
+    fn armv7_diagnostics_expected(source: &str, triple: &str, cpu: &str) -> Option<Vec<String>> {
+        use std::io::Write;
+        let mut child = std::process::Command::new("llvm-mc-18")
+            .args([&format!("-triple={triple}"), &format!("-mcpu={cpu}")])
+            .stdin(std::process::Stdio::piped())
+            .stdout(std::process::Stdio::null())
+            .stderr(std::process::Stdio::piped())
+            .spawn()
+            .ok()?;
+        child
+            .stdin
+            .take()?
+            .write_all(format!("{source}\n").as_bytes())
+            .ok()?;
+        let output = child.wait_with_output().ok()?;
+        let text = String::from_utf8_lossy(&output.stderr).to_string();
+        Some(
+            text.lines()
+                .filter_map(|line| line.strip_prefix("<stdin>:"))
+                .filter(|line| line.contains(": error: ") || line.contains(": note: "))
+                .filter_map(|line| {
+                    let (number, rest) = line.split_once(':')?;
+                    let (_, rest) = rest.split_once(':')?;
+                    Some(format!("{number}:{rest}"))
+                })
+                .collect(),
+        )
+    }
+
+    fn armv7_diagnostics(source: &str, triple: &str, cpu: &str) -> Vec<String> {
+        use crate::compilers::x86_64::{
+            assemble_source, render_messages, AssemblerOptions, OutputKind,
+        };
+        let mut options = AssemblerOptions::new(triple);
+        options.output = OutputKind::Assembly;
+        options.cpu = cpu.to_string();
+        let Ok(result) = assemble_source(&options, format!("{source}\n").as_bytes(), None) else {
+            return vec!["the assembler does not start".to_string()];
+        };
+        render_messages(&result)
+            .iter()
+            .filter_map(|diagnostic| {
+                let kind = match diagnostic.severity {
+                    crate::diag::Severity::Warning => return None,
+                    crate::diag::Severity::Info => "note",
+                    _ => "error",
+                };
+                let cause = diagnostic
+                    .context
+                    .iter()
+                    .find_map(|line| line.strip_prefix("Cause: "))
+                    .unwrap_or_default();
+                let location = diagnostic.location.as_ref()?;
+                Some(format!("{}: {kind}: {cause}", location.line))
+            })
+            .collect()
+    }
+
+    #[test]
+    fn the_armv7_assembler_reports_the_same_diagnostics_as_llvm_mc() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[(&str, &str, &str)] = &[
+            ("armv7-linux-gnueabi", "cortex-a15", "dbg #16"),
+            ("armv7-linux-gnueabi", "cortex-a15", "dbg r0"),
+            (
+                "armv7-linux-gnueabi",
+                "cortex-a15",
+                "cdp p14, #1, c1, c1, c1, #8",
+            ),
+            ("armv7-linux-gnueabi", "cortex-a15", "mov r15x, r0"),
+            ("armv7-linux-gnueabi", "cortex-a15", "add r0, r1, r2, r3"),
+            ("armv7-linux-gnueabi", "cortex-a15", "add r0"),
+            ("armv7-linux-gnueabi", "cortex-a15", "pushh r1, r2, r3"),
+            ("armv7-linux-gnueabi", "cortex-a15", "adXd r1, r2, r3"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ldre r1, r2, r3"),
+            (
+                "armv7-linux-gnueabi",
+                "cortex-a15",
+                "aaaaaaaaaaaaaaa r1, r2, r3",
+            ),
+            ("armv7-linux-gnueabi", "cortex-a15", "mov r0, r1, r2"),
+            ("armv7-linux-gnueabi", "cortex-a15", "bkpt #65536"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ldr r0, [r1, r2, r3]"),
+            ("armv7-linux-gnueabi", "cortex-a15", "vldm r0, {d0-d3, s4}"),
+            ("armv7-linux-gnueabi", "cortex-a15", "push {r0, r1"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ssat r0, #33, r1"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "adds r0, r1, r2"),
+            ("armv7-linux-gnueabi", "cortex-a15", "ldrexd r2, r4, [r0]"),
+            ("armv7-linux-gnueabi", "cortex-a15", "strd r1, r2, [r0]"),
+            (
+                "armv7-linux-gnueabi",
+                "cortex-a15",
+                "ldrd r0, r1, [r0, #8]!",
+            ),
+            ("armv7-linux-gnueabi", "cortex-a15", "umull r0, r0, r1, r2"),
+            ("armv7-linux-gnueabi", "cortex-a15", "sbfx r0, r1, #4, #32"),
+            (
+                "thumbv7-linux-gnueabi",
+                "cortex-a15",
+                "it eq\nadds r0, r1, r2",
+            ),
+            (
+                "thumbv7-linux-gnueabi",
+                "cortex-a15",
+                "it eq\naddeq r0, r1, r2\naddne r0, r1, r2",
+            ),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "addeq r0, r1, r2"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "push {r0, sp}"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "pop {r0, pc, lr}"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "cbz r0, #200"),
+            (
+                "thumbv7-linux-gnueabi",
+                "cortex-a15",
+                "strd r0, r1, [r0, #8]!",
+            ),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "ldr r0, [r0, #4]!"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "it al\nmov r0, r1"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "it eq\nb #4\nnop"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "pop {sp}"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "mul r0, r1, r2"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "cbz r8, #4"),
+            ("thumbv7-linux-gnueabi", "cortex-a15", "fadd r1, r2, r3"),
+            ("thumbv6m-linux-gnueabi", "cortex-m0", "adds r0, r8, r2"),
+            ("thumbv6m-linux-gnueabi", "cortex-m0", "ldr r0, [r8]"),
+            ("thumbv6m-linux-gnueabi", "cortex-m0", "mrs r0, sp"),
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for (triple, cpu, source) in cases {
+            let Some(expected) = armv7_diagnostics_expected(source, triple, cpu) else {
+                continue;
+            };
+            let got = armv7_diagnostics(source, triple, cpu);
+            if got != expected {
+                failures.push(format!(
+                    "{triple} {source}:\n  ours: {got:?}\n  llvm: {expected:?}"
+                ));
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(failures.is_empty(), "{} diagnostics differ", failures.len());
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_mve_instructions() {
+        let spec = "thumbv8.1m.main-none-eabi|generic|+mve.fp,+fp64,+lob";
+        let cases: &[&str] = &[
+            "wlstp.8 lr, r0, #1668",
+            "wls lr, r0, #8",
+            "dls lr, r0",
+            "dlstp.32 lr, r4",
+            "le lr, #-8",
+            "le #-8",
+            "letp lr, #-12",
+            "bf #4, #8",
+            "bfl #4, #8",
+            "bfx #4, r1",
+            "vpst",
+            "vpteee.i8 eq, q0, q1",
+            "vptt.s32 gt, q0, q1",
+            "vpt.f32 le, q0, q1",
+            "vpt.u16 hi, q0, r3",
+            "vpnot",
+            "vctp.16 r2",
+            "vadd.i8 q0, q1, q2",
+            "vabav.s32 lr, q1, q3",
+            "vaddv.s16 lr, q0",
+            "vldrb.u8 q0, [r0]",
+            "vldrb.s16 q0, [r0, #-5]",
+            "vldrw.u32 q0, [r0, #8]!",
+            "vldrw.u32 q0, [r0], #-8",
+            "vstrw.32 q1, [r0, q2, uxtw #2]",
+            "vldrh.u16 q0, [r0, q1]",
+            "vldrw.u32 q0, [q1, #4]!",
+            "vstrd.64 q0, [q1, #-16]",
+            "vld20.8 {q0, q1}, [sp]",
+            "vst43.32 {q0, q1, q2, q3}, [r0]!",
+            "vld40.8 {q0-q3}, [r2]",
+            "viwdup.u8 q0, lr, r1, #1",
+            "vidup.u16 q1, r2, #4",
+            "vshlc q0, lr, #8",
+            "vshllb.s8 q0, q1, #7",
+            "vshllt.u16 q2, q3, #15",
+            "cinc lr, r7, pl",
+            "cset lr, eq",
+            "sqrshr lr, r12",
+            "sqrshrl lr, r3, #64, r8",
+            "asrl r0, r1, #23",
+            "vcmla.f32 q0, q1, q2, #90",
+            "vmov q0[2], q0[0], r0, r1",
+        ];
+        compare_armv7(cases, spec);
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_floating_point_instructions() {
+        let cases: &[&str] = &[
+            "vadd.f32 s0, s1, s2",
+            "vadd.f64 d0, d1, d2",
+            "vsub.f64 d0, d1, d2",
+            "vmul.f32 s0, s1, s2",
+            "vdiv.f64 d0, d1, d2",
+            "vmov s0, r0",
+            "vmov r0, s0",
+            "vmov d0, r0, r1",
+            "vmov r0, r1, d0",
+            "vmov.f32 s0, #1.0",
+            "vmov.f64 d0, #2.0",
+            "vmov.f64 d0, d1",
+            "vldr d0, [r0]",
+            "vldr s0, [r0, #8]",
+            "vstr d0, [r1, #-8]",
+            "vpush {d8, d9}",
+            "vpop {s16, s17}",
+            "vldmia r0!, {d0, d1}",
+            "vstmdb sp!, {d8-d11}",
+            "vcvt.f64.f32 d0, s0",
+            "vcvt.f32.s32 s0, s1",
+            "vcvt.s32.f64 s0, d1",
+            "vcmp.f64 d0, d1",
+            "vcmp.f32 s0, #0",
+            "vmrs APSR_nzcv, fpscr",
+            "vmsr fpscr, r0",
+            "vabs.f32 s0, s1",
+            "vneg.f64 d0, d1",
+            "vsqrt.f64 d0, d1",
+            "vmla.f32 s0, s1, s2",
+            "vfma.f64 d0, d1, d2",
+            "vadd.i32 q0, q1, q2",
+            "vadd.i8 d0, d1, d2",
+            "vsub.i16 q0, q1, q2",
+            "vmul.f32 q0, q1, q2",
+            "vand q0, q1, q2",
+            "vorr d0, d1, d2",
+            "veor q0, q1, q2",
+            "vmov q0, q1",
+            "vmov.i32 q0, #0",
+            "vmov.i8 d0, #0xff",
+            "vdup.32 q0, r0",
+            "vld1.32 {d0}, [r0]",
+            "vld1.8 {d0, d1}, [r0]!",
+            "vst1.32 {d0, d1}, [r0:128]",
+            "vld2.16 {d0, d1}, [r0], r1",
+            "vmax.s32 q0, q1, q2",
+            "vshl.i32 q0, q1, #3",
+            "vshr.u16 d0, d1, #4",
+            "vcvt.f32.s32 q0, q1",
+            "vtbl.8 d0, {d1, d2}, d3",
+            "vext.8 q0, q1, q2, #3",
+        ];
+        compare_armv7(cases, "armv7a-linux-gnueabihf");
+    }
+
+    fn armv7_attributes(source: &str, ours: bool) -> Option<Vec<u8>> {
+        use std::io::Write;
+        let triple = "armv7-unknown-linux-gnueabi";
+        let object = if ours {
+            use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+            let mut options = AssemblerOptions::new(triple);
+            options.output = OutputKind::Object;
+            let result = assemble_source(&options, format!("{source}\n").as_bytes(), None).ok()?;
+            if result.failed {
+                return None;
+            }
+            result.output
+        } else {
+            let folder = std::env::temp_dir().join(format!(
+                "apk_builder_armv7_attr_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&folder).ok()?;
+            let path = folder.join("expected.o");
+            let mut child = std::process::Command::new("llvm-mc-18")
+                .args([&format!("-triple={triple}"), "-filetype=obj", "-o"])
+                .arg(&path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            child
+                .stdin
+                .take()?
+                .write_all(format!("{source}\n").as_bytes())
+                .ok()?;
+            if !child.wait().ok()?.success() {
+                let _ = std::fs::remove_dir_all(&folder);
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok();
+            let _ = std::fs::remove_dir_all(&folder);
+            bytes?
+        };
+        let parsed = crate::compilers::elf::ElfFile::parse(&object).ok()?;
+        Some(
+            parsed
+                .section_named(".ARM.attributes")
+                .map(|index| parsed.sections[index].data.clone())
+                .unwrap_or_default(),
+        )
+    }
+
+    #[test]
+    fn the_armv7_assembler_writes_the_same_build_attributes_as_llvm_mc() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[&str] = &[
+            ".arch armv7-a",
+            ".arch armv4t",
+            ".arch armv6",
+            ".arch armv6k",
+            ".arch armv6t2",
+            ".arch armv6-m",
+            ".arch armv7-r",
+            ".arch armv7-m",
+            ".arch armv7e-m",
+            ".arch armv8-a",
+            ".arch armv8.1-a",
+            ".arch armv8-m.base",
+            ".arch armv8-m.main",
+            ".arch iwmmxt",
+            ".arch iwmmxt2",
+            ".arch xscale",
+            ".arch armv7\n.object_arch armv4",
+            ".cpu cortex-a8",
+            ".cpu cortex-a9\n.fpu neon",
+            ".fpu neon",
+            ".fpu vfpv3",
+            ".fpu vfpv3-d16",
+            ".fpu fpv4-sp-d16",
+            ".fpu neon-vfpv4",
+            ".fpu crypto-neon-fp-armv8",
+            ".fpu vfpv4\n.arch armv7-a",
+            ".eabi_attribute Tag_CPU_arch, 10",
+            ".eabi_attribute Tag_conformance, \"2.09\"\n.eabi_attribute Tag_CPU_arch, 10",
+            ".eabi_attribute 7, 'A'\n.eabi_attribute 8, 1\n.eabi_attribute 9, 2",
+            ".eabi_attribute Tag_CPU_raw_name, \"Cortex-A9\"",
+            ".eabi_attribute 32, 1, \"x\"",
+            ".eabi_attribute Tag_also_compatible_with, \"\\006\\012\"",
+            ".eabi_attribute 70, \"abc\"",
+            ".arch armv7-a\n.eabi_attribute 6, 14",
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for source in cases {
+            let expected = armv7_attributes(source, false);
+            let actual = armv7_attributes(source, true);
+            if expected != actual {
+                failures.push(format!(
+                    "{source}: {actual:02x?} but llvm-mc gives {expected:02x?}"
+                ));
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} attribute cases differ",
+            failures.len()
+        );
+    }
+
+    fn armv7_object_summary(object: &[u8]) -> Option<String> {
+        use crate::compilers::elf::ElfFile;
+        let parsed = ElfFile::parse(object).ok()?;
+        let mut out = String::new();
+        let table = parsed.symbol_table()?;
+        let symbols = parsed.symbols(table).ok()?;
+        let section_label = |index: u32| -> String {
+            parsed
+                .sections
+                .get(index as usize)
+                .map(|section| section.name.clone())
+                .unwrap_or_else(|| format!("#{index}"))
+        };
+        for (index, section) in parsed.sections.iter().enumerate() {
+            if matches!(
+                section.name.as_str(),
+                ".symtab" | ".strtab" | ".shstrtab" | ""
+            ) {
+                continue;
+            }
+            if section.name.starts_with(".rel") {
+                let mut lines: Vec<String> = parsed
+                    .relocations(index)
+                    .ok()?
+                    .iter()
+                    .map(|reloc| {
+                        let name = symbols
+                            .get(reloc.symbol as usize)
+                            .map(|held| {
+                                if held.name.is_empty() {
+                                    section_label(held.section)
+                                } else {
+                                    held.name.clone()
+                                }
+                            })
+                            .unwrap_or_default();
+                        format!(
+                            "  reloc {:#x} {} {} {}",
+                            reloc.offset, reloc.kind, name, reloc.addend
+                        )
+                    })
+                    .collect();
+                lines.sort();
+                out.push_str(&format!(
+                    "{} link={} info={}\n",
+                    section.name,
+                    section_label(section.link),
+                    section_label(section.info)
+                ));
+                out.push_str(&lines.join("\n"));
+                out.push('\n');
+                continue;
+            }
+            out.push_str(&format!(
+                "{} type={:#x} flags={:#x} link={} align={} data={:02x?}\n",
+                section.name,
+                section.kind,
+                section.flags,
+                section_label(section.link),
+                section.alignment,
+                section.data
+            ));
+        }
+        let mut rows: Vec<String> = symbols
+            .iter()
+            .map(|held| {
+                let name = match held.name.split_once('.') {
+                    Some((head, tail))
+                        if matches!(head, "$a" | "$t" | "$d")
+                            && !tail.is_empty()
+                            && tail.bytes().all(|byte| byte.is_ascii_digit()) =>
+                    {
+                        head
+                    }
+                    _ => held.name.as_str(),
+                };
+                format!(
+                    "sym {} value={:#x} size={} bind={} type={} other={} in={}",
+                    name,
+                    held.value,
+                    held.size,
+                    held.binding,
+                    held.kind,
+                    held.other,
+                    section_label(held.section)
+                )
+            })
+            .collect();
+        rows.sort();
+        out.push_str(&rows.join("\n"));
+        Some(out)
+    }
+
+    fn armv7_summary(source: &str, triple: &str, ours: bool) -> Option<String> {
+        use std::io::Write;
+        let object = if ours {
+            use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+            let mut options = AssemblerOptions::new(triple);
+            options.output = OutputKind::Object;
+            let result = assemble_source(&options, format!("{source}\n").as_bytes(), None).ok()?;
+            if result.failed {
+                let errors: Vec<String> = result
+                    .messages
+                    .iter()
+                    .map(|message| message.text.clone())
+                    .collect();
+                return Some(format!("ERRORS {errors:?}"));
+            }
+            result.output
+        } else {
+            let folder = std::env::temp_dir().join(format!(
+                "apk_builder_armv7_sum_{}_{:?}",
+                std::process::id(),
+                std::thread::current().id()
+            ));
+            std::fs::create_dir_all(&folder).ok()?;
+            let path = folder.join("expected.o");
+            let mut child = std::process::Command::new("llvm-mc-18")
+                .args([&format!("-triple={triple}"), "-filetype=obj", "-o"])
+                .arg(&path)
+                .stdin(std::process::Stdio::piped())
+                .stdout(std::process::Stdio::null())
+                .stderr(std::process::Stdio::null())
+                .spawn()
+                .ok()?;
+            child
+                .stdin
+                .take()?
+                .write_all(format!("{source}\n").as_bytes())
+                .ok()?;
+            if !child.wait().ok()?.success() {
+                let _ = std::fs::remove_dir_all(&folder);
+                return None;
+            }
+            let bytes = std::fs::read(&path).ok();
+            let _ = std::fs::remove_dir_all(&folder);
+            bytes?
+        };
+        armv7_object_summary(&object)
+    }
+
+    #[test]
+    fn the_armv7_assembler_writes_the_same_objects_as_llvm_mc() {
+        if std::process::Command::new("llvm-mc-18")
+            .arg("--version")
+            .output()
+            .is_err()
+        {
+            return;
+        }
+        let cases: &[&str] = &[
+            ".fnstart\n.cantunwind\n.fnend",
+            ".fnstart\n.save {r4, r5, lr}\n.pad #8\nnop\n.fnend",
+            ".fnstart\n.save {r4-r11, lr}\n.setfp r11, sp, #8\nnop\n.fnend",
+            ".fnstart\n.vsave {d8, d9}\n.save {r7, lr}\n.movsp r7\nnop\n.fnend",
+            ".fnstart\n.personality __gxx_personality_v0\n.handlerdata\n.long 0\n.fnend",
+            ".fnstart\n.personalityindex 1\n.save {r4}\nnop\n.fnend",
+            ".fnstart\n.personalityindex 2\n.pad #4\nnop\n.fnend",
+            ".fnstart\n.unwind_raw 4, 0xb1, 0x01\nnop\n.fnend",
+            ".section .text.f,\"ax\"\n.fnstart\n.save {r4, lr}\nnop\n.fnend",
+            ".section .text.g,\"axG\",%progbits,grp,comdat\n.fnstart\n.cantunwind\nnop\n.fnend",
+            ".thumb\n.thumb_func\nf:\nnop\n.word f",
+            ".thumb\nf:\n.type f,%function\nnop\n.word f",
+            ".arm\nnop\n.word 1\nnop",
+            ".word 1\nnop\n.thumb\nnop",
+            ".thumb\n.thumb_func\nf:\nbx lr\ng = f\n.word g",
+            ".arm\nb undefined\nbl undefined\nldr r0, =0x12345678",
+            ".thumb\nnop\nbl undefined\nlabel: .word label",
+            ".arm\nlocal: nop\nb local\n.word local",
+            ".text\n.inst 0xe1a00000\n.thumb\n.inst.n 0xbf00\n.inst.w 0xf3af8000",
+        ];
+        let mut failures: Vec<String> = Vec::new();
+        for source in cases {
+            let expected = armv7_summary(source, "armv7-unknown-linux-gnueabi", false);
+            let actual = armv7_summary(source, "armv7-unknown-linux-gnueabi", true);
+            if expected != actual {
+                failures.push(format!(
+                    "--- {source}\nours:\n{}\nllvm-mc:\n{}",
+                    actual.unwrap_or_else(|| "(none)".into()),
+                    expected.unwrap_or_else(|| "(none)".into())
+                ));
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} object cases differ",
+            failures.len()
+        );
+    }
+
+    #[test]
+    fn the_armv7_assembler_matches_llvm_mc_on_thumb_instructions() {
+        let cases: &[&str] = &[
+            "cpsie f",
+            "cpsid aif",
+            "cpsie i, #3",
+            "tbb [r0, r1]",
+            "tbh [r0, r1, lsl #1]",
+            "pkhbt r1, r2, r3, lsl #24",
+            "pkhtb r1, r2, r3, asr #8",
+            "adds r1, #3",
+            "subs r1, r1, #3",
+            "push {r0}",
+            "pop {r1}",
+            "mov r0, r1, lsr #3",
+            "vld3.8 {d16, d17, d18}, [r0:64]",
+            "vst3.16 {d16, d17, d18}, [r0]!",
+            "vld4.32 {d0[1], d1[1], d2[1], d3[1]}, [r1]",
+            "ldrb.w r0, [r1, #-4]",
+            "ldrt r1, [r0]",
+            "ldr r0, [r1, #-4]!",
+            "add.w r0, r1, r2",
+            "add.w r0, r1, #1",
+            "adds r0, r1, r2",
+            "add r0, r1, r2",
+            "add r0, r1, #1",
+            "adds r0, r1, #1",
+            "add r0, #1",
+            "sub r0, r1, r2",
+            "mov r0, r1",
+            "movs r0, #0",
+            "mov.w r0, #0xff00ff",
+            "movw r0, #0x1234",
+            "movt r0, #0x5678",
+            "cmp r0, r1",
+            "cmp r0, #4",
+            "cmp.w r0, #4",
+            "and r0, r1, r2",
+            "orr.w r0, r1, r2, lsl #3",
+            "eor r0, r1",
+            "lsl r0, r1, #2",
+            "lsr.w r0, r1, r2",
+            "ldr r0, [r1]",
+            "ldr r0, [r1, #4]",
+            "ldr.w r0, [r1, #4000]",
+            "ldr r0, [r1, r2]",
+            "ldr.w r0, [r1, r2, lsl #2]",
+            "ldr r0, [sp, #8]",
+            "ldr r0, [r1], #4",
+            "ldr r0, [r1, #4]!",
+            "str r0, [r1, #4]",
+            "ldrb r0, [r1, #1]",
+            "ldrh r0, [r1, #2]",
+            "strh r0, [r1, r2]",
+            "ldrd r0, r1, [r2, #8]",
+            "strd r0, r1, [r2]",
+            "push {r4, lr}",
+            "pop {r4, pc}",
+            "push.w {r4, r5, r6, lr}",
+            "ldm r0!, {r1, r2}",
+            "stmdb sp!, {r4-r8}",
+            "bx lr",
+            "blx r3",
+            "nop",
+            "svc #1",
+            "mul r0, r1, r0",
+            "mul r0, r1, r2",
+            "mla r0, r1, r2, r3",
+            "sdiv r0, r1, r2",
+            "udiv r0, r1, r2",
+            "uxtb r0, r1",
+            "sxth r0, r1",
+            "clz r0, r1",
+            "rbit r0, r1",
+            "bfc r0, #4, #8",
+            "ubfx r0, r1, #3, #5",
+            "dmb ish",
+            "tst r0, r1",
+            "mvn r0, r1",
+            "neg r0, r1",
+            "rsb r0, r1, #0",
+            "adc r0, r1, r2",
+            "sbc r0, r1, r2",
+            "bic r0, r1, r2",
+            "ror r0, r1, #8",
+            "it eq",
+            "cbz r0, #8",
+            "wfi",
+            "bl foo",
+            "b.w foo",
+            "blx foo",
+            "movw r0, #:lower16:foo",
+            "movt r0, #:upper16:foo",
+        ];
+        compare_armv7(cases, "thumbv7a-linux-gnueabihf");
+    }
+
+    #[test]
+    fn the_armv8_assembler_matches_llvm_mc_on_common_instructions() {
+        let cases: &[(&str, &str)] = &[
+            ("add x0, x1, #1", "20040091"),
+            ("add x0, x1, x2", "2000028b"),
+            ("add w0, w1, w2, lsl #3", "200c020b"),
+            ("add x0, sp, w1, uxtw #2", "e04b218b"),
+            ("ldr x0, [x1, #8]", "200440f9"),
+            ("str x30, [sp, #-16]!", "fe0f1ff8"),
+            ("ldp x29, x30, [sp], #16", "fd7bc1a8"),
+            ("mov x0, #1", "200080d2"),
+            ("mov x0, x1", "e00301aa"),
+            ("mov w0, #-1", "00008012"),
+            ("cmp x0, #0", "1f0000f1"),
+            ("ret", "c0035fd6"),
+            ("fadd d0, d1, d2", "2028621e"),
+            ("cset w0, eq", "e0179f1a"),
+            ("csel x0, x1, x2, ne", "2010829a"),
+            ("ubfx x0, x1, #4, #8", "202c44d3"),
+            ("lsl x0, x1, #3", "20f07dd3"),
+            ("movk x0, #1, lsl #16", "2000a0f2"),
+            ("add v0.4s, v1.4s, v2.4s", "2084a24e"),
+            ("ld1 {v0.16b}, [x0]", "0070404c"),
+            ("mrs x0, tpidr_el0", "40d03bd5"),
+            ("dmb ish", "bf3b03d5"),
+            ("sxtw x0, w1", "207c4093"),
+            ("and x0, x1, #0xff", "201c4092"),
+            ("ldr x0, [x1, x2, lsl #3]", "207862f8"),
+            ("ldr w0, [x1, w2, sxtw #2]", "20d862b8"),
+            ("fmov d0, #1.0", "00106e1e"),
+            ("fcmp d0, #0.0", "0820601e"),
+            ("nop", "1f2003d5"),
+            ("svc #0", "010000d4"),
+            ("brk #1", "200020d4"),
+            ("mul x0, x1, x2", "207c029b"),
+            ("sdiv w0, w1, w2", "200cc21a"),
+            ("neg x0, x1", "e00301cb"),
+            ("tst x0, #1", "1f0040f2"),
+            ("cbz x0, #8", "400000b4"),
+            ("tbnz w1, #3, #16", "81001837"),
+            ("bl #0x100", "40000094"),
+            ("adrp x0, #4096", "000000b0"),
+            ("ldrb w0, [x1], #1", "20144038"),
+            ("ldr q0, [x1, #16]", "2004c03d"),
+            ("sub sp, sp, #32", "ff8300d1"),
+            ("stp x19, x20, [sp, #16]", "f35301a9"),
+            ("mvn x0, x1", "e00321aa"),
+            ("orr x0, x1, x2, lsl #4", "201002aa"),
+            ("umov w0, v1.b[3]", "203c070e"),
+        ];
+        let mut failures = Vec::new();
+        for (source, expected) in cases {
+            let expected: Vec<u8> = (0..expected.len())
+                .step_by(2)
+                .map(|at| u8::from_str_radix(&expected[at..at + 2], 16).expect("hex"))
+                .collect();
+            match assemble_object(&format!("{source}\n")) {
+                Err(message) => failures.push(format!("{source}: {message}")),
+                Ok(object) => {
+                    if !object
+                        .windows(expected.len())
+                        .any(|window| window == expected)
+                    {
+                        failures.push(format!("{source}: bytes {expected:02x?} are missing"));
+                    }
+                }
+            }
+        }
+        for failure in &failures {
+            eprintln!("{failure}");
+        }
+        assert!(
+            failures.is_empty(),
+            "{} of {} failed",
+            failures.len(),
+            cases.len()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_debug_line() {
+        use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+        let source = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let triple =
+            std::env::var("APK_BUILDER_TRIPLE").unwrap_or_else(|_| "armv7a-linux-gnueabihf".into());
+        let mut options = AssemblerOptions::new(&triple);
+        options.output = OutputKind::Assembly;
+        options.show_encoding = true;
+        if let Ok(cpu) = std::env::var("APK_BUILDER_CPU") {
+            options.cpu = cpu;
+        }
+        if let Ok(features) = std::env::var("APK_BUILDER_FEATURES") {
+            options.features = features
+                .split(',')
+                .filter(|held| !held.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        let result = assemble_source(&options, source.replace("\\n", "\n").as_bytes(), None)
+            .expect("the source assembles");
+        for message in &result.messages {
+            eprintln!("{:?}: {}", message.kind, message.text);
+        }
+        print!("{}", String::from_utf8_lossy(&result.output));
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_debug_file() {
+        use crate::compilers::x86_64::{assemble_source, render_messages, AssemblerOptions};
+        let path = std::env::var("APK_BUILDER_FILE").unwrap_or_default();
+        let source = std::fs::read(&path).expect("the file reads");
+        let triple =
+            std::env::var("APK_BUILDER_TRIPLE").unwrap_or_else(|_| "armv7a-linux-gnueabihf".into());
+        let mut options = AssemblerOptions::new(&triple);
+        options.show_encoding = std::env::var("APK_BUILDER_PRESERVE").is_err();
+        options.preserve_comments = std::env::var("APK_BUILDER_PRESERVE").is_ok();
+        options.no_initial_text_section = std::env::var("APK_BUILDER_PRESERVE").is_ok();
+        if std::env::var("APK_BUILDER_OBJECT").is_ok() {
+            options.output = crate::compilers::x86_64::OutputKind::Object;
+        }
+        options.source_name = path.clone();
+        if let Ok(cpu) = std::env::var("APK_BUILDER_CPU") {
+            options.cpu = cpu;
+        }
+        if let Ok(features) = std::env::var("APK_BUILDER_FEATURES") {
+            options.features = features
+                .split(',')
+                .filter(|held| !held.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        let result = assemble_source(&options, &source, None).expect("the source assembles");
+        let diagnostics = render_messages(&result);
+        eprint!(
+            "{}",
+            super::x86_assembly::format_assembly_messages(&diagnostics)
+        );
+        if let Ok(out) = std::env::var("APK_BUILDER_OUT") {
+            std::fs::write(out, &result.output).expect("the object is written");
+        } else {
+            print!("{}", String::from_utf8_lossy(&result.output));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_matchables() {
+        let name = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let matcher = crate::compilers::x86_64::armv7::matcher();
+        for entry in &matcher.matchables {
+            if entry.mnemonic != name {
+                continue;
+            }
+            let operands: Vec<String> = entry
+                .operands
+                .iter()
+                .map(|operand| {
+                    let class = &matcher.classes[operand.class];
+                    format!(
+                        "{}[{}|{}|{}]",
+                        operand.token, class.name, class.predicate, class.parser
+                    )
+                })
+                .collect();
+            eprintln!("{} {}", entry.record, operands.join(" "));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_registers() {
+        let filter = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let target = crate::compilers::x86_64::armv7::target().expect("target");
+        for (index, register) in target.registers.iter().enumerate() {
+            if register
+                .assembly_name
+                .to_ascii_lowercase()
+                .contains(&filter)
+                || register.record.to_ascii_lowercase().contains(&filter)
+            {
+                eprintln!(
+                    "{index} {} enc={} subs={:?}",
+                    register.assembly_name, register.encoding, register.sub_registers
+                );
+            }
+        }
+        if let Some(class) = target.register_classes.get(&filter) {
+            eprintln!("class {filter}: {:?}", class);
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_records() {
+        let filter = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let target = crate::compilers::x86_64::armv7::target().expect("the tables load");
+        let mut shown = 0;
+        for record in target.records.values() {
+            if record.is_a(&filter) && shown < 12 {
+                shown += 1;
+                eprintln!("{} {:?}", record.name, record.fields);
+            }
+        }
+        eprintln!(
+            "{} records of {filter}",
+            target
+                .records
+                .values()
+                .filter(|held| held.is_a(&filter))
+                .count()
+        );
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_pseudos() {
+        let matcher = crate::compilers::x86_64::armv7::matcher();
+        let target = crate::compilers::x86_64::armv7::target().expect("the tables load");
+        let mut names: Vec<String> = Vec::new();
+        for entry in &matcher.matchables {
+            let record = &target.instructions[entry.result].record;
+            let has = target
+                .records
+                .get(record)
+                .is_some_and(|held| held.field("Inst").is_some());
+            if !has && !names.contains(record) {
+                names.push(record.clone());
+            }
+        }
+        names.sort();
+        eprintln!("{} {}", names.len(), names.join(" "));
+    }
+
+    #[test]
+    #[ignore]
+    fn armv7_dump_classes() {
+        let filter = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let matcher = crate::compilers::x86_64::armv7::matcher();
+        for class in &matcher.classes {
+            if class.name.contains(&filter) {
+                eprintln!(
+                    "{}|{}|{}|{}|diag={}|str={}",
+                    class.name,
+                    class.predicate,
+                    class.render,
+                    class.parser,
+                    class.diagnostic,
+                    class.diagnostic_string
+                );
+            }
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_debug_line() {
+        use crate::compilers::x86_64::{assemble_source, AssemblerOptions, OutputKind};
+        let source = std::env::var("APK_BUILDER_LINE").unwrap_or_default();
+        let mut options = AssemblerOptions::new("aarch64-unknown-linux-gnu");
+        options.output = OutputKind::Object;
+        options.show_instruction_operands = true;
+        if std::env::var("APK_BUILDER_TEXT").is_ok() {
+            options.output = OutputKind::Assembly;
+            options.show_instruction_operands = false;
+            options.show_encoding = true;
+        }
+        let result = assemble_source(&options, format!("{source}\n").as_bytes(), None)
+            .expect("the source assembles");
+        for message in &result.messages {
+            eprintln!("{:?}: {}", message.kind, message.text);
+        }
+        if let Ok(path) = std::env::var("APK_BUILDER_OUTPUT") {
+            std::fs::write(path, &result.output).expect("the object is written");
+        }
+        if std::env::var("APK_BUILDER_TEXT").is_ok() {
+            print!("{}", String::from_utf8_lossy(&result.output));
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_operand_methods() {
+        let table = armv8::table().expect("the table reads");
+        let mut seen = std::collections::BTreeMap::new();
+        for record in &table.records {
+            if !(record.is_a("Operand")
+                || record.is_a("RegisterOperand")
+                || record.is_a("RegisterClass"))
+            {
+                continue;
+            }
+            let text = |name: &str| match record.field(name) {
+                Some(TableValue::String(text)) => text.clone(),
+                _ => String::new(),
+            };
+            let key = format!(
+                "enc={} | dec={} | print={}",
+                text("EncoderMethod"),
+                text("DecoderMethod"),
+                text("PrintMethod")
+            );
+            seen.entry(key)
+                .or_insert_with(Vec::new)
+                .push(record.name.clone());
+        }
+        for (key, names) in seen {
+            eprintln!(
+                "{key} | {} | {}",
+                names.len(),
+                names.iter().take(3).cloned().collect::<Vec<_>>().join(",")
+            );
+        }
+    }
+
+    #[test]
+    #[ignore]
+    fn armv8_records_from_environment() {
+        let table = armv8::table().expect("the table reads");
+        let names = std::env::var("APK_BUILDER_RECORDS").unwrap_or_default();
+        for name in names.split(',').filter(|name| !name.is_empty()) {
+            match table.record(name) {
+                None => eprintln!("{name}: no such record"),
+                Some(record) => {
+                    eprintln!("def {} : {}", record.name, record.classes.join(", "));
+                    for field in &record.fields {
+                        eprintln!(
+                            "  {} {} = {}",
+                            field.field_type,
+                            field.name,
+                            value_text(&field.value)
+                        );
+                    }
+                }
+            }
+        }
     }
 }

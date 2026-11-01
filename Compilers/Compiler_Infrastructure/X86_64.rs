@@ -307,6 +307,7 @@ pub struct OperandGroup {
     pub count: usize,
     pub output: bool,
     pub tied_to: Option<usize>,
+    pub sub_names: Vec<String>,
 }
 
 #[derive(Clone, Debug)]
@@ -434,9 +435,22 @@ pub struct AssemblyOperandClass {
     pub super_classes: Vec<String>,
     pub predicate_method: String,
     pub render_method: String,
+    pub parser_method: String,
+    pub diagnostic_type: String,
+    pub diagnostic_string: String,
+    pub optional: bool,
+    pub default_method: String,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Isa {
+    X86,
+    Armv7,
+    Armv8,
 }
 
 pub struct Target {
+    pub isa: Isa,
     pub registers: Vec<Register>,
     pub register_by_record: BTreeMap<String, RegisterId>,
     pub register_by_name: BTreeMap<String, RegisterId>,
@@ -723,6 +737,33 @@ impl Target {
                             .map(|first| first.iter().copied().take(count).collect())
                             .unwrap_or_default()
                     }
+                    "rotl" | "rotr" => {
+                        let first = sets.first().cloned().unwrap_or_default();
+                        if first.is_empty() {
+                            return first;
+                        }
+                        let amount = (integer(1).max(0) as usize) % first.len();
+                        let mut rotated = first.clone();
+                        if operator == "rotl" {
+                            rotated.rotate_left(amount);
+                        } else {
+                            rotated.rotate_right(amount);
+                        }
+                        rotated
+                    }
+                    "decimate" => {
+                        let stride = integer(1).max(1) as usize;
+                        let offset = if arguments.len() > 2 {
+                            integer(2).max(0) as usize
+                        } else {
+                            0
+                        };
+                        sets.first()
+                            .map(|first| {
+                                first.iter().copied().skip(offset).step_by(stride).collect()
+                            })
+                            .unwrap_or_default()
+                    }
                     "shl" => {
                         let count = integer(1).max(0) as usize;
                         sets.first()
@@ -737,8 +778,16 @@ impl Target {
     }
 
     fn load() -> Result<Target, Diagnostic> {
-        let records = read_records()?;
+        Target::load_with(Isa::X86, read_records()?, "X86Inst")
+    }
+
+    pub fn load_with(
+        isa: Isa,
+        records: BTreeMap<String, TableRecord>,
+        instruction_class: &str,
+    ) -> Result<Target, Diagnostic> {
         let mut target = Target {
+            isa,
             registers: vec![Register {
                 record: "NoRegister".to_string(),
                 assembly_name: String::new(),
@@ -908,6 +957,11 @@ impl Target {
                     super_classes: table_record_list(record, "SuperClasses"),
                     predicate_method: table_text(record, "PredicateMethod"),
                     render_method: table_text(record, "RenderMethod"),
+                    parser_method: table_text(record, "ParserMethod"),
+                    diagnostic_type: table_text(record, "DiagnosticType"),
+                    diagnostic_string: table_text(record, "DiagnosticString"),
+                    optional: table_bit(record, "IsOptional"),
+                    default_method: table_text(record, "DefaultMethod"),
                 });
             } else if record.is_a("TokenAlias") {
                 target.token_aliases.push((
@@ -919,7 +973,7 @@ impl Target {
         let instruction_names: Vec<String> = target
             .records
             .values()
-            .filter(|record| record.is_a("Instruction") && record.is_a("X86Inst"))
+            .filter(|record| record.is_a("Instruction") && record.is_a(instruction_class))
             .map(|record| record.name.clone())
             .collect();
         for name in instruction_names {
@@ -961,7 +1015,7 @@ impl Target {
             target.mnemonic_aliases.push(MnemonicAlias {
                 from: table_text(record, "FromMnemonic"),
                 to: table_text(record, "ToMnemonic"),
-                modes: mode_validity(&target.records, &predicates),
+                modes: target.mode_validity_for(&predicates),
                 has_predicates,
                 variant_name: table_text(record, "AsmVariantName"),
             });
@@ -976,8 +1030,17 @@ impl Target {
         let mut definitions = 0;
         for (field, output) in [("OutOperandList", true), ("InOperandList", false)] {
             for (argument, name) in dag_arguments(record.field(field)) {
-                let TableValue::Record(operand) = argument else {
-                    continue;
+                let mut sub_names = Vec::new();
+                let operand = match &argument {
+                    TableValue::Record(operand) => operand.clone(),
+                    TableValue::Dag { arguments, .. } if self.isa != Isa::X86 => {
+                        sub_names = arguments
+                            .iter()
+                            .map(|(_, label)| label.clone().unwrap_or_default())
+                            .collect();
+                        dag_operator(&argument)
+                    }
+                    _ => continue,
                 };
                 if operand == "variable_ops" {
                     continue;
@@ -1008,6 +1071,7 @@ impl Target {
                     count,
                     output,
                     tied_to: None,
+                    sub_names,
                 });
             }
         }
@@ -1033,7 +1097,7 @@ impl Target {
             }
         }
         let predicates = table_record_list(record, "Predicates");
-        let modes = mode_validity(&self.records, &predicates);
+        let modes = self.mode_validity_for(&predicates);
         let flags = match record.field("TSFlags") {
             Some(TableValue::Bits(bits)) => bits_value(bits),
             _ => 0,
@@ -1070,6 +1134,13 @@ impl Target {
             has_position_order: table_bit(record, "HasPositionOrder"),
             is_commutable: table_bit(record, "isCommutable"),
             intel_mnemonic: intel_mnemonic_of(&table_text(record, "AsmString")),
+        }
+    }
+
+    fn mode_validity_for(&self, predicates: &[String]) -> [bool; 3] {
+        match self.isa {
+            Isa::X86 => mode_validity(&self.records, predicates),
+            Isa::Armv7 | Isa::Armv8 => [true; 3],
         }
     }
 
@@ -1121,7 +1192,7 @@ impl Target {
             result,
             arguments,
             emit_priority: table_integer(record, "EmitPriority"),
-            modes: mode_validity(&self.records, &predicates),
+            modes: self.mode_validity_for(&predicates),
             predicates,
             variant_name: table_text(record, "AsmVariantName"),
             use_converter: table_bit(record, "UseInstAsmMatchConverter"),
@@ -1333,6 +1404,12 @@ impl Target {
     }
 }
 
+#[path = "Armv7.rs"]
+pub mod armv7;
+
+#[path = "Armv8.rs"]
+pub mod armv8;
+
 pub fn target() -> Result<&'static Target, Diagnostic> {
     static TARGET: OnceLock<Result<Target, Diagnostic>> = OnceLock::new();
     TARGET
@@ -1395,6 +1472,22 @@ pub enum Expression {
         right: Box<Expression>,
     },
     Register(RegisterId),
+    Prefixed {
+        prefix: String,
+        operand: Box<Expression>,
+    },
+}
+
+pub fn prefix_fold(prefix: &str, value: i64) -> i64 {
+    let value = value as i32;
+    i64::from(match prefix {
+        "upper16" => ((value as u32) >> 16) as i32,
+        "lower16" => value & 0xffff,
+        "upper8_15" => ((value as u32) >> 24) as i32,
+        "upper0_7" => (value & 0x00ff_0000) >> 16,
+        "lower8_15" => (value & 0xff00) >> 8,
+        _ => value & 0xff,
+    })
 }
 
 impl Expression {
@@ -1506,6 +1599,8 @@ pub enum FixupKind {
     GlobalOffsetTable,
     Branch4PcRelative,
     Literal(u32),
+    Arm(armv8::ArmFixup),
+    Arm32(armv7::Fixup32),
 }
 
 impl FixupKind {
@@ -1516,6 +1611,7 @@ impl FixupKind {
             FixupKind::Data2 => 2,
             FixupKind::Data8 => 8,
             FixupKind::Literal(42) => 8,
+            FixupKind::Arm32(kind) => kind.bits().div_ceil(8),
             _ => 4,
         }
     }
@@ -1540,6 +1636,8 @@ impl FixupKind {
             FixupKind::GlobalOffsetTable => "reloc_global_offset_table".to_string(),
             FixupKind::Branch4PcRelative => "reloc_branch_4byte_pcrel".to_string(),
             FixupKind::Literal(number) => format!("fixup_{number}"),
+            FixupKind::Arm(kind) => kind.name().to_string(),
+            FixupKind::Arm32(kind) => kind.name().to_string(),
         }
     }
 }
@@ -2146,7 +2244,7 @@ impl<'t> Encoder<'t> {
                     ..
                 }) = &displacement
                 {
-                    if specifier == "TLSCALL" {
+                    if specifier.eq_ignore_ascii_case("TLSCALL") {
                         if let MachineOperand::Expression(expression) = &displacement {
                             fixups.push(Fixup {
                                 offset: 0,
@@ -2608,6 +2706,20 @@ impl<'t> Encoder<'t> {
         }
         if instruction.flags & PREFIX_USE_REX != 0 {
             prefix.kind = PrefixKind::Rex;
+        }
+        if let Some(memory) = memory {
+            if let MachineOperand::Expression(Expression::Symbol {
+                specifier: Some(specifier),
+                ..
+            }) = instruction.operand(memory + ADDRESS_DISPLACEMENT)
+            {
+                if (specifier.eq_ignore_ascii_case("GOTTPOFF")
+                    || specifier.eq_ignore_ascii_case("TLSDESC"))
+                    && prefix.kind == PrefixKind::None
+                {
+                    prefix.kind = PrefixKind::Rex;
+                }
+            }
         }
         if flags & EXPLICIT_PREFIX_MASK == EXPLICIT_REX2_PREFIX
             || instruction.flags & PREFIX_USE_REX2 != 0
@@ -3717,6 +3829,7 @@ pub enum AliasCondition {
     TiedRegister(usize),
     Immediate(i32),
     RegisterClass(String),
+    InvertibleCondition,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3734,6 +3847,7 @@ pub struct AliasPattern {
     pub pieces: Vec<AliasPiece>,
     pub operand_count: usize,
     pub conditions: Vec<AliasCondition>,
+    pub predicates: Vec<String>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -3942,6 +4056,12 @@ fn alias_patterns(target: &Target, variant: usize) -> BTreeMap<usize, Vec<AliasP
                         } else {
                             mapped.insert(name.clone(), (operand_number, method));
                             count = target.operand_count_of_record(record);
+                            if record == "inv_ccode" {
+                                while conditions.len() < operand_number {
+                                    conditions.push(AliasCondition::Ignore);
+                                }
+                                conditions.push(AliasCondition::InvertibleCondition);
+                            }
                         }
                     }
                     ResultOperand::Immediate(value) => {
@@ -3998,6 +4118,7 @@ fn alias_patterns(target: &Target, variant: usize) -> BTreeMap<usize, Vec<AliasP
                 pieces,
                 operand_count,
                 conditions,
+                predicates: alias.predicates.clone(),
             });
         }
         let unique: Vec<AliasPattern> = patterns
@@ -4008,6 +4129,7 @@ fn alias_patterns(target: &Target, variant: usize) -> BTreeMap<usize, Vec<AliasP
                     other_index != *index
                         && other.operand_count == pattern.operand_count
                         && other.conditions == pattern.conditions
+                        && (target.isa == Isa::X86 || other.predicates == pattern.predicates)
                 })
             })
             .map(|(_, pattern)| pattern.clone())
@@ -4151,6 +4273,41 @@ fn binary_text(operator: BinaryOperator) -> &'static str {
     }
 }
 
+fn strip_percent_specifier(expression: &Expression, name: &str) -> Option<Expression> {
+    match expression {
+        Expression::Symbol {
+            name: symbol,
+            specifier: Some(held),
+        } if held == name => Some(Expression::Symbol {
+            name: symbol.clone(),
+            specifier: None,
+        }),
+        Expression::Unary { operator, operand } => {
+            strip_percent_specifier(operand, name).map(|operand| Expression::Unary {
+                operator: *operator,
+                operand: Box::new(operand),
+            })
+        }
+        Expression::Binary {
+            operator,
+            left,
+            right,
+        } => {
+            let new_left = strip_percent_specifier(left, name);
+            let new_right = strip_percent_specifier(right, name);
+            if new_left.is_none() && new_right.is_none() {
+                return None;
+            }
+            Some(Expression::Binary {
+                operator: *operator,
+                left: Box::new(new_left.unwrap_or_else(|| left.as_ref().clone())),
+                right: Box::new(new_right.unwrap_or_else(|| right.as_ref().clone())),
+            })
+        }
+        _ => None,
+    }
+}
+
 pub fn expression_text(
     target: &Target,
     expression: &Expression,
@@ -4158,15 +4315,70 @@ pub fn expression_text(
     syntax: Syntax,
 ) -> String {
     const MAXIMUM_PRECEDENCE: i32 = 9;
+    if target.isa == Isa::Armv8 {
+        if let Some(inner) = strip_percent_specifier(expression, "dtprel") {
+            return format!("%dtprel({})", expression_text(target, &inner, 0, syntax));
+        }
+    }
     match expression {
         Expression::Constant(value) => value.to_string(),
         Expression::Symbol { name, specifier } => {
             let mut out = symbol_text_with(target, name, syntax);
             if let Some(specifier) = specifier {
-                out.push('@');
-                out.push_str(specifier);
+                if target.isa == Isa::Armv8 {
+                    if !matches!(specifier.as_str(), "abs" | "pg_hi21") {
+                        out = format!(":{specifier}:{out}");
+                    }
+                } else if target.isa == Isa::Armv7 {
+                    let (prefix, variant) = match specifier.split_once(':') {
+                        Some((prefix, variant)) => (Some(prefix), variant),
+                        None => (None, specifier.as_str()),
+                    };
+                    let prefixed = matches!(
+                        variant,
+                        "lower16" | "upper16" | "lower0_7" | "lower8_15" | "upper0_7" | "upper8_15"
+                    );
+                    if prefixed {
+                        out = format!(":{variant}:{out}");
+                    } else {
+                        let shown = match variant {
+                            "got" => "GOT",
+                            "gotoff" => "GOTOFF",
+                            "got_prel" => "GOT_PREL",
+                            "plt" => "PLT",
+                            "tlsgd" => "TLSGD",
+                            "tlsldm" => "TLSLDM",
+                            "tlsldo" => "TLSLDO",
+                            "gottpoff" => "GOTTPOFF",
+                            "tpoff" => "TPOFF",
+                            "secrel32" => "SECREL32",
+                            "funcdesc" => "FUNCDESC",
+                            "gotfuncdesc" => "GOTFUNCDESC",
+                            "gotofffuncdesc" => "GOTOFFFUNCDESC",
+                            other => other,
+                        };
+                        out = format!("{out}({shown})");
+                        if let Some(prefix) = prefix {
+                            out = format!(":{prefix}:{out}");
+                        }
+                    }
+                } else {
+                    out.push('@');
+                    out.push_str(specifier);
+                }
             }
             out
+        }
+        Expression::Prefixed { prefix, operand } => {
+            let inner = expression_text(target, operand, 0, syntax);
+            if matches!(
+                operand.as_ref(),
+                Expression::Binary { .. } | Expression::Constant(_)
+            ) {
+                format!(":{prefix}:({inner})")
+            } else {
+                format!(":{prefix}:{inner}")
+            }
         }
         Expression::Register(register) => {
             if syntax == Syntax::Att {
@@ -4703,6 +4915,9 @@ impl<'t> Printer<'t> {
                 index += 1;
                 match condition {
                     AliasCondition::Ignore => true,
+                    AliasCondition::InvertibleCondition => {
+                        matches!(operand, MachineOperand::Immediate(held) if *held != 14 && *held != 15)
+                    }
                     AliasCondition::Immediate(value) => {
                         matches!(operand, MachineOperand::Immediate(held) if *held == *value as i64)
                     }
@@ -6827,6 +7042,13 @@ pub struct MatchClass {
     pub registers: BTreeSet<RegisterId>,
     pub super_classes: Vec<usize>,
     pub render: String,
+    pub predicate: String,
+    pub parser: String,
+    pub diagnostic: String,
+    pub diagnostic_string: String,
+    pub optional: bool,
+    pub default_method: String,
+    pub order: u64,
 }
 
 #[derive(Clone, Debug)]
@@ -6877,11 +7099,16 @@ pub struct Matcher {
     pub maximum_operands: usize,
     pub mnemonic_aliases: Vec<MnemonicAliasTable>,
     pub feature_names: BTreeMap<String, String>,
+    pub by_definition: bool,
 }
 
-fn tokenize_assembly(text: &str) -> Vec<(String, bool)> {
+fn tokenize_assembly(isa: Isa, text: &str) -> Vec<(String, bool)> {
     let characters: Vec<char> = text.chars().collect();
-    let tokenizing = ['[', ']', '*', '!'];
+    let (tokenizing, breaking): (&[char], &[char]) = match isa {
+        Isa::X86 => (&['[', ']', '*', '!'], &[]),
+        Isa::Armv7 => (&['[', ']', '*', '!', '/'], &['.']),
+        Isa::Armv8 => (&['[', ']', '*', '!', '/'], &['.']),
+    };
     let separators = [' ', '\t', ','];
     let mut tokens: Vec<(String, bool)> = Vec::new();
     let mut previous = 0;
@@ -6891,6 +7118,16 @@ fn tokenize_assembly(text: &str) -> Vec<(String, bool)> {
     let slice = |from: usize, to: usize| -> String { characters[from..to].iter().collect() };
     while index < characters.len() {
         let character = characters[index];
+        if breaking.contains(&character) {
+            if in_token {
+                tokens.push((slice(previous, index), isolated));
+                previous = index;
+                isolated = false;
+            }
+            in_token = true;
+            index += 1;
+            continue;
+        }
         if tokenizing.contains(&character) {
             if in_token {
                 tokens.push((slice(previous, index), isolated));
@@ -7037,8 +7274,14 @@ impl Matcher {
                         return false;
                     }
                 } else {
-                    return self.classes[self.class_root(left)].value_name
-                        < self.classes[self.class_root(right)].value_name;
+                    let (first, second) = (
+                        &self.classes[self.class_root(left)],
+                        &self.classes[self.class_root(right)],
+                    );
+                    if self.by_definition && first.order != second.order {
+                        return first.order < second.order;
+                    }
+                    return first.value_name < second.value_name;
                 }
             }
             ClassKind::Register => {
@@ -7117,6 +7360,13 @@ impl<'t> MatcherBuilder<'t> {
             registers: BTreeSet::new(),
             super_classes: Vec::new(),
             render: String::new(),
+            predicate: String::new(),
+            parser: String::new(),
+            diagnostic: String::new(),
+            diagnostic_string: String::new(),
+            optional: false,
+            default_method: String::new(),
+            order: 0,
         });
         self.token_classes.insert(token.to_string(), made);
         made
@@ -7148,6 +7398,34 @@ impl<'t> MatcherBuilder<'t> {
                 value_name = format!("{value_name},{register_name}");
             }
         }
+        let (diagnostic, diagnostic_string) = named
+            .first()
+            .and_then(|class| self.target.records.get(&class.record))
+            .map(|record| {
+                let string = table_text(record, "DiagnosticString");
+                let mut kind = table_text(record, "DiagnosticType");
+                if kind.is_empty() && !string.is_empty() {
+                    kind = record.name.clone();
+                }
+                (kind, string)
+            })
+            .filter(|(kind, string)| !kind.is_empty() || !string.is_empty())
+            .or_else(|| {
+                named
+                    .iter()
+                    .filter_map(|class| self.target.records.get(&class.record))
+                    .find_map(|record| {
+                        let string = table_text(record, "DiagnosticString");
+                        (!string.is_empty()).then(|| {
+                            let mut kind = table_text(record, "DiagnosticType");
+                            if kind.is_empty() {
+                                kind = record.name.clone();
+                            }
+                            (kind, string)
+                        })
+                    })
+            })
+            .unwrap_or_default();
         let made = self.classes.len();
         self.classes.push(MatchClass {
             kind: ClassKind::Register,
@@ -7156,6 +7434,13 @@ impl<'t> MatcherBuilder<'t> {
             registers: registers.clone(),
             super_classes: Vec::new(),
             render: "addRegOperands".to_string(),
+            predicate: String::new(),
+            parser: String::new(),
+            diagnostic,
+            diagnostic_string,
+            optional: false,
+            default_method: String::new(),
+            order: 0,
         });
         self.register_set_classes.insert(key, made);
         made
@@ -7183,6 +7468,22 @@ impl<'t> MatcherBuilder<'t> {
             } else {
                 held.render_method.clone()
             },
+            predicate: if held.predicate_method.is_empty() {
+                format!("is{}", held.name)
+            } else {
+                held.predicate_method.clone()
+            },
+            parser: held.parser_method.clone(),
+            diagnostic: held.diagnostic_type.clone(),
+            diagnostic_string: held.diagnostic_string.clone(),
+            optional: held.optional,
+            default_method: held.default_method.clone(),
+            order: self
+                .target
+                .records
+                .get(record)
+                .map(|found| found.definition_order)
+                .unwrap_or(0),
         });
         self.user_classes.insert(record.to_string(), made);
         let mut supers = Vec::new();
@@ -7227,7 +7528,11 @@ pub fn build_matcher(target: &Target) -> Matcher {
         register_set_classes: BTreeMap::new(),
         user_classes: BTreeMap::new(),
     };
-    let variants = [(0usize, "att", "%"), (1usize, "intel", "")];
+    let variants: &[(usize, &str, &str)] = match target.isa {
+        Isa::X86 => &[(0usize, "att", "%"), (1usize, "intel", "")],
+        Isa::Armv7 => &[(0usize, "generic", "")],
+        Isa::Armv8 => &[(0usize, "generic", ""), (1usize, "apple-neon", "")],
+    };
     let mut matchables: Vec<Matchable> = Vec::new();
     let is_mode_predicate = |predicate: &String| {
         matches!(
@@ -7238,7 +7543,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
             Some(TableValue::Dag { .. })
         )
     };
-    for (variant, variant_name, prefix) in variants {
+    for &(variant, variant_name, prefix) in variants {
         let mut prepared: Vec<(Matchable, Vec<(String, bool)>)> = Vec::new();
         for (opcode, instruction) in target.instructions.iter().enumerate() {
             if instruction.code_generation_only {
@@ -7248,7 +7553,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
                 continue;
             }
             let flat = flatten_variants(&instruction.assembly, variant);
-            let mut tokens = tokenize_assembly(&flat);
+            let mut tokens = tokenize_assembly(target.isa, &flat);
             if tokens.is_empty() {
                 continue;
             }
@@ -7259,36 +7564,56 @@ pub fn build_matcher(target: &Target) -> Matcher {
             let mut seen = BTreeSet::new();
             let valid = tokens.iter().all(|(token, _)| {
                 !(token.starts_with('$') && token.contains(':'))
-                    && (!token.starts_with('$') || seen.insert(token.clone()))
+                    && (!token.starts_with('$')
+                        || seen.insert(token.clone())
+                        || (target.isa == Isa::Armv7 && !instruction.match_converter.is_empty()))
             });
             if !valid || flat.contains('\n') {
                 continue;
             }
-            prepared.push((
-                Matchable {
-                    variant,
-                    mnemonic,
-                    operands: Vec::new(),
-                    result: opcode,
-                    record: instruction.record.clone(),
-                    alias: None,
-                    modes: instruction.modes,
-                    required_count: instruction
-                        .predicates
-                        .iter()
-                        .filter(|p| is_mode_predicate(p))
-                        .count(),
-                    conversions: Vec::new(),
-                },
-                tokens,
-            ));
+            let two_operand = if target.isa == Isa::Armv7 {
+                instruction
+                    .two_operand_alias_constraint
+                    .split_once('=')
+                    .map(|(left, _)| left.trim().trim_start_matches('$').to_string())
+            } else {
+                None
+            };
+            let template = Matchable {
+                variant,
+                mnemonic,
+                operands: Vec::new(),
+                result: opcode,
+                record: instruction.record.clone(),
+                alias: None,
+                modes: instruction.modes,
+                required_count: instruction
+                    .predicates
+                    .iter()
+                    .filter(|p| is_mode_predicate(p))
+                    .count(),
+                conversions: Vec::new(),
+            };
+            if let Some(omitted) = two_operand {
+                let reduced: Vec<(String, bool)> = tokens
+                    .iter()
+                    .filter(|(token, _)| {
+                        token != &format!("${omitted}") && token != &format!("${{{omitted}}}")
+                    })
+                    .cloned()
+                    .collect();
+                if reduced.len() + 1 == tokens.len() {
+                    prepared.push((template.clone(), reduced));
+                }
+            }
+            prepared.push((template, tokens));
         }
         for (alias_index, alias) in target.aliases.iter().enumerate() {
             if !alias.variant_name.is_empty() && alias.variant_name != variant_name {
                 continue;
             }
             let flat = flatten_variants(&alias.assembly, variant);
-            let mut tokens = tokenize_assembly(&flat);
+            let mut tokens = tokenize_assembly(target.isa, &flat);
             if tokens.is_empty() {
                 continue;
             }
@@ -7353,6 +7678,7 @@ pub fn build_matcher(target: &Target) -> Matcher {
         maximum_operands: 0,
         mnemonic_aliases: Vec::new(),
         feature_names: BTreeMap::new(),
+        by_definition: target.isa == Isa::Armv7,
     };
     let register_classes: Vec<usize> = (0..matcher.classes.len())
         .filter(|at| matcher.classes[*at].kind == ClassKind::Register)
@@ -7369,17 +7695,34 @@ pub fn build_matcher(target: &Target) -> Matcher {
         }
     }
     for (from, to) in &target.token_aliases {
-        let from_class = matcher
-            .classes
-            .iter()
-            .position(|class| class.kind == ClassKind::Token && class.value_name == *from);
-        let to_class = matcher
-            .classes
-            .iter()
-            .position(|class| class.kind == ClassKind::Token && class.value_name == *to);
-        if let (Some(from_class), Some(to_class)) = (from_class, to_class) {
-            matcher.classes[from_class].super_classes.push(to_class);
-        }
+        let token_class = |matcher: &mut Matcher, name: &str| -> usize {
+            if let Some(found) = matcher
+                .classes
+                .iter()
+                .position(|class| class.kind == ClassKind::Token && class.value_name == name)
+            {
+                return found;
+            }
+            matcher.classes.push(MatchClass {
+                kind: ClassKind::Token,
+                value_name: name.to_string(),
+                name: name.to_string(),
+                registers: BTreeSet::new(),
+                super_classes: Vec::new(),
+                render: String::new(),
+                predicate: String::new(),
+                parser: String::new(),
+                diagnostic: String::new(),
+                diagnostic_string: String::new(),
+                optional: false,
+                default_method: String::new(),
+                order: 0,
+            });
+            matcher.classes.len() - 1
+        };
+        let from_class = token_class(&mut matcher, from);
+        let to_class = token_class(&mut matcher, to);
+        matcher.classes[from_class].super_classes.push(to_class);
     }
     let mut indices: Vec<usize> = (0..matchables.len()).collect();
     indices.sort_by(|left, right| {
@@ -7405,7 +7748,12 @@ pub fn build_matcher(target: &Target) -> Matcher {
         entry.1 = at + 1;
     }
     matcher.matchables = sorted;
-    for variant_name in ["att", "intel"] {
+    let variant_names: &[&str] = match target.isa {
+        Isa::X86 => &["att", "intel"],
+        Isa::Armv7 => &["generic"],
+        Isa::Armv8 => &["generic", "apple-neon"],
+    };
+    for &variant_name in variant_names {
         let mut aliases: BTreeMap<String, Vec<(String, [bool; 3], bool)>> = BTreeMap::new();
         for alias in &target.mnemonic_aliases {
             if alias.variant_name != variant_name && !alias.variant_name.is_empty() {
@@ -7460,6 +7808,32 @@ fn assign_classes(builder: &mut MatcherBuilder, matchable: &mut Matchable) -> bo
                     return false;
                 };
                 let group = &instruction.groups[group_index];
+                if target.isa == Isa::Armv8 && group.count > 1 {
+                    let record = &target.operand_records[&group.record];
+                    let plain = target
+                        .records
+                        .get(&record.match_class)
+                        .is_some_and(|class| table_text(class, "Name") == "Imm");
+                    if plain {
+                        let template = matchable.operands[index].clone();
+                        let mut expanded = Vec::new();
+                        for (sub, sub_record) in record.sub_operands.iter().enumerate() {
+                            let Some(class) = builder.operand_class(sub_record) else {
+                                return false;
+                            };
+                            let mut entry = template.clone();
+                            entry.class = class;
+                            entry.sub_index = Some(sub);
+                            entry.source = name.clone();
+                            entry.original = name.clone();
+                            expanded.push(entry);
+                        }
+                        let count = expanded.len();
+                        matchable.operands.splice(index..index + 1, expanded);
+                        index += count;
+                        continue;
+                    }
+                }
                 let Some(class) = builder.operand_class(&group.record) else {
                     return false;
                 };
@@ -7553,6 +7927,23 @@ fn build_instruction_conversions(target: &Target, matchable: &mut Matchable) -> 
             find_named(matchable, &group.name, None)
         };
         let Some(source) = source else {
+            if let Some((left, right)) = instruction
+                .two_operand_alias_constraint
+                .split_once('=')
+                .filter(|_| target.isa == Isa::Armv7)
+            {
+                if left.trim().trim_start_matches('$') == group.name {
+                    if let Some(partner) =
+                        find_named(matchable, right.trim().trim_start_matches('$'), None)
+                    {
+                        conversions.push(Conversion::Render {
+                            operand: partner,
+                            count: group.count,
+                        });
+                        continue;
+                    }
+                }
+            }
             for _ in 0..group.count {
                 conversions.push(Conversion::Immediate(0));
             }
@@ -7722,6 +8113,8 @@ pub enum ParsedKind {
     Immediate(Expression),
     Memory(MemoryOperand),
     Prefix(u32),
+    Arm(Box<armv8::ArmOperand>),
+    Arm32(Box<armv7::Operand>),
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -8478,6 +8871,9 @@ pub struct Lexer {
     peeking: bool,
     end_statement_at_end: bool,
     pub masm_integers: bool,
+    pub hash_token: bool,
+    pub label_comment: bool,
+    pub at_comment: bool,
     consumed_end_of_statement: bool,
 }
 
@@ -8556,6 +8952,9 @@ impl Lexer {
             peeking: false,
             end_statement_at_end: true,
             masm_integers: false,
+            hash_token: false,
+            label_comment: false,
+            at_comment: false,
             consumed_end_of_statement: false,
         }
     }
@@ -8602,6 +9001,14 @@ impl Lexer {
 
     fn at_end(&self) -> bool {
         self.state.position >= self.buffers[self.state.buffer].text.len()
+    }
+
+    fn hash_follows(&self) -> bool {
+        let mut at = self.state.position;
+        while matches!(self.byte(at), b' ' | b'\t') {
+            at += 1;
+        }
+        self.byte(at) == b'#'
     }
 
     fn next_character(&mut self) -> Option<u8> {
@@ -8823,7 +9230,9 @@ impl Lexer {
                 return self.lex_float(start);
             }
         }
-        while is_lexer_identifier_byte(self.current()) {
+        while is_lexer_identifier_byte(self.current())
+            && !(self.at_comment && self.current() == b'@')
+        {
             self.state.position += 1;
         }
         if self.state.position == start + 1 && self.byte(start) == b'.' {
@@ -8868,7 +9277,8 @@ impl Lexer {
             self.state.position += 1;
         }
         self.state.at_start_of_line = true;
-        if self.state.at_start_of_statement {
+        let label_comment = std::mem::take(&mut self.label_comment);
+        if self.state.at_start_of_statement && !label_comment {
             return self.make(TokenKind::EndOfStatement, start, self.state.position);
         }
         self.state.at_start_of_statement = true;
@@ -9089,6 +9499,11 @@ impl Lexer {
         let start = self.state.position;
         self.state.token_start = start;
         let character = self.next_character();
+        if self.hash_token && character == Some(b'#') && !self.state.at_start_of_statement {
+            self.state.at_start_of_line = false;
+            self.state.at_start_of_statement = false;
+            return self.make(TokenKind::Hash, start, start + 1);
+        }
         if !self.peeking && character == Some(b'#') && self.state.at_start_of_statement {
             let saved_skip = self.skip_space;
             self.skip_space = true;
@@ -9111,6 +9526,9 @@ impl Lexer {
             return self.lex_line_comment(start);
         }
         if character == Some(b'#') {
+            return self.lex_line_comment(start);
+        }
+        if self.at_comment && character == Some(b'@') {
             return self.lex_line_comment(start);
         }
         if character == Some(b';') {
@@ -9261,11 +9679,24 @@ pub struct TargetTriple {
     pub mode: Mode,
     pub format: ObjectFormat,
     pub x32: bool,
+    pub isa: Isa,
 }
 
 impl TargetTriple {
     pub fn parse(text: &str) -> TargetTriple {
-        let pieces: Vec<&str> = text.split('-').collect();
+        let mut pieces: Vec<&str> = text.split('-').collect();
+        let names_system = |piece: &str| {
+            [
+                "linux", "windows", "win32", "darwin", "macos", "ios", "mingw", "cygwin",
+                "freebsd", "netbsd", "openbsd", "solaris", "elfiamcu", "nacl", "haiku", "uefi",
+                "fuchsia",
+            ]
+            .iter()
+            .any(|prefix| piece.starts_with(prefix))
+        };
+        if pieces.len() >= 2 && names_system(pieces[1]) {
+            pieces.insert(1, "unknown");
+        }
         let architecture = pieces.first().copied().unwrap_or("").to_string();
         let vendor = pieces.get(1).copied().unwrap_or("").to_string();
         let system = pieces.get(2).copied().unwrap_or("").to_string();
@@ -9275,19 +9706,29 @@ impl TargetTriple {
             .unwrap_or_default();
         let sixty_four = matches!(architecture.as_str(), "x86_64" | "amd64" | "x86_64h")
             || architecture.starts_with("x86_64");
+        let isa = if architecture.starts_with("aarch64") || architecture.starts_with("arm64") {
+            Isa::Armv8
+        } else if architecture.starts_with("arm") || architecture.starts_with("thumb") {
+            Isa::Armv7
+        } else {
+            Isa::X86
+        };
+        let sixty_four = sixty_four || isa == Isa::Armv8;
         let x32 = sixty_four && (environment.ends_with("x32") || environment == "gnux32");
         let mut mode = if sixty_four {
             Mode::Bits64
         } else {
             Mode::Bits32
         };
-        if environment == "code16" {
+        if pieces.contains(&"code16") {
             mode = Mode::Bits16;
         }
         let format = if vendor == "apple"
             || system.starts_with("darwin")
             || system.starts_with("macos")
             || system.starts_with("ios")
+            || system == "macho"
+            || environment.ends_with("macho")
         {
             ObjectFormat::MachObject
         } else if system.starts_with("windows")
@@ -9313,11 +9754,16 @@ impl TargetTriple {
             mode,
             format,
             x32,
+            isa,
         }
     }
 
     pub fn is_64_bit(&self) -> bool {
         self.mode == Mode::Bits64 || self.architecture.starts_with("x86_64")
+    }
+
+    pub fn is_thumb(&self) -> bool {
+        self.isa == Isa::Armv7 && self.architecture.starts_with("thumb")
     }
 
     pub fn is_windows_msvc(&self) -> bool {
@@ -9404,10 +9850,12 @@ pub struct Symbol {
     pub weak_reference: bool,
     pub other: u8,
     pub definition: Option<SourceLocation>,
+    pub value_location: Option<SourceLocation>,
     pub version_name: Option<String>,
     pub coff_storage_class: Option<i64>,
     pub coff_type: Option<i64>,
     pub address_significant: bool,
+    pub thumb_function: bool,
 }
 
 impl Symbol {
@@ -9432,10 +9880,12 @@ impl Symbol {
             weak_reference: false,
             other: 0,
             definition: None,
+            value_location: None,
             version_name: None,
             coff_storage_class: None,
             coff_type: None,
             address_significant: false,
+            thumb_function: false,
         }
     }
 
@@ -9457,6 +9907,7 @@ pub struct Section {
     pub group: Option<String>,
     pub comdat: bool,
     pub linked_symbol: Option<String>,
+    pub linked_section: Option<usize>,
     pub unique: Option<u64>,
     pub characteristics: u32,
     pub coff_selection: u8,
@@ -9479,6 +9930,7 @@ impl Section {
             group: None,
             comdat: false,
             linked_symbol: None,
+            linked_section: None,
             unique: None,
             characteristics: 0,
             coff_selection: 0,
@@ -9568,6 +10020,13 @@ pub trait SymbolLayout {
         right: usize,
         in_set: bool,
     ) -> bool;
+    fn symbol_difference(
+        &self,
+        context: &AssemblyContext,
+        left: usize,
+        right: usize,
+        in_set: bool,
+    ) -> Option<i64>;
 }
 
 pub type SectionPosition = Option<(usize, i64)>;
@@ -9579,6 +10038,7 @@ pub struct AssemblyContext {
     pub symbols: Vec<Symbol>,
     pub symbol_index: BTreeMap<String, usize>,
     pub used_names: BTreeSet<String>,
+    pub named_temporaries: bool,
     pub unique_counters: BTreeMap<String, u64>,
     pub directional_instances: BTreeMap<i64, u64>,
     pub directional_symbols: BTreeMap<(i64, u64), usize>,
@@ -9598,6 +10058,7 @@ impl AssemblyContext {
             symbols: Vec::new(),
             symbol_index: BTreeMap::new(),
             used_names: BTreeSet::new(),
+            named_temporaries: true,
             unique_counters: BTreeMap::new(),
             directional_instances: BTreeMap::new(),
             directional_symbols: BTreeMap::new(),
@@ -9701,7 +10162,11 @@ impl AssemblyContext {
     }
 
     pub fn temporary_symbol(&mut self) -> usize {
-        let base = format!("{}tmp", self.private_prefix());
+        let base = if self.named_temporaries {
+            format!("{}tmp", self.private_prefix())
+        } else {
+            format!("{}omni_tmp", self.private_prefix())
+        };
         self.renamable_symbol(&base, true, true)
     }
 
@@ -9858,6 +10323,17 @@ impl AssemblyContext {
         match expression {
             Expression::Constant(value) => Some(RelocatableValue::constant(*value)),
             Expression::Register(_) => None,
+            Expression::Prefixed { prefix, operand } => {
+                let inner = self.evaluate_relocatable(operand, layout, in_set)?;
+                if inner.is_absolute() {
+                    Some(RelocatableValue::constant(prefix_fold(
+                        prefix,
+                        inner.constant,
+                    )))
+                } else {
+                    Some(inner)
+                }
+            }
             Expression::Symbol { name, specifier } => {
                 let index = match self.lookup(name) {
                     Some(index) => index,
@@ -9879,6 +10355,14 @@ impl AssemblyContext {
                         {
                             if let Some(specifier) = specifier {
                                 if inner.is_absolute() {
+                                    if self.triple.isa == Isa::Armv8 {
+                                        return Some(RelocatableValue {
+                                            add: None,
+                                            subtract: None,
+                                            constant: inner.constant,
+                                            specifier: Some(specifier.clone()),
+                                        });
+                                    }
                                     return Some(RelocatableValue {
                                         add: Some(index),
                                         subtract: None,
@@ -10120,15 +10604,15 @@ impl AssemblyContext {
         if !layout.difference_resolved(self, a, b, in_set) {
             return;
         }
-        let (Some((section_a, offset_a)), Some((section_b, offset_b))) =
-            (layout.symbol_offset(self, a), layout.symbol_offset(self, b))
-        else {
+        let Some(difference) = layout.symbol_difference(self, a, b, in_set) else {
             return;
         };
-        if section_a != section_b {
-            return;
-        }
-        *constant = constant.wrapping_add(offset_a.wrapping_sub(offset_b));
+        let difference = if self.triple.isa == Isa::Armv7 && self.symbols[a].thumb_function {
+            difference | 1
+        } else {
+            difference
+        };
+        *constant = constant.wrapping_add(difference);
         *add = None;
         *subtract = None;
     }
@@ -10214,6 +10698,7 @@ pub struct AssemblerOptions {
     pub align_branch_boundary: u64,
     pub align_branch: Vec<String>,
     pub pad_max_prefix_size: Option<u32>,
+    pub pad_for_align: bool,
     pub branches_within_32_byte_boundaries: bool,
     pub definitions: Vec<(String, i64)>,
     pub cpu: String,
@@ -10225,6 +10710,10 @@ pub struct AssemblerOptions {
     pub include_directories: Vec<String>,
     pub masm_integers: bool,
     pub markup: bool,
+    pub implicit_mapping_symbols: bool,
+    pub fatal_warnings: bool,
+    pub no_deprecated_warn: bool,
+    pub fdpic: bool,
 }
 
 impl AssemblerOptions {
@@ -10242,6 +10731,7 @@ impl AssemblerOptions {
             align_branch_boundary: 0,
             align_branch: Vec::new(),
             pad_max_prefix_size: None,
+            pad_for_align: false,
             branches_within_32_byte_boundaries: false,
             definitions: Vec::new(),
             cpu: String::new(),
@@ -10253,6 +10743,10 @@ impl AssemblerOptions {
             include_directories: Vec::new(),
             masm_integers: false,
             markup: false,
+            implicit_mapping_symbols: false,
+            fatal_warnings: false,
+            no_deprecated_warn: false,
+            fdpic: false,
         }
     }
 }
@@ -10323,6 +10817,10 @@ pub enum CfiInstruction {
     Undefined(i64),
     Register(i64, i64),
     WindowSave,
+    NegateReturnAddressStateWithPc,
+    NegateReturnAddressState,
+    BKeyFrame,
+    SetReturnAddressState(i64, i64),
     ValueOffset(i64, i64),
     GnuArgumentsSize(i64),
 }
@@ -10471,6 +10969,38 @@ pub trait Streamer {
     fn emit_identifier(&mut self, context: &mut AssemblyContext, text: &[u8]);
     fn emit_file(&mut self, context: &mut AssemblyContext, name: &[u8]);
     fn emit_raw_text(&mut self, context: &mut AssemblyContext, text: &str);
+    fn emit_inst(&mut self, context: &mut AssemblyContext, value: i64, location: SourceLocation) {
+        self.emit_value(context, &Expression::Constant(value), 4, location);
+    }
+    fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
+        context.symbols[symbol].other |= 0x80;
+    }
+    fn emit_arm_subsection(&mut self, _name: &str, _optional: u8, _kind: u8) {}
+    fn emit_arm_directive(&mut self, _text: &str) {}
+    fn emit_arm_marker_fixup(
+        &mut self,
+        _context: &mut AssemblyContext,
+        _value: &Expression,
+        _literal: Option<u32>,
+        _location: SourceLocation,
+    ) {
+    }
+    fn set_arm_features(&mut self, _features: &BTreeSet<String>) {}
+    fn set_arm_thumb(&mut self, _thumb: bool) {}
+    fn emit_arm_attribute(&mut self, _vendor: &str, _tag: u32, _value: Option<u32>, _text: &str) {}
+    fn emit_arm32_attributes(&mut self, _contents: &[u8]) {}
+    fn emits_object(&self) -> bool {
+        false
+    }
+    fn emit_arm32_inst(
+        &mut self,
+        context: &mut AssemblyContext,
+        value: i64,
+        _suffix: char,
+        location: SourceLocation,
+    ) {
+        self.emit_inst(context, value, location);
+    }
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>);
     fn emit_mode_change(&mut self, context: &mut AssemblyContext, mode: Mode);
     fn emit_coff_directive(
@@ -10487,6 +11017,11 @@ pub trait Streamer {
     fn current_fragment_valid(&self) -> bool {
         true
     }
+    fn symbol_layout(&self) -> Option<&dyn SymbolLayout> {
+        None
+    }
+    fn note_expression_locations(&mut self, _locations: &[(Expression, Option<SourceLocation>)]) {}
+    fn note_statement_start(&mut self, _location: SourceLocation) {}
 }
 
 pub struct AssemblyResult {
@@ -10505,6 +11040,22 @@ pub struct Assembler<'s> {
     pub streamer: Box<dyn Streamer + 's>,
     pub mode: Mode,
     pub dialect: Syntax,
+    pub arm_features: BTreeSet<String>,
+    pub arm_mnemonic: String,
+    pub arm_suffixes: BTreeSet<usize>,
+    pub arm_aliases: BTreeMap<String, (armv8::RegKind, RegisterId)>,
+    pub arm_keep_symbols: bool,
+    pub arm_thumb: bool,
+    pub arm_next_thumb: bool,
+    pub arm_thumb_labels: BTreeSet<usize>,
+    pub arm_it: armv7::ItState,
+    pub arm_vpt: armv7::ItState,
+    pub arm_operand_count: usize,
+    pub arm_writeback: bool,
+    pub arm_attributes: armv8::AttributeSet,
+    pub arm_attribute_state: armv7::AttributeState,
+    pub arm_unwind: armv7::UnwindState,
+    pub arm_pools: Vec<(usize, Vec<armv8::PoolEntry>)>,
     pending_errors: Vec<AssemblyMessage>,
     condition: ConditionState,
     conditions: Vec<ConditionState>,
@@ -10517,6 +11068,7 @@ pub struct Assembler<'s> {
     code_16_gcc: bool,
     forced_data_prefix: Option<Mode>,
     statement_start: SourceLocation,
+    expression_locations: Vec<(Expression, Option<SourceLocation>)>,
     cfi_start: Option<SourceLocation>,
     extended_register_seen: bool,
     pub file_reader: Option<FileReader<'s>>,
@@ -10631,22 +11183,67 @@ impl<'s> Assembler<'s> {
         source: &[u8],
         streamer: Box<dyn Streamer + 's>,
     ) -> Result<Assembler<'s>, Diagnostic> {
-        let target = target()?;
-        let matcher = matcher(target);
         let triple = TargetTriple::parse(&options.triple);
+        let (target, matcher) = match triple.isa {
+            Isa::X86 => {
+                let target = target()?;
+                (target, matcher(target))
+            }
+            Isa::Armv7 => (armv7::target()?, armv7::matcher()),
+            Isa::Armv8 => (armv8::target()?, armv8::matcher()),
+        };
         let mode = triple.mode;
         let dialect = options.input_syntax;
+        let arm_features = match triple.isa {
+            Isa::X86 => BTreeSet::new(),
+            Isa::Armv7 => armv7::initial_features(target, &triple, &options.cpu, &options.features),
+            Isa::Armv8 => armv8::feature_set(target, &options.cpu, &options.features),
+        };
         let mut lexer = Lexer::new(&options.source_name, source);
         lexer.masm_integers = options.masm_integers;
+        lexer.hash_token = triple.isa != Isa::X86;
+        lexer.at_comment = triple.isa == Isa::Armv7;
+        let unnamed_temporaries = triple.isa != Isa::X86 && options.output == OutputKind::Object;
+        let starts_thumb = triple.is_thumb()
+            || (triple.isa == Isa::Armv7
+                && target.records.values().any(|record| {
+                    record.is_a("SubtargetFeature")
+                        && table_text(record, "Name") == "thumb-mode"
+                        && arm_features.contains(&record.name)
+                }));
+        let mut streamer = streamer;
+        if starts_thumb && triple.isa == Isa::Armv7 {
+            streamer.set_arm_thumb(true);
+        }
         Ok(Assembler {
             target,
             matcher,
             options,
             lexer,
-            context: AssemblyContext::new(triple),
+            context: {
+                let mut context = AssemblyContext::new(triple);
+                context.named_temporaries = !unnamed_temporaries;
+                context
+            },
             streamer,
             mode,
             dialect,
+            arm_features,
+            arm_mnemonic: String::new(),
+            arm_suffixes: BTreeSet::new(),
+            arm_aliases: BTreeMap::new(),
+            arm_keep_symbols: false,
+            arm_thumb: starts_thumb,
+            arm_next_thumb: false,
+            arm_thumb_labels: BTreeSet::new(),
+            arm_it: armv7::ItState::NONE,
+            arm_vpt: armv7::ItState::NONE,
+            arm_operand_count: 0,
+            arm_writeback: false,
+            arm_attributes: armv8::AttributeSet::default(),
+            arm_attribute_state: armv7::AttributeState::default(),
+            arm_unwind: armv7::UnwindState::default(),
+            arm_pools: Vec::new(),
             pending_errors: Vec::new(),
             condition: ConditionState {
                 kind: ConditionKind::None,
@@ -10663,6 +11260,7 @@ impl<'s> Assembler<'s> {
             code_16_gcc: false,
             forced_data_prefix: None,
             statement_start: SourceLocation::default(),
+            expression_locations: Vec::new(),
             cfi_start: None,
             extended_register_seen: false,
             file_reader: None,
@@ -10716,6 +11314,11 @@ impl<'s> Assembler<'s> {
         text: &str,
         range: Option<(SourceLocation, SourceLocation)>,
     ) {
+        let kind = if kind == MessageKind::Warning && self.options.fatal_warnings {
+            MessageKind::Error
+        } else {
+            kind
+        };
         let message = AssemblyMessage {
             kind,
             location: Some(location),
@@ -10911,8 +11514,16 @@ impl<'s> Assembler<'s> {
     }
 
     fn parse_expression(&mut self) -> Result<(Expression, SourceLocation), ()> {
+        let start = self.location();
         let (mut expression, mut end) = self.parse_primary()?;
+        let operator_location = self.location();
+        let has_operator = binary_precedence(self.lexer.token.kind).is_some();
         self.parse_binary_right(1, &mut expression, &mut end)?;
+        let root = if has_operator && matches!(expression, Expression::Binary { .. }) {
+            operator_location
+        } else {
+            start
+        };
         if self.is(TokenKind::At) {
             self.lex();
             if !self.is(TokenKind::Identifier) {
@@ -10934,17 +11545,33 @@ impl<'s> Assembler<'s> {
             end = self.lexer.token.end_location();
             self.lex();
         }
-        if !matches!(expression, Expression::Constant(_)) {
-            if let Some(value) = self.context.evaluate_absolute(&expression, None) {
+        if !matches!(expression, Expression::Constant(_)) && !self.arm_keep_symbols {
+            let layout = if self.context.triple.isa == Isa::Armv8 {
+                None
+            } else {
+                self.streamer.symbol_layout()
+            };
+            if let Some(value) = self.context.evaluate_absolute(&expression, layout) {
                 expression = Expression::Constant(value);
             }
+        }
+        if !matches!(
+            expression,
+            Expression::Constant(_) | Expression::Register(_)
+        ) && !self
+            .expression_locations
+            .last()
+            .is_some_and(|(held, _)| *held == expression)
+        {
+            self.expression_locations
+                .push((expression.clone(), Some(root)));
         }
         Ok((expression, end))
     }
 
     fn apply_specifier(&mut self, expression: &Expression, specifier: &str) -> Option<Expression> {
         match expression {
-            Expression::Constant(_) | Expression::Register(_) => None,
+            Expression::Constant(_) | Expression::Register(_) | Expression::Prefixed { .. } => None,
             Expression::Symbol {
                 name,
                 specifier: existing,
@@ -11011,6 +11638,13 @@ impl<'s> Assembler<'s> {
                 self.parse_binary_right(token_precedence + 1, &mut right, end)?;
             }
             let left = std::mem::replace(expression, Expression::Constant(0));
+            let operator = if self.target.isa != Isa::X86
+                && operator == BinaryOperator::ArithmeticShiftRight
+            {
+                BinaryOperator::LogicalShiftRight
+            } else {
+                operator
+            };
             *expression = Expression::Binary {
                 operator,
                 left: Box::new(left),
@@ -11019,7 +11653,44 @@ impl<'s> Assembler<'s> {
         }
     }
 
+    fn parse_percent_specifier(&mut self) -> Result<(Expression, SourceLocation), ()> {
+        self.lex();
+        if self.check(
+            !self.is(TokenKind::Identifier),
+            "expected '%' relocation specifier",
+        ) {
+            return Err(());
+        }
+        let name = self.lexer.token.text.clone();
+        if name != "dtprel" {
+            self.token_error("invalid relocation specifier");
+            return Err(());
+        }
+        self.lex();
+        if self.parse_token(TokenKind::LeftParenthesis, "expected '('") {
+            return Err(());
+        }
+        let (inner, _) = self.parse_expression()?;
+        let end = self.lexer.token.end_location();
+        if self.parse_token(
+            TokenKind::RightParenthesis,
+            "expected ')' in parentheses expression",
+        ) {
+            return Err(());
+        }
+        match self.apply_specifier(&inner, &name) {
+            Some(applied) => Ok((applied, end)),
+            None => {
+                self.token_error("expected relocatable expression");
+                Err(())
+            }
+        }
+    }
+
     fn parse_primary(&mut self) -> Result<(Expression, SourceLocation), ()> {
+        if self.context.triple.isa == Isa::Armv8 && self.is(TokenKind::Percent) {
+            return self.parse_percent_specifier();
+        }
         if self.is(TokenKind::Percent)
             || (self.dialect == Syntax::Intel
                 && self.is(TokenKind::Identifier)
@@ -11064,6 +11735,10 @@ impl<'s> Assembler<'s> {
                         self.error(first_location, "invalid token in expression");
                         return Err(());
                     }
+                    if first_kind == TokenKind::At {
+                        self.token_error("expected a symbol reference");
+                        return Err(());
+                    }
                     self.token_error("unknown token in expression");
                     return Err(());
                 };
@@ -11081,6 +11756,21 @@ impl<'s> Assembler<'s> {
                 } else if let Some((before, after)) = identifier.split_once('@') {
                     split = Some((before.to_string(), after.to_string()));
                 }
+                let mut variant_location: Option<SourceLocation> = None;
+                if split.is_none()
+                    && self.target.isa == Isa::Armv7
+                    && self.is(TokenKind::LeftParenthesis)
+                {
+                    self.lex();
+                    variant_location = Some(self.location());
+                    let variant = self.parse_identifier().unwrap_or_default();
+                    if !self.is(TokenKind::RightParenthesis) {
+                        self.token_error("expected ')'");
+                        return Err(());
+                    }
+                    self.lex();
+                    split = Some((identifier.clone(), variant));
+                }
                 let end = if first_kind == TokenKind::Identifier {
                     identifier_token.end_location()
                 } else {
@@ -11095,18 +11785,23 @@ impl<'s> Assembler<'s> {
                 let mut specifier: Option<String> = None;
                 if let Some((before, after)) = split {
                     if !after.is_empty() {
-                        match specifier_for_name(&after) {
+                        let found = if variant_location.is_some() {
+                            armv7::variant_specifier(&after).map(str::to_string)
+                        } else {
+                            specifier_for_name(&after).map(str::to_string)
+                        };
+                        match found {
                             Some(found) => {
                                 symbol_name = before;
-                                specifier = Some(found.to_string());
+                                specifier = Some(found);
                             }
                             None => {
                                 if self.context.triple.format != ObjectFormat::Coff {
                                     let offset = identifier.find('@').map(|at| at + 1).unwrap_or(0);
-                                    let location = SourceLocation {
+                                    let location = variant_location.unwrap_or(SourceLocation {
                                         buffer: identifier_token.buffer,
                                         position: identifier_token.start + offset,
-                                    };
+                                    });
                                     self.error(location, &format!("invalid variant '{after}'"));
                                     return Err(());
                                 }
@@ -11118,7 +11813,7 @@ impl<'s> Assembler<'s> {
                 let resolved_name = self.context.symbols[symbol].name.clone();
                 if let Some(value) = self.context.symbols[symbol].value.clone() {
                     let inline = matches!(value, Expression::Constant(_) | Expression::Register(_));
-                    if inline && specifier.is_none() {
+                    if inline && specifier.is_none() && !self.arm_keep_symbols {
                         return Ok((value, end));
                     }
                     if matches!(value, Expression::Register(_)) && specifier.is_some() {
@@ -11245,7 +11940,10 @@ impl<'s> Assembler<'s> {
     fn parse_absolute_expression(&mut self) -> Result<i64, ()> {
         let start = self.location();
         let (expression, _) = self.parse_expression()?;
-        match self.context.evaluate_absolute(&expression, None) {
+        match self
+            .context
+            .evaluate_absolute(&expression, self.streamer.symbol_layout())
+        {
             Some(value) => Ok(value),
             None => {
                 self.error(start, "expected absolute expression");
@@ -11265,7 +11963,12 @@ impl<'s> Assembler<'s> {
             if self.parse_optional_token(TokenKind::EndOfStatement) {
                 return false;
             }
-            if self.parse_comma() {
+            let failed = if self.target.isa == Isa::Armv7 {
+                self.parse_token(TokenKind::Comma, "unexpected token")
+            } else {
+                self.parse_comma()
+            };
+            if failed {
                 return true;
             }
         }
@@ -11313,6 +12016,12 @@ impl<'s> Assembler<'s> {
             }
         }
         if !self.context.had_error {
+            if self.target.isa == Isa::Armv8 || self.target.isa == Isa::Armv7 {
+                self.arm_pool_finish();
+            }
+            if self.target.isa == Isa::Armv7 {
+                self.arm32_finish_attributes();
+            }
             self.streamer.finish(&mut self.context);
         }
         self.context.had_error
@@ -11337,6 +12046,8 @@ impl<'s> Assembler<'s> {
         let identifier_token = self.lexer.token.clone();
         let identifier_location = identifier_token.location();
         self.statement_start = identifier_location;
+        self.expression_locations.clear();
+        self.streamer.note_statement_start(identifier_location);
         let mut local_label: i64 = -1;
         let identifier: String;
         if self.is(TokenKind::HashDirective) {
@@ -11411,6 +12122,10 @@ impl<'s> Assembler<'s> {
             if self.check_for_valid_section() {
                 return true;
             }
+            if self.lexer.hash_token && self.lexer.hash_follows() {
+                self.lexer.state.at_start_of_statement = true;
+                self.lexer.label_comment = true;
+            }
             self.lex();
             if identifier == "." {
                 return self.error(
@@ -11458,8 +12173,21 @@ impl<'s> Assembler<'s> {
             self.print_error(location, &format!("symbol '{name}' is already defined"));
             return false;
         }
+        if self.target.isa == Isa::Armv7 && self.arm_next_thumb {
+            self.arm_next_thumb = false;
+            self.arm32_mark_thumb_function(symbol);
+        }
         self.streamer
             .emit_label(&mut self.context, symbol, Some(location));
+        if self.target.isa == Isa::Armv7 && self.arm_thumb {
+            self.arm_thumb_labels.insert(symbol);
+            if matches!(
+                self.context.symbols[symbol].symbol_type,
+                Some(SymbolType::Function | SymbolType::IndirectFunction)
+            ) {
+                self.context.symbols[symbol].thumb_function = true;
+            }
+        }
         false
     }
 
@@ -11482,6 +12210,11 @@ impl<'s> Assembler<'s> {
         let Ok((value, _)) = self.parse_expression() else {
             return self.token_error("missing expression");
         };
+        let value_location = self
+            .expression_locations
+            .last()
+            .filter(|(held, _)| *held == value)
+            .and_then(|(_, at)| *at);
         if self.parse_end_of_line() {
             return true;
         }
@@ -11518,6 +12251,7 @@ impl<'s> Assembler<'s> {
             }
         };
         self.context.symbols[symbol].redefinable = allow_redefinition;
+        self.context.symbols[symbol].value_location = value_location;
         match kind {
             AssignmentKind::Equal | AssignmentKind::Set | AssignmentKind::Equiv => {
                 self.streamer
@@ -12002,6 +12736,35 @@ impl<'s> Assembler<'s> {
                 false
             }
             ".cfi_window_save" => self.parse_cfi_plain(location, CfiInstruction::WindowSave),
+            ".cfi_negate_ra_state_with_pc" if self.target.isa == Isa::Armv8 => {
+                self.parse_cfi_plain(location, CfiInstruction::NegateReturnAddressStateWithPc)
+            }
+            ".cfi_negate_ra_state" if self.target.isa == Isa::Armv8 => {
+                self.parse_cfi_plain(location, CfiInstruction::NegateReturnAddressState)
+            }
+            ".cfi_b_key_frame" if self.target.isa == Isa::Armv8 => {
+                self.parse_cfi_plain(location, CfiInstruction::BKeyFrame)
+            }
+            ".cfi_set_ra_state" if self.target.isa == Isa::Armv8 => {
+                let Ok(state) = self.parse_absolute_expression() else {
+                    return true;
+                };
+                if self.parse_comma() {
+                    return true;
+                }
+                let Ok(offset) = self.parse_absolute_expression() else {
+                    return true;
+                };
+                if self.parse_end_of_line() {
+                    return true;
+                }
+                self.streamer.emit_cfi(
+                    &mut self.context,
+                    CfiInstruction::SetReturnAddressState(state, offset),
+                    location,
+                );
+                false
+            }
             ".cfi_label" => {
                 let at = self.location();
                 let Some(name) = self.parse_identifier() else {
@@ -12157,6 +12920,18 @@ impl<'s> Assembler<'s> {
             if parser.check_for_valid_section() {
                 return true;
             }
+            let location = if parser.target.isa == Isa::Armv7 {
+                let mut position = location.position;
+                while parser.lexer.byte(position) == b'(' {
+                    position += 1;
+                }
+                SourceLocation {
+                    buffer: location.buffer,
+                    position,
+                }
+            } else {
+                location
+            };
             let Ok((value, _)) = parser.parse_expression() else {
                 return true;
             };
@@ -12419,6 +13194,24 @@ impl<'s> Assembler<'s> {
         if self.check_for_valid_section() {
             return true;
         }
+        if power_of_two
+            && value_size == 1
+            && self.is(TokenKind::EndOfStatement)
+            && self.target.isa == Isa::Armv7
+        {
+            if self.parse_end_of_line() {
+                return true;
+            }
+            if self.current_section_is_code() {
+                let mode = self.mode;
+                self.streamer
+                    .emit_code_alignment(&mut self.context, 4, 0, mode);
+            } else {
+                self.streamer
+                    .emit_value_to_alignment(&mut self.context, 4, 0, 1, 0);
+            }
+            return false;
+        }
         if power_of_two && value_size == 1 && self.is(TokenKind::EndOfStatement) {
             self.warning(
                 alignment_location,
@@ -12680,7 +13473,10 @@ impl<'s> Assembler<'s> {
             .map(<[u8]>::to_vec)
             .unwrap_or_default();
         if let Some((expression, at)) = count {
-            match self.context.evaluate_absolute(&expression, None) {
+            match self
+                .context
+                .evaluate_absolute(&expression, self.streamer.symbol_layout())
+            {
                 Some(value) => {
                     if value < 0 {
                         self.warning(at, "negative count has no effect");
@@ -12850,9 +13646,9 @@ impl<'s> Assembler<'s> {
         let flavour = if self.context.triple.is_64_bit() {
             0
         } else if self.context.triple.format == ObjectFormat::MachObject {
-            2
-        } else {
             1
+        } else {
+            2
         };
         self.target.registers[register as usize]
             .dwarf_numbers
@@ -13027,7 +13823,7 @@ impl<'s> Assembler<'s> {
             };
             if self
                 .context
-                .evaluate_relocatable(&expression, None, false)
+                .evaluate_relocatable(&expression, self.streamer.symbol_layout(), false)
                 .is_none()
             {
                 return self.error(at, "expression must be relocatable");
@@ -13085,8 +13881,9 @@ impl<'s> Assembler<'s> {
             }
             align_to_end = true;
         }
+        let directive = self.statement_start;
         self.streamer
-            .emit_bundle_lock(&mut self.context, align_to_end, location);
+            .emit_bundle_lock(&mut self.context, align_to_end, directive);
         false
     }
 }
@@ -13127,7 +13924,10 @@ impl<'s> Assembler<'s> {
         expression: &Expression,
         location: SourceLocation,
     ) -> Option<i64> {
-        match self.context.evaluate_absolute(expression, None) {
+        match self
+            .context
+            .evaluate_absolute(expression, self.streamer.symbol_layout())
+        {
             Some(value) => {
                 if !(0..=0x7fff_ffff).contains(&value) {
                     self.error(
@@ -13328,10 +14128,17 @@ impl<'s> Assembler<'s> {
         if self.context.section_stack.len() <= 1 {
             return false;
         }
-        self.context.section_stack.pop();
+        let old = self.context.section_stack.pop();
         if let Some((section, subsection)) = self.context.current_section() {
-            self.streamer
-                .switch_section(&mut self.context, section, subsection);
+            let changed = old.and_then(|entry| entry.0) != Some((section, subsection));
+            if changed {
+                self.context
+                    .section_stack
+                    .push((old.and_then(|entry| entry.0), None));
+                self.streamer
+                    .switch_section(&mut self.context, section, subsection);
+                self.context.section_stack.pop();
+            }
         }
         true
     }
@@ -13805,6 +14612,16 @@ impl<'s> Assembler<'s> {
         self.lex();
         self.streamer
             .emit_symbol_attribute(&mut self.context, symbol, attribute);
+        if self.target.isa == Isa::Armv7
+            && matches!(
+                attribute,
+                SymbolAttribute::TypeFunction | SymbolAttribute::TypeIndirectFunction
+            )
+            && self.context.symbols[symbol].defined
+            && self.arm_thumb_labels.contains(&symbol)
+        {
+            self.context.symbols[symbol].thumb_function = true;
+        }
         false
     }
 
@@ -13815,8 +14632,12 @@ impl<'s> Assembler<'s> {
         if !self.is(TokenKind::Comma) {
             return self.token_error("expected a comma");
         }
+        let restore = self.lexer.at_comment;
+        self.lexer.at_comment = false;
         self.lex();
-        let Some(name) = self.parse_identifier() else {
+        let name = self.parse_identifier();
+        self.lexer.at_comment = restore;
+        let Some(name) = name else {
             return self.token_error("expected identifier");
         };
         if !name.contains('@') {
@@ -14039,6 +14860,12 @@ impl<'s> Assembler<'s> {
         identifier: &str,
         location: SourceLocation,
     ) -> Option<bool> {
+        if self.target.isa == Isa::Armv8 {
+            return self.arm_directive(&identifier.to_ascii_lowercase(), location);
+        }
+        if self.target.isa == Isa::Armv7 {
+            return self.arm32_directive(&identifier.to_ascii_lowercase(), location);
+        }
         if identifier.starts_with(".arch") {
             self.parse_string_to_end_of_statement();
             return Some(false);
@@ -14455,7 +15282,10 @@ impl<'s> Assembler<'s> {
                 let Ok((expression, end)) = self.parse_expression() else {
                     return Ok(arguments);
                 };
-                let Some(evaluated) = self.context.evaluate_absolute(&expression, None) else {
+                let Some(evaluated) = self
+                    .context
+                    .evaluate_absolute(&expression, self.streamer.symbol_layout())
+                else {
                     self.error(string_location, "expected absolute expression");
                     return Err(());
                 };
@@ -14743,7 +15573,10 @@ impl<'s> Assembler<'s> {
         let Ok((expression, _)) = self.parse_expression() else {
             return true;
         };
-        let Some(count) = self.context.evaluate_absolute(&expression, None) else {
+        let Some(count) = self
+            .context
+            .evaluate_absolute(&expression, self.streamer.symbol_layout())
+        else {
             return self.error(
                 count_location,
                 &format!("unexpected token in '{directive}' directive"),
@@ -15046,6 +15879,7 @@ struct IntelExpression {
     pending_scale: Option<u32>,
     immediate: i64,
     symbol: Option<Expression>,
+    symbol_location: Option<SourceLocation>,
     calculator: InfixCalculator,
     bracket_count: i32,
     parenthesis_count: i32,
@@ -15070,6 +15904,7 @@ impl IntelExpression {
             pending_scale: None,
             immediate: 0,
             symbol: None,
+            symbol_location: None,
             calculator: InfixCalculator::default(),
             bracket_count: 0,
             parenthesis_count: 0,
@@ -15701,6 +16536,12 @@ impl<'s> Assembler<'s> {
     }
 
     fn parse_and_match_instruction(&mut self, identifier: &str, identifier_token: Token) -> bool {
+        if self.target.isa == Isa::Armv8 {
+            return self.arm_parse_and_match(identifier, identifier_token);
+        }
+        if self.target.isa == Isa::Armv7 {
+            return self.arm32_parse_and_match(identifier, identifier_token);
+        }
         let name = identifier.to_ascii_lowercase();
         let mut state = InstructionState::default();
         self.extended_register_seen = false;
@@ -15743,6 +16584,8 @@ impl<'s> Assembler<'s> {
                 ),
                 ParsedKind::Memory(memory) => format!("Memory: ModeSize={}", memory.mode_size),
                 ParsedKind::Prefix(value) => format!("Prefix:{value}"),
+                ParsedKind::Arm(operand) => armv8::describe_operand(self.target, operand),
+                ParsedKind::Arm32(operand) => format!("{operand:?}"),
             });
         }
         pieces.join(", ")
@@ -16608,7 +17451,10 @@ impl<'s> Assembler<'s> {
                     }
                 }
                 other => {
-                    let Some(value) = self.context.evaluate_absolute(&other, None) else {
+                    let Some(value) = self
+                        .context
+                        .evaluate_absolute(&other, self.streamer.symbol_layout())
+                    else {
                         return self.error(at, "expected absolute expression");
                     };
                     if value != 1 {
@@ -16915,6 +17761,15 @@ impl<'s> Assembler<'s> {
             Some(symbol) => symbol,
             None => constant,
         };
+        let root = if value != 0 {
+            None
+        } else {
+            expression.symbol_location
+        };
+        if !matches!(displacement, Expression::Constant(_)) {
+            self.expression_locations
+                .insert(0, (displacement.clone(), root));
+        }
         if !expression.memory_expression && segment == NO_REGISTER {
             operands.push(self.operand_from(ParsedKind::Immediate(displacement), start, end));
             return false;
@@ -17123,6 +17978,9 @@ impl<'s> Assembler<'s> {
                             let location = expression.error_location(at);
                             return self.intel_failure(location, text);
                         }
+                        if expression.symbol_location.is_none() {
+                            expression.symbol_location = Some(at);
+                        }
                         end = suffix.location();
                         self.lex();
                     } else if let Err(text) = expression.on_integer(value) {
@@ -17264,6 +18122,9 @@ impl<'s> Assembler<'s> {
                 if let Err(text) = expression.on_identifier(value) {
                     let location = expression.error_location(at);
                     return self.intel_failure(location, text);
+                }
+                if expression.symbol.is_some() && expression.symbol_location.is_none() {
+                    expression.symbol_location = Some(at);
                 }
                 Ok(())
             }
@@ -17422,6 +18283,8 @@ impl<'s> Assembler<'s> {
             return true;
         }
         while self.process_instruction(&mut instruction, state) {}
+        let locations = std::mem::take(&mut self.expression_locations);
+        self.streamer.note_expression_locations(&locations);
         self.emit_instruction(&instruction, location);
         false
     }
@@ -18164,6 +19027,18 @@ impl<'s> Assembler<'s> {
             self.context.sections[section].has_instructions = true;
         }
         let mode = self.mode;
+        if self.target.isa == Isa::Armv7 {
+            let mut marked = instruction.clone();
+            if self.arm_thumb {
+                marked.flags |= armv7::THUMB_MODE;
+            }
+            if self.arm_features.contains("HasMVEIntegerOps") {
+                marked.flags |= armv7::MVE_MODE;
+            }
+            self.streamer
+                .emit_instruction(&mut self.context, &marked, mode, location);
+            return;
+        }
         self.streamer
             .emit_instruction(&mut self.context, instruction, mode, location);
     }
@@ -18176,6 +19051,7 @@ pub struct TextStreamer {
     pub hexadecimal_immediates: bool,
     pub comment_column: usize,
     pub markup: bool,
+    pub arm_features: BTreeSet<String>,
     output: String,
     column: usize,
     comments: String,
@@ -18200,6 +19076,7 @@ impl TextStreamer {
             hexadecimal_immediates,
             comment_column,
             markup: false,
+            arm_features: BTreeSet::new(),
             output: String::new(),
             column: 0,
             comments: String::new(),
@@ -18245,7 +19122,12 @@ impl TextStreamer {
         loop {
             self.pad_to_comment_column();
             let position = rest.find('\n').unwrap_or(rest.len());
-            let line = format!("# {}\n", &rest[..position]);
+            let prefix = match self.target.isa {
+                Isa::Armv8 => "//",
+                Isa::Armv7 => "@",
+                Isa::X86 => "#",
+            };
+            let line = format!("{prefix} {}\n", &rest[..position]);
             self.write(&line);
             rest = if position < rest.len() {
                 &rest[position + 1..]
@@ -18357,7 +19239,11 @@ impl TextStreamer {
         if context.triple.is_64_bit() && flags & ELF_FLAG_X86_64_LARGE != 0 {
             out.push('l');
         }
-        out.push_str("\",@");
+        out.push_str(if context.triple.isa == Isa::Armv7 {
+            "\",%"
+        } else {
+            "\",@"
+        });
         let type_name = match held.section_type {
             ELF_SECTION_INITIALIZER_ARRAY => "init_array".to_string(),
             ELF_SECTION_FINALIZER_ARRAY => "fini_array".to_string(),
@@ -18413,8 +19299,12 @@ impl TextStreamer {
         mode: Mode,
         location: SourceLocation,
     ) -> bool {
-        let encoder = Encoder::new(self.target, mode);
-        let encoded = match encoder.encode(instruction) {
+        let encoded = match self.target.isa {
+            Isa::Armv8 => armv8::encode(self.target, instruction),
+            Isa::Armv7 => armv7::encode(self.target, instruction),
+            Isa::X86 => Encoder::new(self.target, mode).encode(instruction),
+        };
+        let encoded = match encoded {
             Ok(encoded) => encoded,
             Err(diagnostic) => {
                 let cause = diagnostic
@@ -18430,9 +19320,15 @@ impl TextStreamer {
         let bytes = &encoded.bytes;
         let mut map = vec![0usize; bytes.len() * 8];
         for (index, fixup) in encoded.fixups.iter().enumerate() {
-            let size = fixup.kind.size() * 8;
+            let (first_bit, size) = if self.target.isa == Isa::Armv8 {
+                armv8::fixup_bits(fixup.kind)
+            } else if let FixupKind::Arm32(kind) = fixup.kind {
+                (0, kind.bits())
+            } else {
+                (0, fixup.kind.size() * 8)
+            };
             for bit in 0..size {
-                let at = fixup.offset * 8 + bit;
+                let at = fixup.offset * 8 + first_bit + bit;
                 if at < map.len() {
                     map[at] = index + 1;
                 }
@@ -18470,7 +19366,27 @@ impl TextStreamer {
         }
         text.push_str("]\n");
         for (index, fixup) in encoded.fixups.iter().enumerate() {
-            let value = self.expression(&fixup.expression);
+            let value = match (&fixup.expression, fixup.kind) {
+                (Expression::Symbol { name, specifier }, FixupKind::Arm32(kind))
+                    if specifier.as_deref().is_some_and(|held| {
+                        matches!(
+                            held,
+                            "lower16"
+                                | "upper16"
+                                | "lower0_7"
+                                | "lower8_15"
+                                | "upper0_7"
+                                | "upper8_15"
+                        )
+                    }) && kind.is_half_word_relocation() =>
+                {
+                    self.expression(&Expression::Symbol {
+                        name: name.clone(),
+                        specifier: None,
+                    })
+                }
+                _ => self.expression(&fixup.expression),
+            };
             let kind = match fixup.kind {
                 FixupKind::Literal(number) => format!("relocation type: {number}"),
                 FixupKind::Data1 | FixupKind::Data2 | FixupKind::Data4 | FixupKind::Data8
@@ -18495,14 +19411,14 @@ impl TextStreamer {
         let flavour = if context.triple.is_64_bit() {
             0
         } else if context.triple.format == ObjectFormat::MachObject {
-            2
-        } else {
             1
+        } else {
+            2
         };
         for (index, register) in self.target.registers.iter().enumerate().skip(1) {
             if register.dwarf_numbers.get(flavour).copied() == Some(number) {
                 let name = self.target.register_name(index as RegisterId);
-                return if self.syntax == Syntax::Att {
+                return if self.syntax == Syntax::Att && self.target.isa == Isa::X86 {
                     format!("%{name}")
                 } else {
                     name.to_string()
@@ -18711,7 +19627,15 @@ impl Streamer for TextStreamer {
             if context.triple.format != ObjectFormat::Elf {
                 return false;
             }
-            let text = format!("\t.type\t{},@{type_name}", self.symbol(context, symbol));
+            let prefix = if context.triple.isa == Isa::Armv7 {
+                '%'
+            } else {
+                '@'
+            };
+            let text = format!(
+                "\t.type\t{},{prefix}{type_name}",
+                self.symbol(context, symbol)
+            );
             self.line(&text);
             return true;
         }
@@ -18836,8 +19760,12 @@ impl Streamer for TextStreamer {
         size: u32,
         _location: SourceLocation,
     ) {
+        let arm = self.target.isa == Isa::Armv8;
         let directive = match size {
             1 => "\t.byte\t",
+            2 if arm => "\t.hword\t",
+            4 if arm => "\t.word\t",
+            8 if arm => "\t.xword\t",
             2 => "\t.short\t",
             4 => "\t.long\t",
             8 => "\t.quad\t",
@@ -18960,6 +19888,32 @@ impl Streamer for TextStreamer {
         location: SourceLocation,
     ) {
         if self.show_encoding && !self.encoding_comment(context, instruction, mode, location) {
+            return;
+        }
+        if self.target.isa == Isa::Armv7 {
+            let mut printer = armv7::Printer::new(self.target, &self.arm_features);
+            printer.hexadecimal = self.hexadecimal_immediates;
+            printer.markup = self.markup;
+            let text = printer.print(instruction);
+            self.write(&text);
+            if !self.comments.is_empty() && !self.comments.ends_with('\n') {
+                self.comments.push('\n');
+            }
+            self.end_of_line();
+            return;
+        }
+        if self.target.isa == Isa::Armv8 {
+            let mut printer = armv8::ArmPrinter::new(self.target, &self.arm_features);
+            printer.hexadecimal = self.hexadecimal_immediates;
+            printer.variant = self.syntax.variant();
+            printer.markup = self.markup;
+            let text = printer.print(instruction);
+            self.comments.push_str(&printer.comment.borrow());
+            self.write(&text);
+            if !self.comments.is_empty() && !self.comments.ends_with('\n') {
+                self.comments.push('\n');
+            }
+            self.end_of_line();
             return;
         }
         let printer = Printer::new(
@@ -19087,6 +20041,16 @@ impl Streamer for TextStreamer {
                         self.register_name_for_dwarf(context, second)
                     ),
                     CfiInstruction::WindowSave => "\t.cfi_window_save".to_string(),
+                    CfiInstruction::NegateReturnAddressStateWithPc => {
+                        "\t.cfi_negate_ra_state_with_pc".to_string()
+                    }
+                    CfiInstruction::NegateReturnAddressState => {
+                        "\t.cfi_negate_ra_state".to_string()
+                    }
+                    CfiInstruction::BKeyFrame => "\t.cfi_b_key_frame".to_string(),
+                    CfiInstruction::SetReturnAddressState(state, offset) => {
+                        format!("\t.cfi_set_ra_state {state}, {offset}")
+                    }
                     CfiInstruction::ValueOffset(register, offset) => format!(
                         "\t.cfi_val_offset {}, {offset}",
                         self.register_name_for_dwarf(context, register)
@@ -19199,6 +20163,64 @@ impl Streamer for TextStreamer {
         self.line(trimmed);
     }
 
+    fn emit_inst(&mut self, _context: &mut AssemblyContext, value: i64, _location: SourceLocation) {
+        self.line(&format!("\t.inst\t{value:#x}"));
+    }
+
+    fn emit_arm32_inst(
+        &mut self,
+        _context: &mut AssemblyContext,
+        value: i64,
+        suffix: char,
+        _location: SourceLocation,
+    ) {
+        if suffix == '\0' {
+            self.line(&format!("\t.inst\t{:#x}", value as u32));
+        } else {
+            self.line(&format!("\t.inst.{suffix}\t{:#x}", value as u32));
+        }
+    }
+
+    fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
+        let name = self.symbol(context, symbol);
+        self.line(&format!("\t.variant_pcs\t{name}"));
+    }
+
+    fn set_arm_features(&mut self, features: &BTreeSet<String>) {
+        self.arm_features = features.clone();
+    }
+
+    fn emit_arm_directive(&mut self, text: &str) {
+        self.line(text);
+    }
+
+    fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
+        let optional = if optional == 1 {
+            "optional"
+        } else {
+            "required"
+        };
+        let kind = if kind == 0 { "uleb128" } else { "ntbs" };
+        self.line(&format!("\t.aeabi_subsection\t{name}, {optional}, {kind}"));
+    }
+
+    fn emit_arm_attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {
+        let known = match (vendor, tag) {
+            ("aeabi_feature_and_bits", 0) => Some("Tag_Feature_BTI"),
+            ("aeabi_feature_and_bits", 1) => Some("Tag_Feature_PAC"),
+            ("aeabi_feature_and_bits", 2) => Some("Tag_Feature_GCS"),
+            ("aeabi_pauthabi", 1) => Some("Tag_PAuth_Platform"),
+            ("aeabi_pauthabi", 2) => Some("Tag_PAuth_Schema"),
+            _ => None,
+        };
+        let body = match value {
+            Some(value) => value.to_string(),
+            None => text.to_string(),
+        };
+        let comment = known.map(|name| format!("\t// {name}")).unwrap_or_default();
+        self.line(&format!("\t.aeabi_attribute\t{tag}, {body}{comment}"));
+    }
+
     fn emit_address_significance(&mut self, context: &mut AssemblyContext, symbol: Option<usize>) {
         match symbol {
             Some(symbol) => {
@@ -19236,21 +20258,29 @@ impl Streamer for TextStreamer {
         if text == ";" {
             return;
         }
+        let comment = match self.target.isa {
+            Isa::Armv8 => "//",
+            Isa::Armv7 => "@",
+            Isa::X86 => "#",
+        };
         if let Some(rest) = text.strip_prefix("//") {
-            self.explicit_comments.push_str(&format!("\t#{rest}"));
+            self.explicit_comments
+                .push_str(&format!("\t{comment}{rest}"));
         } else if text.starts_with("/*") {
             let body = &text[2..text.len().saturating_sub(2).max(2)];
             let lines: Vec<&str> = body.split(['\r', '\n']).collect();
             for (index, line) in lines.iter().enumerate() {
-                self.explicit_comments.push_str(&format!("\t#{line}"));
+                self.explicit_comments
+                    .push_str(&format!("\t{comment}{line}"));
                 if index + 1 < lines.len() {
                     self.explicit_comments.push('\n');
                 }
             }
-        } else if text.starts_with('#') {
+        } else if text.starts_with('#') || text.starts_with(comment) {
             self.explicit_comments.push('\t');
+            self.explicit_comments.push_str(comment);
             self.explicit_comments
-                .push_str(text.trim_end_matches(['\n', '\r']));
+                .push_str(text[1..].trim_end_matches(['\n', '\r']));
         }
         if text.ends_with('\n') {
             let comments = std::mem::take(&mut self.explicit_comments);
@@ -19552,19 +20582,36 @@ pub fn assemble_source(
     source: &[u8],
     file_reader: Option<FileReader>,
 ) -> Result<AssemblyResult, Diagnostic> {
-    let target = target()?;
     let triple = TargetTriple::parse(&options.triple);
+    let target = match triple.isa {
+        Isa::X86 => target()?,
+        Isa::Armv7 => armv7::target()?,
+        Isa::Armv8 => armv8::target()?,
+    };
     let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);
     let streamer: Box<dyn Streamer> = match options.output {
-        OutputKind::Assembly => Box::new(TextStreamer::new(
-            target,
-            output_syntax,
-            options.show_encoding,
-            options.hexadecimal_immediates,
-            options.comment_column,
-        )),
+        OutputKind::Assembly => {
+            let mut text = TextStreamer::new(
+                target,
+                output_syntax,
+                options.show_encoding,
+                options.hexadecimal_immediates,
+                options.comment_column,
+            );
+            match triple.isa {
+                Isa::X86 => {}
+                Isa::Armv7 => {
+                    text.arm_features =
+                        armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                }
+                Isa::Armv8 => {
+                    text.arm_features = armv8::feature_set(target, &options.cpu, &options.features)
+                }
+            }
+            Box::new(text)
+        }
         OutputKind::Null => Box::new(NullStreamer::new()),
-        OutputKind::Object => Box::new(NullStreamer::new()),
+        OutputKind::Object => Box::new(object::ObjectStreamer::new(target, options)),
     };
     let _ = triple;
     let mut assembler = Assembler::new(options.clone(), source, streamer)?;
@@ -19634,8 +20681,14 @@ pub fn disassemble_source(
     source: &[u8],
     hexadecimal_bytes: bool,
 ) -> Result<AssemblyResult, Diagnostic> {
-    let target = target()?;
     let triple = TargetTriple::parse(&options.triple);
+    let arm = triple.isa == Isa::Armv8;
+    let target = if arm { armv8::target()? } else { target()? };
+    let arm_features = if arm {
+        armv8::feature_set(target, &options.cpu, &options.features)
+    } else {
+        BTreeSet::new()
+    };
     let mode = triple.mode;
     let output_syntax = options.output_syntax.unwrap_or(options.input_syntax);
     let mut streamer: Box<dyn Streamer> = match options.output {
@@ -19648,6 +20701,7 @@ pub fn disassemble_source(
                 options.comment_column,
             );
             text.markup = options.markup;
+            text.arm_features = arm_features.clone();
             Box::new(text)
         }
         _ => Box::new(NullStreamer::new()),
@@ -19755,6 +20809,51 @@ pub fn disassemble_source(
         }
         let mut index = 0usize;
         while index < bytes.len() {
+            if arm {
+                let remaining = &bytes[index..];
+                let decoded = if remaining.len() >= 4 {
+                    let word = u32::from_le_bytes([
+                        remaining[0],
+                        remaining[1],
+                        remaining[2],
+                        remaining[3],
+                    ]);
+                    armv8::disassembler::decode(target, &arm_features, word)
+                } else {
+                    None
+                };
+                let size = if remaining.len() >= 4 { 4 } else { 1 };
+                match decoded {
+                    Some(decoded) => {
+                        if decoded.soft_fail {
+                            context.report(
+                                MessageKind::Warning,
+                                Some(at(origins[index])),
+                                "potentially undefined instruction encoding",
+                            );
+                        }
+                        streamer.emit_instruction(
+                            &mut context,
+                            &decoded.instruction,
+                            mode,
+                            at(origins[index]),
+                        );
+                    }
+                    None => {
+                        context.report(
+                            MessageKind::Warning,
+                            Some(at(origins[index])),
+                            "invalid instruction encoding",
+                        );
+                        if atomic {
+                            failed = true;
+                            break;
+                        }
+                    }
+                }
+                index += size;
+                continue;
+            }
             let (decoded, size) = decoder::decode_instruction(target, mode, &bytes[index..]);
             match decoded {
                 Some(instruction) => {
@@ -24372,4 +25471,9500 @@ pub mod decoder {
         }
         (Some(instruction), length)
     }
+}
+
+pub mod object {
+    use super::*;
+
+    type ImmediateGroup = (
+        &'static [&'static str],
+        &'static [(&'static str, &'static str)],
+    );
+
+    const LONG_IMMEDIATE_GROUPS: &[ImmediateGroup] = &[
+        (
+            &[""],
+            &[
+                ("CMP16mi", "CMP16mi8"),
+                ("CMP16ri", "CMP16ri8"),
+                ("CMP32mi", "CMP32mi8"),
+                ("CMP32ri", "CMP32ri8"),
+                ("CMP64mi32", "CMP64mi8"),
+                ("CMP64ri32", "CMP64ri8"),
+                ("CCMP16mi", "CCMP16mi8"),
+                ("CCMP16ri", "CCMP16ri8"),
+                ("CCMP32mi", "CCMP32mi8"),
+                ("CCMP32ri", "CCMP32ri8"),
+                ("CCMP64mi32", "CCMP64mi8"),
+                ("CCMP64ri32", "CCMP64ri8"),
+                ("PUSH16i", "PUSH16i8"),
+                ("PUSH32i", "PUSH32i8"),
+                ("PUSH64i32", "PUSH64i8"),
+            ],
+        ),
+        (
+            &["", "_EVEX", "_NF", "_ND", "_NF_ND"],
+            &[
+                ("ADD16mi", "ADD16mi8"),
+                ("ADD16ri", "ADD16ri8"),
+                ("ADD32mi", "ADD32mi8"),
+                ("ADD32ri", "ADD32ri8"),
+                ("ADD64mi32", "ADD64mi8"),
+                ("ADD64ri32", "ADD64ri8"),
+                ("AND16mi", "AND16mi8"),
+                ("AND16ri", "AND16ri8"),
+                ("AND32mi", "AND32mi8"),
+                ("AND32ri", "AND32ri8"),
+                ("AND64mi32", "AND64mi8"),
+                ("AND64ri32", "AND64ri8"),
+                ("OR16mi", "OR16mi8"),
+                ("OR16ri", "OR16ri8"),
+                ("OR32mi", "OR32mi8"),
+                ("OR32ri", "OR32ri8"),
+                ("OR64mi32", "OR64mi8"),
+                ("OR64ri32", "OR64ri8"),
+                ("SUB16mi", "SUB16mi8"),
+                ("SUB16ri", "SUB16ri8"),
+                ("SUB32mi", "SUB32mi8"),
+                ("SUB32ri", "SUB32ri8"),
+                ("SUB64mi32", "SUB64mi8"),
+                ("SUB64ri32", "SUB64ri8"),
+                ("XOR16mi", "XOR16mi8"),
+                ("XOR16ri", "XOR16ri8"),
+                ("XOR32mi", "XOR32mi8"),
+                ("XOR32ri", "XOR32ri8"),
+                ("XOR64mi32", "XOR64mi8"),
+                ("XOR64ri32", "XOR64ri8"),
+            ],
+        ),
+        (
+            &["", "_EVEX", "_NF"],
+            &[
+                ("IMUL16rmi", "IMUL16rmi8"),
+                ("IMUL16rri", "IMUL16rri8"),
+                ("IMUL32rmi", "IMUL32rmi8"),
+                ("IMUL32rri", "IMUL32rri8"),
+                ("IMUL64rmi32", "IMUL64rmi8"),
+                ("IMUL64rri32", "IMUL64rri8"),
+            ],
+        ),
+        (
+            &["", "_EVEX", "_ND"],
+            &[
+                ("ADC16mi", "ADC16mi8"),
+                ("ADC16ri", "ADC16ri8"),
+                ("ADC32mi", "ADC32mi8"),
+                ("ADC32ri", "ADC32ri8"),
+                ("ADC64mi32", "ADC64mi8"),
+                ("ADC64ri32", "ADC64ri8"),
+                ("SBB16mi", "SBB16mi8"),
+                ("SBB16ri", "SBB16ri8"),
+                ("SBB32mi", "SBB32mi8"),
+                ("SBB32ri", "SBB32ri8"),
+                ("SBB64mi32", "SBB64mi8"),
+                ("SBB64ri32", "SBB64ri8"),
+            ],
+        ),
+    ];
+
+    fn long_immediate_forms(target: &Target) -> &'static BTreeMap<usize, usize> {
+        static X86_FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
+        static ARM_FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
+        static ARM32_FORMS: OnceLock<BTreeMap<usize, usize>> = OnceLock::new();
+        let forms = match target.isa {
+            Isa::X86 => &X86_FORMS,
+            Isa::Armv7 => &ARM32_FORMS,
+            Isa::Armv8 => &ARM_FORMS,
+        };
+        forms.get_or_init(|| {
+            let mut forms = BTreeMap::new();
+            for (suffixes, pairs) in LONG_IMMEDIATE_GROUPS {
+                for suffix in suffixes.iter() {
+                    for (long, short) in pairs.iter() {
+                        let long = format!("{long}{suffix}");
+                        let short = format!("{short}{suffix}");
+                        if let (Some(long), Some(short)) = (
+                            target.instruction_by_record.get(&long),
+                            target.instruction_by_record.get(&short),
+                        ) {
+                            forms.insert(*short, *long);
+                        }
+                    }
+                }
+            }
+            forms
+        })
+    }
+
+    pub fn encode_unsigned_leb128(value: u64, pad_to: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut remaining = value;
+        loop {
+            let mut byte = (remaining & 0x7f) as u8;
+            remaining >>= 7;
+            if remaining != 0 || out.len() + 1 < pad_to {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if remaining == 0 {
+                break;
+            }
+        }
+        while out.len() < pad_to {
+            let last = out.len() + 1 == pad_to;
+            out.push(if last { 0 } else { 0x80 });
+        }
+        out
+    }
+
+    pub fn encode_signed_leb128(value: i64, pad_to: usize) -> Vec<u8> {
+        let mut out = Vec::new();
+        let mut remaining = value;
+        loop {
+            let mut byte = (remaining & 0x7f) as u8;
+            remaining >>= 7;
+            let more =
+                !((remaining == 0 && byte & 0x40 == 0) || (remaining == -1 && byte & 0x40 != 0));
+            if more || out.len() + 1 < pad_to {
+                byte |= 0x80;
+            }
+            out.push(byte);
+            if !more {
+                break;
+            }
+        }
+        if out.len() < pad_to {
+            let pad = if remaining < 0 { 0x7f } else { 0 };
+            while out.len() + 1 < pad_to {
+                out.push(pad | 0x80);
+            }
+            out.push(pad);
+        }
+        out
+    }
+
+    #[derive(Clone, Debug)]
+    pub enum Tail {
+        Data,
+        Relaxable(MachineInstruction),
+        Align {
+            alignment: u64,
+            fill: i64,
+            fill_length: u8,
+            maximum: u64,
+            nops: bool,
+        },
+        Fill {
+            value: u64,
+            value_size: u8,
+            count: Expression,
+            location: Option<SourceLocation>,
+        },
+        Leb {
+            signed: bool,
+            value: Expression,
+        },
+        Nops {
+            count: i64,
+            control: i64,
+            location: Option<SourceLocation>,
+        },
+        Org {
+            offset: Expression,
+            value: u8,
+            location: Option<SourceLocation>,
+        },
+        DwarfFrame {
+            delta: Expression,
+            location: Option<SourceLocation>,
+        },
+        BoundaryAlign {
+            alignment: u64,
+            last: Option<usize>,
+            size: u64,
+            align_to_end: bool,
+        },
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct PlacedFixup {
+        pub fixup: Fixup,
+        pub location: Option<SourceLocation>,
+    }
+
+    #[derive(Clone, Debug)]
+    pub struct Fragment {
+        pub section: usize,
+        pub tail: Tail,
+        pub fixed: Vec<u8>,
+        pub fixups: Vec<PlacedFixup>,
+        pub variable: Vec<u8>,
+        pub variable_fixups: Vec<PlacedFixup>,
+        pub offset: u64,
+        pub order: usize,
+        pub next: Option<usize>,
+        pub has_instructions: bool,
+        pub allow_auto_padding: bool,
+        pub mode: Mode,
+        pub thumb: bool,
+        pub arm_nop: bool,
+        pub arm_features: u8,
+    }
+
+    impl Fragment {
+        fn new(section: usize, mode: Mode) -> Fragment {
+            Fragment {
+                section,
+                tail: Tail::Data,
+                fixed: Vec::new(),
+                fixups: Vec::new(),
+                variable: Vec::new(),
+                variable_fixups: Vec::new(),
+                offset: 0,
+                order: 0,
+                next: None,
+                has_instructions: false,
+                allow_auto_padding: false,
+                mode,
+                thumb: false,
+                arm_nop: false,
+                arm_features: 0,
+            }
+        }
+
+        pub fn size(&self) -> u64 {
+            (self.fixed.len() + self.variable.len()) as u64
+        }
+
+        fn is_data(&self) -> bool {
+            matches!(self.tail, Tail::Data)
+        }
+    }
+
+    #[derive(Clone, Copy, Debug, PartialEq, Eq)]
+    enum Place {
+        Undefined,
+        Absolute,
+        Fragment(usize),
+    }
+
+    #[derive(Clone, Debug)]
+    struct SectionState {
+        subsections: Vec<(i64, Vec<usize>)>,
+        fragments: Vec<usize>,
+        begin_symbol: usize,
+        ordinal: usize,
+        has_instructions: bool,
+    }
+
+    #[derive(Clone, Debug)]
+    enum FrameOperation {
+        DefineFrame(i64, i64),
+        DefineFrameOffset(i64),
+        AdjustFrameOffset(i64),
+        DefineFrameRegister(i64),
+        Offset(i64, i64),
+        RelativeOffset(i64, i64),
+        RememberState,
+        RestoreState,
+        SameValue(i64),
+        Restore(i64),
+        Undefined(i64),
+        Register(i64, i64),
+        WindowSave,
+        NegateReturnAddressStateWithPc,
+        SetReturnAddressState(i64, i64),
+        ValueOffset(i64, i64),
+        GnuArgumentsSize(i64),
+        Escape(Vec<u8>),
+        Label(usize),
+    }
+
+    #[derive(Clone, Debug)]
+    struct FrameInstruction {
+        label: Option<usize>,
+        operation: FrameOperation,
+        location: Option<SourceLocation>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct FrameInfo {
+        begin: Option<usize>,
+        end: Option<usize>,
+        instructions: Vec<FrameInstruction>,
+        personality: Option<usize>,
+        personality_encoding: u8,
+        lsda: Option<usize>,
+        lsda_encoding: u8,
+        simple: bool,
+        signal: bool,
+        b_key: bool,
+        return_register: Option<i64>,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RelocationEntry {
+        offset: u64,
+        symbol: Option<usize>,
+        relocation_type: u32,
+        addend: i64,
+    }
+
+    #[derive(Clone, Debug)]
+    struct RelocationDirective {
+        offset: Expression,
+        value: Expression,
+        relocation_type: u32,
+        location: SourceLocation,
+    }
+
+    #[derive(Clone, Debug)]
+    struct SymbolVersion {
+        symbol: usize,
+        name: String,
+        keep_original: bool,
+        location: Option<SourceLocation>,
+    }
+
+    pub const RELOCATION_X86_64_NONE: u32 = 0;
+    pub const RELOCATION_X86_64_64: u32 = 1;
+    pub const RELOCATION_X86_64_PC32: u32 = 2;
+    pub const RELOCATION_X86_64_GOT32: u32 = 3;
+    pub const RELOCATION_X86_64_PLT32: u32 = 4;
+    pub const RELOCATION_X86_64_GOTPCREL: u32 = 9;
+    pub const RELOCATION_X86_64_32: u32 = 10;
+    pub const RELOCATION_X86_64_32S: u32 = 11;
+    pub const RELOCATION_X86_64_16: u32 = 12;
+    pub const RELOCATION_X86_64_PC16: u32 = 13;
+    pub const RELOCATION_X86_64_8: u32 = 14;
+    pub const RELOCATION_X86_64_PC8: u32 = 15;
+    pub const RELOCATION_X86_64_DTPOFF64: u32 = 17;
+    pub const RELOCATION_X86_64_TPOFF64: u32 = 18;
+    pub const RELOCATION_X86_64_TLSGD: u32 = 19;
+    pub const RELOCATION_X86_64_TLSLD: u32 = 20;
+    pub const RELOCATION_X86_64_DTPOFF32: u32 = 21;
+    pub const RELOCATION_X86_64_GOTTPOFF: u32 = 22;
+    pub const RELOCATION_X86_64_TPOFF32: u32 = 23;
+    pub const RELOCATION_X86_64_PC64: u32 = 24;
+    pub const RELOCATION_X86_64_GOTOFF64: u32 = 25;
+    pub const RELOCATION_X86_64_GOTPC32: u32 = 26;
+    pub const RELOCATION_X86_64_GOT64: u32 = 27;
+    pub const RELOCATION_X86_64_GOTPC64: u32 = 29;
+    pub const RELOCATION_X86_64_PLTOFF64: u32 = 31;
+    pub const RELOCATION_X86_64_SIZE32: u32 = 32;
+    pub const RELOCATION_X86_64_SIZE64: u32 = 33;
+    pub const RELOCATION_X86_64_GOTPC32_TLSDESC: u32 = 34;
+    pub const RELOCATION_X86_64_TLSDESC_CALL: u32 = 35;
+    pub const RELOCATION_X86_64_GOTPCRELX: u32 = 41;
+    pub const RELOCATION_X86_64_REX_GOTPCRELX: u32 = 42;
+    pub const RELOCATION_X86_64_CODE_4_GOTPCRELX: u32 = 43;
+    pub const RELOCATION_X86_64_CODE_4_GOTTPOFF: u32 = 44;
+    pub const RELOCATION_X86_64_CODE_4_GOTPC32_TLSDESC: u32 = 45;
+    pub const RELOCATION_X86_64_CODE_6_GOTTPOFF: u32 = 50;
+
+    pub const RELOCATION_386_NONE: u32 = 0;
+    pub const RELOCATION_386_32: u32 = 1;
+    pub const RELOCATION_386_PC32: u32 = 2;
+    pub const RELOCATION_386_GOT32: u32 = 3;
+    pub const RELOCATION_386_PLT32: u32 = 4;
+    pub const RELOCATION_386_TLS_IE: u32 = 15;
+    pub const RELOCATION_386_TLS_GOTIE: u32 = 16;
+    pub const RELOCATION_386_TLS_LE: u32 = 17;
+    pub const RELOCATION_386_TLS_GD: u32 = 18;
+    pub const RELOCATION_386_TLS_LDM: u32 = 19;
+    pub const RELOCATION_386_16: u32 = 20;
+    pub const RELOCATION_386_PC16: u32 = 21;
+    pub const RELOCATION_386_8: u32 = 22;
+    pub const RELOCATION_386_PC8: u32 = 23;
+    pub const RELOCATION_386_TLS_LDO_32: u32 = 32;
+    pub const RELOCATION_386_TLS_IE_32: u32 = 33;
+    pub const RELOCATION_386_TLS_LE_32: u32 = 34;
+    pub const RELOCATION_386_GOTOFF: u32 = 9;
+    pub const RELOCATION_386_GOTPC: u32 = 10;
+    pub const RELOCATION_386_TLS_GOTDESC: u32 = 39;
+    pub const RELOCATION_386_TLS_DESC_CALL: u32 = 40;
+    pub const RELOCATION_386_GOT32X: u32 = 43;
+
+    const BINDING_LOCAL: u8 = 0;
+    const BINDING_GLOBAL: u8 = 1;
+    const BINDING_WEAK: u8 = 2;
+    const BINDING_GNU_UNIQUE: u8 = 10;
+    const TYPE_NOTYPE: u8 = 0;
+    const TYPE_OBJECT: u8 = 1;
+    const TYPE_FUNCTION: u8 = 2;
+    const TYPE_SECTION: u8 = 3;
+    const TYPE_FILE: u8 = 4;
+    const TYPE_COMMON: u8 = 5;
+    const TYPE_TLS: u8 = 6;
+    const TYPE_GNU_IFUNC: u8 = 10;
+    const SECTION_INDEX_ABSOLUTE: u32 = 0xfff1;
+    const SECTION_INDEX_COMMON: u32 = 0xfff2;
+    const SECTION_INDEX_RESERVED: u32 = 0xff00;
+    const SECTION_INDEX_EXTENDED: u32 = 0xffff;
+    const SECTION_SYMBOL_TABLE_INDICES: u32 = 18;
+    const GROUP_COMDAT: u32 = 1;
+
+    fn element_type(symbol_type: Option<SymbolType>) -> u8 {
+        match symbol_type {
+            None | Some(SymbolType::NoType) => TYPE_NOTYPE,
+            Some(SymbolType::Object) => TYPE_OBJECT,
+            Some(SymbolType::Function) => TYPE_FUNCTION,
+            Some(SymbolType::Section) => TYPE_SECTION,
+            Some(SymbolType::File) => TYPE_FILE,
+            Some(SymbolType::Common) => TYPE_COMMON,
+            Some(SymbolType::ThreadLocal) => TYPE_TLS,
+            Some(SymbolType::IndirectFunction) => TYPE_GNU_IFUNC,
+        }
+    }
+
+    fn symbol_type_of(value: u8) -> SymbolType {
+        match value {
+            TYPE_OBJECT => SymbolType::Object,
+            TYPE_FUNCTION => SymbolType::Function,
+            TYPE_SECTION => SymbolType::Section,
+            TYPE_FILE => SymbolType::File,
+            TYPE_COMMON => SymbolType::Common,
+            TYPE_TLS => SymbolType::ThreadLocal,
+            TYPE_GNU_IFUNC => SymbolType::IndirectFunction,
+            _ => SymbolType::NoType,
+        }
+    }
+
+    fn combine_symbol_types(first: u8, second: u8) -> u8 {
+        for kind in [
+            TYPE_NOTYPE,
+            TYPE_OBJECT,
+            TYPE_FUNCTION,
+            TYPE_GNU_IFUNC,
+            TYPE_TLS,
+        ] {
+            if first == kind {
+                return second;
+            }
+            if second == kind {
+                return first;
+            }
+        }
+        second
+    }
+
+    fn merge_type_for_set(original: u8, new: u8) -> u8 {
+        let mut kind = new;
+        match original {
+            TYPE_GNU_IFUNC => {
+                if matches!(kind, TYPE_FUNCTION | TYPE_OBJECT | TYPE_NOTYPE | TYPE_TLS) {
+                    kind = TYPE_GNU_IFUNC;
+                }
+            }
+            TYPE_FUNCTION => {
+                if matches!(kind, TYPE_OBJECT | TYPE_NOTYPE | TYPE_TLS) {
+                    kind = TYPE_FUNCTION;
+                }
+            }
+            TYPE_OBJECT => {
+                if kind == TYPE_NOTYPE {
+                    kind = TYPE_OBJECT;
+                }
+            }
+            TYPE_TLS => {
+                if matches!(
+                    kind,
+                    TYPE_OBJECT | TYPE_NOTYPE | TYPE_GNU_IFUNC | TYPE_FUNCTION
+                ) {
+                    kind = TYPE_TLS;
+                }
+            }
+            _ => {}
+        }
+        kind
+    }
+
+    fn tail_character(text: &[u8], position: usize) -> i32 {
+        if position >= text.len() {
+            return -1;
+        }
+        text[text.len() - position - 1] as i32
+    }
+
+    fn multikey_sort(strings: &mut [Vec<u8>], position: usize) {
+        let mut slice_start = 0usize;
+        let mut slice_end = strings.len();
+        let mut position = position;
+        loop {
+            let vector = &mut strings[slice_start..slice_end];
+            if vector.len() <= 1 {
+                return;
+            }
+            let pivot = tail_character(&vector[0], position);
+            let mut low = 0usize;
+            let mut high = vector.len();
+            let mut index = 1usize;
+            while index < high {
+                let character = tail_character(&vector[index], position);
+                if character > pivot {
+                    vector.swap(low, index);
+                    low += 1;
+                    index += 1;
+                } else if character < pivot {
+                    high -= 1;
+                    vector.swap(high, index);
+                } else {
+                    index += 1;
+                }
+            }
+            multikey_sort(&mut vector[..low], position);
+            multikey_sort(&mut vector[high..], position);
+            if pivot == -1 {
+                return;
+            }
+            slice_end = slice_start + high;
+            slice_start += low;
+            position += 1;
+        }
+    }
+
+    #[derive(Default)]
+    struct StringTableBuilder {
+        strings: BTreeMap<Vec<u8>, usize>,
+        size: usize,
+    }
+
+    impl StringTableBuilder {
+        fn new() -> StringTableBuilder {
+            StringTableBuilder {
+                strings: BTreeMap::new(),
+                size: 1,
+            }
+        }
+
+        fn add(&mut self, text: &[u8]) {
+            if !self.strings.contains_key(text) {
+                self.strings.insert(text.to_vec(), self.size);
+                self.size += text.len() + 1;
+            }
+        }
+
+        fn finalize(&mut self) {
+            let mut strings: Vec<Vec<u8>> = self.strings.keys().cloned().collect();
+            if !strings.is_empty() {
+                multikey_sort(&mut strings, 0);
+                self.size = 1;
+                let mut previous: Vec<u8> = Vec::new();
+                for text in strings {
+                    if previous.ends_with(&text) {
+                        let position = self.size - text.len() - 1;
+                        self.strings.insert(text, position);
+                        continue;
+                    }
+                    self.strings.insert(text.clone(), self.size);
+                    self.size += text.len() + 1;
+                    previous = text;
+                }
+            }
+            self.strings.insert(Vec::new(), 0);
+        }
+
+        fn offset(&self, text: &[u8]) -> u32 {
+            self.strings.get(text).copied().unwrap_or(0) as u32
+        }
+
+        fn bytes(&self) -> Vec<u8> {
+            let mut out = vec![0u8; self.size];
+            for (text, offset) in &self.strings {
+                if !text.is_empty() {
+                    out[*offset..*offset + text.len()].copy_from_slice(text);
+                }
+            }
+            out
+        }
+    }
+
+    struct ElfOutput {
+        bytes: Vec<u8>,
+        sixty_four: bool,
+    }
+
+    impl ElfOutput {
+        fn u8(&mut self, value: u8) {
+            self.bytes.push(value);
+        }
+
+        fn u16(&mut self, value: u16) {
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        fn u32(&mut self, value: u32) {
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        fn u64(&mut self, value: u64) {
+            self.bytes.extend_from_slice(&value.to_le_bytes());
+        }
+
+        fn word(&mut self, value: u64) {
+            if self.sixty_four {
+                self.u64(value);
+            } else {
+                self.u32(value as u32);
+            }
+        }
+
+        fn align(&mut self, alignment: u64) -> u64 {
+            let alignment = alignment.max(1);
+            while !(self.bytes.len() as u64).is_multiple_of(alignment) {
+                self.bytes.push(0);
+            }
+            self.bytes.len() as u64
+        }
+    }
+
+    pub struct ObjectStreamer {
+        pub target: &'static Target,
+        pub mode: Mode,
+        pub relax_all: bool,
+        pub relax_relocations: bool,
+        pub align_branch_boundary: u64,
+        pub align_branch_kinds: u8,
+        pub pad_for_align: bool,
+        pub pad_max_prefix_size: u32,
+        pub nops: NopCapability,
+        pub expression_locations: Vec<(Expression, Option<SourceLocation>)>,
+        pub statement_location: Option<SourceLocation>,
+        fragments: Vec<Fragment>,
+        sections: BTreeMap<usize, SectionState>,
+        section_order: Vec<usize>,
+        current: Option<(usize, usize)>,
+        arm_mapping_state: BTreeMap<usize, bool>,
+        implicit_mapping_symbols: bool,
+        arm_attributes: armv8::AttributeSet,
+        arm32_attributes: Vec<u8>,
+        arm32_mapping: BTreeMap<usize, (u8, Option<(usize, u64)>)>,
+        arm32_thumb: bool,
+        thumb_two_features: bool,
+        thumb_long_call: bool,
+        thumb_v8m_baseline: bool,
+        arm32_nop: bool,
+        current_fragment: Option<usize>,
+        symbols_in_order: Vec<usize>,
+        has_layout: bool,
+        has_final_layout: bool,
+        stretch: i64,
+        stretch_limit: usize,
+        pending_errors: Vec<(Option<SourceLocation>, String)>,
+        pending_assignments: BTreeMap<usize, Vec<(usize, Expression)>>,
+        frames: Vec<FrameInfo>,
+        frame_stack: Vec<(usize, usize)>,
+        emit_exception_frame: bool,
+        emit_debug_frame: bool,
+        relocations: BTreeMap<usize, Vec<RelocationEntry>>,
+        relocation_directives: Vec<RelocationDirective>,
+        renames: BTreeMap<usize, usize>,
+        weak_references: Vec<usize>,
+        symbol_versions: Vec<SymbolVersion>,
+        file_names: Vec<(String, usize)>,
+        address_significance: Option<Vec<usize>>,
+        base_symbols: BTreeMap<usize, Option<usize>>,
+        seen_gnu_abi: bool,
+        fdpic: bool,
+        seen_identifier: bool,
+        unique_bindings: BTreeSet<usize>,
+        signatures: BTreeSet<usize>,
+        symbol_indices: BTreeMap<usize, u32>,
+        bundle_alignment: u64,
+        bundle_locked: bool,
+        bundle_boundary: Option<usize>,
+        pending_boundary: Option<usize>,
+        previous_instruction: Option<MachineInstruction>,
+        previous_position: Option<(usize, usize)>,
+        prefix_ends_bundle_lock: bool,
+        output: Vec<u8>,
+    }
+
+    impl SymbolLayout for ObjectStreamer {
+        fn symbol_offset(&self, context: &AssemblyContext, symbol: usize) -> Option<(usize, i64)> {
+            let place = self.place_of(context, symbol);
+            let Place::Fragment(fragment) = place else {
+                return None;
+            };
+            let offset = self.symbol_value(context, symbol)?;
+            Some((self.fragments[fragment].section, offset as i64))
+        }
+
+        fn difference_resolved(
+            &self,
+            context: &AssemblyContext,
+            left: usize,
+            right: usize,
+            _in_set: bool,
+        ) -> bool {
+            let (Place::Fragment(a), Place::Fragment(b)) =
+                (self.place_of(context, left), self.place_of(context, right))
+            else {
+                return false;
+            };
+            self.fragments[a].section == self.fragments[b].section
+        }
+
+        fn symbol_difference(
+            &self,
+            context: &AssemblyContext,
+            left: usize,
+            right: usize,
+            _in_set: bool,
+        ) -> Option<i64> {
+            let (Place::Fragment(first), Place::Fragment(second)) =
+                (self.place_of(context, left), self.place_of(context, right))
+            else {
+                return None;
+            };
+            if self.fragments[first].section != self.fragments[second].section {
+                return None;
+            }
+            let a = &context.symbols[left];
+            let b = &context.symbols[right];
+            if self.has_layout {
+                if first == second && !a.is_variable() && !b.is_variable() {
+                    return Some(a.offset as i64 - b.offset as i64);
+                }
+                let a = self.symbol_value(context, left)? as i64;
+                let b = self.symbol_value(context, right)? as i64;
+                return Some(a - b);
+            }
+            if a.is_variable() || b.is_variable() {
+                return None;
+            }
+            let (mut from, mut to) = (second, first);
+            let (mut from_offset, mut to_offset) = (b.offset, a.offset);
+            let mut displacement = a.offset as i64 - b.offset as i64;
+            let reverse = if first == second {
+                a.offset < b.offset
+            } else {
+                self.fragments[first].order < self.fragments[second].order
+            };
+            if reverse {
+                std::mem::swap(&mut from, &mut to);
+                std::mem::swap(&mut from_offset, &mut to_offset);
+                displacement = -displacement;
+            }
+            let _ = (from_offset, to_offset);
+            let mut cursor = Some(from);
+            while let Some(fragment) = cursor {
+                if fragment == to {
+                    return Some(if reverse { -displacement } else { displacement });
+                }
+                let held = &self.fragments[fragment];
+                match &held.tail {
+                    Tail::Data => displacement += held.fixed.len() as i64,
+                    Tail::Relaxable(_) | Tail::Align { .. } if self.has_final_layout => {
+                        displacement += held.size() as i64;
+                    }
+                    Tail::Fill {
+                        count, value_size, ..
+                    } => {
+                        let count = constant_of(count)?;
+                        displacement += held.fixed.len() as i64 + count * *value_size as i64;
+                    }
+                    _ => return None,
+                }
+                cursor = held.next;
+            }
+            None
+        }
+    }
+
+    fn constant_of(expression: &Expression) -> Option<i64> {
+        match expression {
+            Expression::Constant(value) => Some(*value),
+            _ => None,
+        }
+    }
+
+    fn expression_symbols(expression: &Expression, out: &mut Vec<String>) {
+        match expression {
+            Expression::Symbol { name, .. } => out.push(name.clone()),
+            Expression::Unary { operand, .. } | Expression::Prefixed { operand, .. } => {
+                expression_symbols(operand, out)
+            }
+            Expression::Binary { left, right, .. } => {
+                expression_symbols(left, out);
+                expression_symbols(right, out);
+            }
+            _ => {}
+        }
+    }
+
+    impl ObjectStreamer {
+        pub fn new(target: &'static Target, options: &AssemblerOptions) -> ObjectStreamer {
+            let triple = TargetTriple::parse(&options.triple);
+            let mut kinds = 0u8;
+            for name in &options.align_branch {
+                kinds |= match name.as_str() {
+                    "fused" => 1,
+                    "jcc" => 2,
+                    "jmp" => 4,
+                    "call" => 8,
+                    "ret" => 16,
+                    "indirect" => 32,
+                    _ => 0,
+                };
+            }
+            let mut boundary = options.align_branch_boundary;
+            if options.branches_within_32_byte_boundaries {
+                if boundary == 0 {
+                    boundary = 32;
+                }
+                if options.align_branch.is_empty() {
+                    kinds = 1 | 2 | 4;
+                }
+            }
+            ObjectStreamer {
+                target,
+                mode: triple.mode,
+                relax_all: options.relax_all,
+                relax_relocations: options.relax_relocations,
+                align_branch_boundary: boundary,
+                align_branch_kinds: kinds,
+                pad_for_align: options.pad_for_align,
+                pad_max_prefix_size: options.pad_max_prefix_size.unwrap_or(0),
+                nops: nop_capability(target, &options.cpu, &options.features),
+                expression_locations: Vec::new(),
+                statement_location: None,
+                fragments: Vec::new(),
+                sections: BTreeMap::new(),
+                section_order: Vec::new(),
+                current: None,
+                arm_mapping_state: BTreeMap::new(),
+                implicit_mapping_symbols: options.implicit_mapping_symbols,
+                arm_attributes: armv8::AttributeSet::default(),
+                arm32_attributes: Vec::new(),
+                arm32_mapping: BTreeMap::new(),
+                arm32_thumb: triple.isa == Isa::Armv7 && triple.is_thumb(),
+                arm32_nop: triple.isa == Isa::Armv7
+                    && armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                        .contains("HasV6T2Ops"),
+                thumb_two_features: triple.isa == Isa::Armv7
+                    && armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                        .contains("FeatureThumb2"),
+                thumb_v8m_baseline: triple.isa == Isa::Armv7
+                    && armv7::initial_features(target, &triple, &options.cpu, &options.features)
+                        .contains("HasV8MBaselineOps"),
+                thumb_long_call: triple.isa == Isa::Armv7
+                    && armv7::long_call_features(&armv7::initial_features(
+                        target,
+                        &triple,
+                        &options.cpu,
+                        &options.features,
+                    )),
+                current_fragment: None,
+                symbols_in_order: Vec::new(),
+                has_layout: false,
+                has_final_layout: false,
+                stretch: 0,
+                stretch_limit: usize::MAX,
+                pending_errors: Vec::new(),
+                pending_assignments: BTreeMap::new(),
+                frames: Vec::new(),
+                frame_stack: Vec::new(),
+                emit_exception_frame: true,
+                emit_debug_frame: false,
+                relocations: BTreeMap::new(),
+                relocation_directives: Vec::new(),
+                renames: BTreeMap::new(),
+                weak_references: Vec::new(),
+                symbol_versions: Vec::new(),
+                file_names: Vec::new(),
+                address_significance: None,
+                base_symbols: BTreeMap::new(),
+                seen_gnu_abi: false,
+                fdpic: options.fdpic,
+                seen_identifier: false,
+                unique_bindings: BTreeSet::new(),
+                signatures: BTreeSet::new(),
+                symbol_indices: BTreeMap::new(),
+                bundle_alignment: 0,
+                bundle_locked: false,
+                bundle_boundary: None,
+                pending_boundary: None,
+                previous_instruction: None,
+                previous_position: None,
+                prefix_ends_bundle_lock: false,
+                output: Vec::new(),
+            }
+        }
+
+        fn auto_padding(&self) -> bool {
+            self.align_branch_boundary > 1 && self.align_branch_kinds != 0
+        }
+
+        fn enhanced_relaxation(&self) -> bool {
+            self.auto_padding() && self.pad_max_prefix_size != 0
+        }
+
+        fn is_sixty_four(&self, context: &AssemblyContext) -> bool {
+            context.triple.is_64_bit() && !context.triple.x32
+        }
+
+        fn machine(&self, context: &AssemblyContext) -> u16 {
+            if context.triple.isa == Isa::Armv8 {
+                183
+            } else if context.triple.isa == Isa::Armv7 {
+                40
+            } else if context.triple.is_64_bit() {
+                62
+            } else if context.triple.system == "elfiamcu" {
+                6
+            } else {
+                3
+            }
+        }
+
+        fn uses_addend(&self, context: &AssemblyContext) -> bool {
+            context.triple.is_64_bit()
+        }
+
+        fn pointer_size(&self, context: &AssemblyContext) -> u64 {
+            if self.is_sixty_four(context) {
+                8
+            } else {
+                4
+            }
+        }
+
+        fn register_symbol(&mut self, context: &mut AssemblyContext, symbol: usize) -> bool {
+            if context.symbols[symbol].registered {
+                return false;
+            }
+            context.symbols[symbol].registered = true;
+            self.symbols_in_order.push(symbol);
+            true
+        }
+
+        fn visit_used(&mut self, context: &mut AssemblyContext, expression: &Expression) {
+            let mut names = Vec::new();
+            expression_symbols(expression, &mut names);
+            for name in names {
+                let symbol = match context.lookup(&name) {
+                    Some(symbol) => symbol,
+                    None => context.symbol(&name),
+                };
+                self.register_symbol(context, symbol);
+            }
+        }
+
+        fn place_of(&self, context: &AssemblyContext, symbol: usize) -> Place {
+            let mut visiting = BTreeSet::new();
+            self.place_inner(context, symbol, &mut visiting)
+        }
+
+        fn place_inner(
+            &self,
+            context: &AssemblyContext,
+            symbol: usize,
+            visiting: &mut BTreeSet<usize>,
+        ) -> Place {
+            let held = &context.symbols[symbol];
+            if let Some(fragment) = held.fragment {
+                return Place::Fragment(fragment);
+            }
+            if held.common.is_some() {
+                return Place::Undefined;
+            }
+            if held.weak_reference {
+                return Place::Undefined;
+            }
+            let Some(value) = &held.value else {
+                return Place::Undefined;
+            };
+            if !visiting.insert(symbol) {
+                return Place::Absolute;
+            }
+            let place = self.expression_place(context, value, visiting);
+            visiting.remove(&symbol);
+            place
+        }
+
+        fn expression_place(
+            &self,
+            context: &AssemblyContext,
+            expression: &Expression,
+            visiting: &mut BTreeSet<usize>,
+        ) -> Place {
+            match expression {
+                Expression::Constant(_) | Expression::Register(_) => Place::Absolute,
+                Expression::Symbol { name, .. } => match context.lookup(name) {
+                    Some(symbol) => self.place_inner(context, symbol, visiting),
+                    None => Place::Undefined,
+                },
+                Expression::Unary { operand, .. } | Expression::Prefixed { operand, .. } => {
+                    self.expression_place(context, operand, visiting)
+                }
+                Expression::Binary {
+                    operator,
+                    left,
+                    right,
+                } => {
+                    let left = self.expression_place(context, left, visiting);
+                    let right = self.expression_place(context, right, visiting);
+                    if left == Place::Absolute {
+                        return right;
+                    }
+                    if right == Place::Absolute {
+                        return left;
+                    }
+                    if *operator == BinaryOperator::Subtract {
+                        return Place::Absolute;
+                    }
+                    if left != Place::Undefined {
+                        left
+                    } else {
+                        right
+                    }
+                }
+            }
+        }
+
+        fn symbol_section(&self, context: &AssemblyContext, symbol: usize) -> Option<usize> {
+            match self.place_of(context, symbol) {
+                Place::Fragment(fragment) => Some(self.fragments[fragment].section),
+                _ => None,
+            }
+        }
+
+        fn symbol_value(&self, context: &AssemblyContext, symbol: usize) -> Option<u64> {
+            let mut visiting = BTreeSet::new();
+            self.symbol_value_inner(context, symbol, &mut visiting)
+        }
+
+        fn symbol_value_inner(
+            &self,
+            context: &AssemblyContext,
+            symbol: usize,
+            visiting: &mut BTreeSet<usize>,
+        ) -> Option<u64> {
+            let held = &context.symbols[symbol];
+            if let Some(fragment) = held.fragment {
+                return Some(self.fragments[fragment].offset.wrapping_add(held.offset));
+            }
+            let value = held.value.clone()?;
+            if !visiting.insert(symbol) {
+                return None;
+            }
+            let result = self.expression_offset(context, &value, visiting);
+            visiting.remove(&symbol);
+            result.map(|value| value as u64)
+        }
+
+        fn expression_offset(
+            &self,
+            context: &AssemblyContext,
+            expression: &Expression,
+            visiting: &mut BTreeSet<usize>,
+        ) -> Option<i64> {
+            match expression {
+                Expression::Constant(value) => Some(*value),
+                Expression::Register(_) => None,
+                Expression::Prefixed { prefix, operand } => self
+                    .expression_offset(context, operand, visiting)
+                    .map(|value| prefix_fold(prefix, value)),
+                Expression::Symbol { name, .. } => {
+                    let symbol = context.lookup(name)?;
+                    self.symbol_value_inner(context, symbol, visiting)
+                        .map(|value| value as i64)
+                }
+                Expression::Unary { operator, operand } => {
+                    let value = self.expression_offset(context, operand, visiting)?;
+                    Some(match operator {
+                        UnaryOperator::Negate => value.wrapping_neg(),
+                        UnaryOperator::Not => !value,
+                        UnaryOperator::LogicalNot => i64::from(value == 0),
+                        UnaryOperator::Plus => value,
+                    })
+                }
+                Expression::Binary {
+                    operator,
+                    left,
+                    right,
+                } => {
+                    let a = self.expression_offset(context, left, visiting)?;
+                    let b = self.expression_offset(context, right, visiting)?;
+                    Some(match operator {
+                        BinaryOperator::Add => a.wrapping_add(b),
+                        BinaryOperator::Subtract => a.wrapping_sub(b),
+                        BinaryOperator::Multiply => a.wrapping_mul(b),
+                        BinaryOperator::Divide => {
+                            if b == 0 {
+                                return None;
+                            }
+                            a.wrapping_div(b)
+                        }
+                        BinaryOperator::Modulo => {
+                            if b == 0 {
+                                return None;
+                            }
+                            a.wrapping_rem(b)
+                        }
+                        BinaryOperator::And => a & b,
+                        BinaryOperator::Or => a | b,
+                        BinaryOperator::Xor => a ^ b,
+                        BinaryOperator::ShiftLeft => ((a as u64).wrapping_shl(b as u32)) as i64,
+                        BinaryOperator::ArithmeticShiftRight => a.wrapping_shr(b as u32),
+                        BinaryOperator::LogicalShiftRight => {
+                            ((a as u64).wrapping_shr(b as u32)) as i64
+                        }
+                        _ => return None,
+                    })
+                }
+            }
+        }
+
+        fn new_fragment(&mut self) -> usize {
+            let (section, _) = self.current.expect("a section is active");
+            let index = self.fragments.len();
+            self.fragments.push(Fragment::new(section, self.mode));
+            self.attach(index);
+            index
+        }
+
+        fn attach(&mut self, index: usize) {
+            let (section, subsection) = self.current.expect("a section is active");
+            let state = self
+                .sections
+                .get_mut(&section)
+                .expect("the section is known");
+            let list = &mut state.subsections[subsection].1;
+            if let Some(&last) = list.last() {
+                self.fragments[last].next = Some(index);
+                self.fragments[index].order = self.fragments[last].order + 1;
+            }
+            list.push(index);
+            self.current_fragment = Some(index);
+        }
+
+        fn add_special(&mut self, tail: Tail) -> usize {
+            let (section, _) = self.current.expect("a section is active");
+            let index = self.fragments.len();
+            let mut fragment = Fragment::new(section, self.mode);
+            fragment.tail = tail;
+            self.fragments.push(fragment);
+            self.attach(index);
+            self.new_fragment();
+            index
+        }
+
+        fn fragment(&mut self) -> usize {
+            match self.current_fragment {
+                Some(fragment) => fragment,
+                None => self.new_fragment(),
+            }
+        }
+
+        fn append(&mut self, data: &[u8]) {
+            let fragment = self.fragment();
+            self.fragments[fragment].fixed.extend_from_slice(data);
+        }
+
+        fn add_fixup(&mut self, fixup: Fixup, location: Option<SourceLocation>) {
+            let fragment = self.fragment();
+            self.fragments[fragment]
+                .fixups
+                .push(PlacedFixup { fixup, location });
+        }
+
+        fn ensure_alignment(
+            &mut self,
+            context: &mut AssemblyContext,
+            section: usize,
+            alignment: u64,
+        ) {
+            if context.sections[section].alignment < alignment {
+                context.sections[section].alignment = alignment;
+            }
+        }
+
+        fn section_is_text(&self, context: &AssemblyContext, section: usize) -> bool {
+            context.sections[section].flags & ELF_FLAG_EXECUTE != 0
+        }
+
+        fn section_is_virtual(&self, context: &AssemblyContext, section: usize) -> bool {
+            context.sections[section].section_type == ELF_SECTION_NO_BITS
+        }
+
+        fn change_section(
+            &mut self,
+            context: &mut AssemblyContext,
+            section: usize,
+            subsection: i64,
+        ) {
+            if self.bundle_locked {
+                context.report(
+                    MessageKind::Error,
+                    self.statement_location,
+                    "unterminated .bundle_lock when changing a section",
+                );
+                self.bundle_locked = false;
+                self.bundle_boundary = None;
+            }
+            if let Some(group) = context.sections[section].group.clone() {
+                let symbol = context.symbol(&group);
+                self.register_symbol(context, symbol);
+                self.signatures.insert(symbol);
+            }
+            if context.sections[section].flags & ELF_FLAG_GNU_RETAIN != 0 {
+                self.seen_gnu_abi = true;
+            }
+            if self.target.isa == Isa::Armv8
+                && context.sections[section].flags & ELF_FLAG_EXECUTE != 0
+            {
+                context.sections[section].alignment = context.sections[section].alignment.max(4);
+            }
+            let new_section = !self.sections.contains_key(&section);
+            if new_section {
+                let name = context.sections[section].name.clone();
+                let begin = match context.lookup(&name) {
+                    Some(existing)
+                        if context.symbols[existing].symbol_type != Some(SymbolType::Section)
+                            || context.sections[section].begin_symbol.is_some()
+                            || context.symbols[existing]
+                                .section
+                                .is_some_and(|owner| owner != section) =>
+                    {
+                        let index = context.symbols.len();
+                        context.symbols.push(Symbol::new(&name, false));
+                        let _ = existing;
+                        index
+                    }
+                    Some(existing) => existing,
+                    None => context.symbol(&name),
+                };
+                context.symbols[begin].symbol_type = Some(SymbolType::Section);
+                context.symbols[begin].binding = Some(SymbolBinding::Local);
+                context.symbols[begin].defined = true;
+                context.symbols[begin].section = Some(section);
+                context.sections[section].begin_symbol = Some(begin);
+                self.sections.insert(
+                    section,
+                    SectionState {
+                        subsections: Vec::new(),
+                        fragments: Vec::new(),
+                        begin_symbol: begin,
+                        ordinal: 0,
+                        has_instructions: false,
+                    },
+                );
+                self.section_order.push(section);
+            }
+            let mut first = None;
+            if new_section && subsection != 0 {
+                self.change_section(context, section, 0);
+                first = self.current_fragment;
+            }
+            let state = self
+                .sections
+                .get_mut(&section)
+                .expect("the section is known");
+            let position = state
+                .subsections
+                .iter()
+                .position(|(number, _)| *number >= subsection)
+                .unwrap_or(state.subsections.len());
+            let existing = state
+                .subsections
+                .get(position)
+                .is_some_and(|(number, _)| *number == subsection);
+            if !existing {
+                state.subsections.insert(position, (subsection, Vec::new()));
+                self.current = Some((section, position));
+                self.current_fragment = None;
+                let index = self.fragments.len();
+                self.fragments.push(Fragment::new(section, self.mode));
+                let state = self
+                    .sections
+                    .get_mut(&section)
+                    .expect("the section is known");
+                state.subsections[position].1.push(index);
+                self.current_fragment = Some(index);
+                for (number, list) in state.subsections.iter() {
+                    let _ = number;
+                    let _ = list;
+                }
+                let indices: Vec<(usize, usize)> = self
+                    .sections
+                    .get(&section)
+                    .map(|state| {
+                        state
+                            .subsections
+                            .iter()
+                            .enumerate()
+                            .map(|(at, (number, _))| (at, *number as usize))
+                            .collect()
+                    })
+                    .unwrap_or_default();
+                let _ = indices;
+            } else {
+                self.current = Some((section, position));
+                let tail = *state.subsections[position].1.last().expect("a fragment");
+                self.current_fragment = Some(tail);
+                self.new_fragment();
+            }
+            if new_section {
+                let begin = self.sections[&section].begin_symbol;
+                let fragment = if subsection != 0 {
+                    first
+                } else {
+                    self.current_fragment
+                };
+                context.symbols[begin].fragment = fragment;
+                context.symbols[begin].offset = 0;
+                self.register_symbol(context, begin);
+            }
+        }
+
+        fn arm32_mapping_symbol(&mut self, context: &mut AssemblyContext, name: &str) -> usize {
+            let symbol = context.symbols.len();
+            context.symbols.push(Symbol::new(name, false));
+            self.emit_label(context, symbol, None);
+            symbol
+        }
+
+        fn arm32_mapping_change(&mut self, context: &mut AssemblyContext, kind: u8) {
+            let Some(section) = self.current_section() else {
+                return;
+            };
+            let (state, pending) = self
+                .arm32_mapping
+                .get(&section)
+                .copied()
+                .unwrap_or((0, None));
+            if state == kind {
+                return;
+            }
+            if kind == 3 {
+                if state == 0 {
+                    let fragment = self.fragment();
+                    let offset = self.fragments[fragment].fixed.len() as u64;
+                    self.arm32_mapping
+                        .insert(section, (3, Some((fragment, offset))));
+                    return;
+                }
+                self.arm32_mapping_symbol(context, "$d");
+                self.arm32_mapping.insert(section, (3, pending));
+                return;
+            }
+            if let Some((fragment, offset)) = pending {
+                let symbol = self.arm32_mapping_symbol(context, "$d");
+                context.symbols[symbol].fragment = Some(fragment);
+                context.symbols[symbol].offset = offset;
+            }
+            self.arm32_mapping_symbol(context, if kind == 1 { "$a" } else { "$t" });
+            self.arm32_mapping.insert(section, (kind, None));
+        }
+
+        fn is_thumb_function(&self, context: &AssemblyContext, symbol: usize) -> bool {
+            let mut current = symbol;
+            let mut seen = BTreeSet::new();
+            loop {
+                let held = &context.symbols[current];
+                if held.thumb_function {
+                    return true;
+                }
+                if !seen.insert(current) {
+                    return false;
+                }
+                let name = match &held.value {
+                    Some(Expression::Symbol { name, .. }) => name,
+                    Some(Expression::Binary {
+                        operator: BinaryOperator::Add | BinaryOperator::Subtract,
+                        left,
+                        right,
+                    }) if matches!(**right, Expression::Constant(_)) => match &**left {
+                        Expression::Symbol { name, .. } => name,
+                        _ => return false,
+                    },
+                    _ => return false,
+                };
+                let Some(next) = context.lookup(name) else {
+                    return false;
+                };
+                current = next;
+            }
+        }
+
+        fn arm_mapping(&mut self, context: &mut AssemblyContext, instruction: bool) {
+            if self.target.isa == Isa::Armv7 {
+                let kind = match (instruction, self.arm32_thumb) {
+                    (false, _) => 3,
+                    (true, false) => 1,
+                    (true, true) => 2,
+                };
+                self.arm32_mapping_change(context, kind);
+                return;
+            }
+            if self.target.isa != Isa::Armv8 {
+                return;
+            }
+            let Some(section) = self.current_section() else {
+                return;
+            };
+            let last = self
+                .arm_mapping_state
+                .get(&section)
+                .copied()
+                .or_else(|| self.arm_initial_mapping(context, section));
+            if last == Some(instruction) {
+                return;
+            }
+            self.arm_mapping_state.insert(section, instruction);
+            self.arm_mapping_symbol(context, instruction);
+        }
+
+        fn arm_initial_mapping(&self, context: &AssemblyContext, section: usize) -> Option<bool> {
+            self.implicit_mapping_symbols
+                .then(|| context.sections[section].flags & ELF_FLAG_EXECUTE != 0)
+        }
+
+        fn arm_mapping_symbol(&mut self, context: &mut AssemblyContext, instruction: bool) {
+            let name = if instruction { "$x" } else { "$d" };
+            let symbol = context.symbols.len();
+            context.symbols.push(Symbol::new(name, false));
+            self.emit_label(context, symbol, None);
+        }
+
+        fn arm_finish_implicit_mapping(&mut self, context: &mut AssemblyContext) {
+            if !self.implicit_mapping_symbols || self.target.isa != Isa::Armv8 {
+                return;
+            }
+            let existing = self.symbols_in_order.len();
+            let mut insertions: Vec<(usize, usize)> = Vec::new();
+            for section in self.section_order.clone() {
+                let Some(initial) = self.arm_initial_mapping(context, section) else {
+                    continue;
+                };
+                let last = self
+                    .arm_mapping_state
+                    .get(&section)
+                    .copied()
+                    .unwrap_or(initial);
+                if last == initial {
+                    continue;
+                }
+                let after = self.symbols_in_order[..existing]
+                    .iter()
+                    .rposition(|symbol| context.symbols[*symbol].section == Some(section));
+                self.switch_section(context, section, 0);
+                self.arm_mapping_symbol(context, initial);
+                match (after, self.symbols_in_order.pop()) {
+                    (Some(after), Some(created)) => insertions.push((after, created)),
+                    (None, Some(created)) => self.symbols_in_order.push(created),
+                    _ => {}
+                }
+            }
+            insertions.sort_by_key(|right| std::cmp::Reverse(right.0));
+            for (after, created) in &insertions {
+                self.symbols_in_order.insert(after + 1, *created);
+            }
+            for file in &mut self.file_names {
+                file.1 += insertions
+                    .iter()
+                    .filter(|(after, _)| *after < file.1)
+                    .count();
+            }
+        }
+
+        fn current_section(&self) -> Option<usize> {
+            self.current.map(|(section, _)| section)
+        }
+
+        fn report_pending(&mut self, context: &mut AssemblyContext) {
+            for (location, text) in std::mem::take(&mut self.pending_errors) {
+                context.report(MessageKind::Error, location, &text);
+            }
+        }
+
+        fn emit_assignments_for(&mut self, context: &mut AssemblyContext, symbol: usize) {
+            if let Some(pending) = self.pending_assignments.remove(&symbol) {
+                for (target, value) in pending {
+                    self.emit_assignment(context, target, &value);
+                }
+            }
+        }
+
+        fn arm_feature_bits(&self) -> u8 {
+            u8::from(self.thumb_two_features)
+                | (u8::from(self.thumb_v8m_baseline) << 1)
+                | (u8::from(self.thumb_long_call) << 2)
+        }
+
+        fn set_arm_feature_bits(&mut self, bits: u8) {
+            self.thumb_two_features = bits & 1 != 0;
+            self.thumb_v8m_baseline = bits & 2 != 0;
+            self.thumb_long_call = bits & 4 != 0;
+        }
+
+        fn arm32_relaxed_opcode(&self, instruction: &MachineInstruction) -> Option<usize> {
+            let record = self.target.instructions[instruction.opcode].record.as_str();
+            let relaxed = match record {
+                "tBcc" if self.thumb_two_features => "t2Bcc",
+                "tLDRpci" if self.thumb_two_features => "t2LDRpci",
+                "tADR" if self.thumb_two_features => "t2ADR",
+                "tB" if self.thumb_two_features || self.thumb_v8m_baseline => "t2B",
+                _ => return None,
+            };
+            self.target.instruction_by_record.get(relaxed).copied()
+        }
+
+        fn arm32_needs_interworking(
+            &self,
+            context: &AssemblyContext,
+            symbol: usize,
+            kind: armv7::Fixup32,
+        ) -> bool {
+            use armv7::Fixup32;
+            if !matches!(
+                self.type_of(context, symbol),
+                TYPE_FUNCTION | TYPE_GNU_IFUNC
+            ) {
+                return false;
+            }
+            if self.is_thumb_function(context, symbol) {
+                kind == Fixup32::UncondBranch
+            } else {
+                matches!(
+                    kind,
+                    Fixup32::ThumbBr
+                        | Fixup32::ThumbBl
+                        | Fixup32::T2CondBranch
+                        | Fixup32::T2UncondBranch
+                )
+            }
+        }
+
+        fn may_need_relaxation(&self, instruction: &MachineInstruction) -> bool {
+            if self.target.isa == Isa::Armv7 {
+                return self.arm32_relaxed_opcode(instruction).is_some();
+            }
+            let record = self.target.instructions[instruction.opcode].record.as_str();
+            if record == "JCC_1" || record == "JMP_1" {
+                return true;
+            }
+            if !long_immediate_forms(self.target).contains_key(&instruction.opcode) {
+                return false;
+            }
+            let skip = if record.starts_with("CCMP") { 2 } else { 0 };
+            let count = instruction.operands.len();
+            if count < 1 + skip {
+                return false;
+            }
+            matches!(
+                instruction.operands[count - 1 - skip],
+                MachineOperand::Expression(_)
+            )
+        }
+
+        fn relax_instruction(&self, instruction: &mut MachineInstruction, mode: Mode) {
+            if self.target.isa == Isa::Armv7 {
+                if let Some(opcode) = self.arm32_relaxed_opcode(instruction) {
+                    instruction.opcode = opcode;
+                }
+                return;
+            }
+            let record = self.target.instructions[instruction.opcode].record.as_str();
+            let replacement = match record {
+                "JCC_1" => Some(if mode == Mode::Bits16 {
+                    "JCC_2"
+                } else {
+                    "JCC_4"
+                }),
+                "JMP_1" => Some(if mode == Mode::Bits16 {
+                    "JMP_2"
+                } else {
+                    "JMP_4"
+                }),
+                _ => None,
+            };
+            if let Some(name) = replacement {
+                if let Some(index) = self.target.instruction_by_record.get(name) {
+                    instruction.opcode = *index;
+                }
+                return;
+            }
+            if let Some(long) = long_immediate_forms(self.target).get(&instruction.opcode) {
+                instruction.opcode = *long;
+            }
+        }
+
+        fn encode(
+            &self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+            mode: Mode,
+            location: Option<SourceLocation>,
+        ) -> Option<Encoded> {
+            let encoded = match self.target.isa {
+                Isa::Armv8 => armv8::encode(self.target, instruction),
+                Isa::Armv7 => armv7::encode(self.target, instruction),
+                Isa::X86 => Encoder::new(self.target, mode).encode(instruction),
+            };
+            match encoded {
+                Ok(encoded) => Some(encoded),
+                Err(diagnostic) => {
+                    let cause = diagnostic
+                        .context
+                        .iter()
+                        .find_map(|line| line.strip_prefix("Cause: "))
+                        .unwrap_or("the instruction could not be encoded")
+                        .to_string();
+                    context.report(MessageKind::Error, location, &cause);
+                    None
+                }
+            }
+        }
+
+        fn place_fixups(
+            fixups: Vec<Fixup>,
+            base: usize,
+            location: Option<SourceLocation>,
+            known: &[(Expression, Option<SourceLocation>)],
+        ) -> Vec<PlacedFixup> {
+            fixups
+                .into_iter()
+                .map(|mut fixup| {
+                    fixup.offset += base;
+                    let location = known
+                        .iter()
+                        .find(|(expression, _)| *expression == fixup.expression)
+                        .map(|(_, at)| *at)
+                        .unwrap_or(location);
+                    PlacedFixup { fixup, location }
+                })
+                .collect()
+        }
+
+        fn known_locations(fixups: &[PlacedFixup]) -> Vec<(Expression, Option<SourceLocation>)> {
+            fixups
+                .iter()
+                .map(|placed| (placed.fixup.expression.clone(), placed.location))
+                .collect()
+        }
+
+        fn emit_instruction_to_data(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+            mode: Mode,
+            location: Option<SourceLocation>,
+        ) {
+            let Some(encoded) = self.encode(context, instruction, mode, location) else {
+                return;
+            };
+            let fragment = self.fragment();
+            let base = self.fragments[fragment].fixed.len();
+            let bits = self.arm_feature_bits();
+            self.fragments[fragment].arm_features = bits;
+            self.fragments[fragment]
+                .fixed
+                .extend_from_slice(&encoded.bytes);
+            self.fragments[fragment].has_instructions = true;
+            self.fragments[fragment].mode = mode;
+            let placed =
+                Self::place_fixups(encoded.fixups, base, location, &self.expression_locations);
+            self.fragments[fragment].fixups.extend(placed);
+        }
+
+        fn emit_instruction_to_fragment(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+            mode: Mode,
+            location: Option<SourceLocation>,
+        ) {
+            let Some(encoded) = self.encode(context, instruction, mode, location) else {
+                return;
+            };
+            let fragment = self.fragment();
+            let base = self.fragments[fragment].fixed.len();
+            let bits = self.arm_feature_bits();
+            let held = &mut self.fragments[fragment];
+            held.arm_features = bits;
+            held.tail = Tail::Relaxable(instruction.clone());
+            held.has_instructions = true;
+            held.mode = mode;
+            held.variable = encoded.bytes;
+            held.variable_fixups =
+                Self::place_fixups(encoded.fixups, base, location, &self.expression_locations);
+            self.new_fragment();
+        }
+
+        fn object_emit_instruction(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+            mode: Mode,
+            location: Option<SourceLocation>,
+        ) {
+            for operand in instruction.operands.iter().rev() {
+                if let MachineOperand::Expression(expression) = operand {
+                    self.visit_used(context, expression);
+                }
+            }
+            if let Some(section) = self.current_section() {
+                if let Some(state) = self.sections.get_mut(&section) {
+                    state.has_instructions = true;
+                }
+                context.sections[section].has_instructions = true;
+            }
+            if self.target.isa == Isa::Armv8 {
+                self.emit_instruction_to_data(context, instruction, mode, location);
+                return;
+            }
+            let relax_to_fixpoint =
+                |streamer: &ObjectStreamer, instruction: &MachineInstruction| {
+                    let mut relaxed = instruction.clone();
+                    while streamer.may_need_relaxation(&relaxed) {
+                        let before = relaxed.opcode;
+                        streamer.relax_instruction(&mut relaxed, mode);
+                        if relaxed.opcode == before {
+                            break;
+                        }
+                    }
+                    relaxed
+                };
+            if self.bundle_alignment != 0 {
+                if self.bundle_locked || self.relax_all {
+                    let relaxed = relax_to_fixpoint(self, instruction);
+                    self.emit_instruction_to_fragment(context, &relaxed, mode, location);
+                } else {
+                    self.emit_instruction_to_fragment(context, instruction, mode, location);
+                }
+                return;
+            }
+            if !(self.may_need_relaxation(instruction) || self.enhanced_relaxation()) {
+                self.emit_instruction_to_data(context, instruction, mode, location);
+                return;
+            }
+            if self.relax_all {
+                let relaxed = relax_to_fixpoint(self, instruction);
+                self.emit_instruction_to_data(context, &relaxed, mode, location);
+                return;
+            }
+            self.emit_instruction_to_fragment(context, instruction, mode, location);
+        }
+
+        fn is_prefix(&self, opcode: usize) -> bool {
+            let flags = self.target.instructions[opcode].flags;
+            form_of(flags) == PREFIX_BYTE
+        }
+
+        fn condition_of(&self, instruction: &MachineInstruction) -> Option<i64> {
+            let record = self.target.instructions[instruction.opcode].record.as_str();
+            if record != "JCC_1" {
+                return None;
+            }
+            match instruction.operands.last() {
+                Some(MachineOperand::Immediate(value)) => Some(*value),
+                _ => None,
+            }
+        }
+
+        fn is_rip_relative(&self, instruction: &MachineInstruction) -> bool {
+            let description = &self.target.instructions[instruction.opcode];
+            let Some(memory) = description.memory_operand_index() else {
+                return false;
+            };
+            let base = instruction.register_at(memory + ADDRESS_BASE);
+            base != NO_REGISTER && self.target.registers[base as usize].record == "RIP"
+        }
+
+        fn first_fusion_kind(&self, instruction: &MachineInstruction) -> Option<u8> {
+            if self.is_rip_relative(instruction) {
+                return None;
+            }
+            first_macro_fusion_kind(&self.target.instructions[instruction.opcode].record)
+        }
+
+        fn is_macro_fused(&self, first: &MachineInstruction, second: &MachineInstruction) -> bool {
+            let description = &self.target.instructions[second.opcode];
+            if !(description.is_branch
+                && !description.is_indirect_branch
+                && self.condition_of(second).is_some())
+            {
+                return false;
+            }
+            let Some(kind) = self.first_fusion_kind(first) else {
+                return false;
+            };
+            let Some(condition) = self.condition_of(second) else {
+                return false;
+            };
+            macro_fused(kind, condition)
+        }
+
+        fn needs_alignment(&self, instruction: &MachineInstruction) -> bool {
+            let description = &self.target.instructions[instruction.opcode];
+            let record = description.record.as_str();
+            let conditional = record == "JCC_1" || record == "JCC_2" || record == "JCC_4";
+            let unconditional = description.is_branch
+                && !conditional
+                && !description.is_indirect_branch
+                && description.is_terminator;
+            let kinds = self.align_branch_kinds;
+            (conditional && kinds & 2 != 0)
+                || (unconditional && kinds & 4 != 0)
+                || (description.is_call && kinds & 8 != 0)
+                || (description.is_return && kinds & 16 != 0)
+                || (description.is_indirect_branch && kinds & 32 != 0)
+        }
+
+        fn can_pad_instruction(&self, instruction: &MachineInstruction) -> bool {
+            if instruction.operands.iter().any(|operand| {
+                matches!(
+                    operand,
+                    MachineOperand::Expression(Expression::Symbol {
+                        specifier: Some(_),
+                        ..
+                    })
+                )
+            }) {
+                return false;
+            }
+            if let Some(previous) = &self.previous_instruction {
+                let record = self.target.instructions[previous.opcode].record.as_str();
+                if matches!(
+                    record,
+                    "POPSS16" | "POPSS32" | "STI" | "MOV16sr" | "MOV32sr" | "MOV64sr" | "MOV16sm"
+                ) {
+                    return false;
+                }
+                if self.is_prefix(previous.opcode) {
+                    return false;
+                }
+            }
+            if self.is_prefix(instruction.opcode) {
+                return false;
+            }
+            let fragment = self.current_fragment.expect("a fragment");
+            let offset = self.fragments[fragment].fixed.len();
+            if offset != 0 && self.previous_position != Some((fragment, offset)) {
+                return false;
+            }
+            true
+        }
+
+        fn can_pad_branches(&self, context: &AssemblyContext) -> bool {
+            if !self.auto_padding() {
+                return false;
+            }
+            let Some(section) = self.current_section() else {
+                return false;
+            };
+            if !self.section_is_text(context, section) {
+                return false;
+            }
+            self.mode != Mode::Bits16
+        }
+
+        fn instruction_begin(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+        ) {
+            self.fragment();
+            let can_pad = self.can_pad_instruction(instruction);
+            if self.bundle_alignment != 0 {
+                if self.prefix_ends_bundle_lock
+                    && Some(self.current_fragment.expect("a fragment"))
+                        != self.previous_position.map(|(fragment, _)| fragment)
+                {
+                    context.report(
+                        MessageKind::Error,
+                        self.statement_location,
+                        "instruction prefix cannot be the last instruction of a .bundle_lock group",
+                    );
+                }
+                if !self.bundle_locked {
+                    let current = self.current_fragment.expect("a fragment");
+                    let extend = self.pending_boundary.is_some_and(|boundary| {
+                        if let Tail::BoundaryAlign {
+                            last: Some(last), ..
+                        } = self.fragments[boundary].tail
+                        {
+                            self.fragments[last].next == Some(current)
+                        } else {
+                            false
+                        }
+                    });
+                    if extend {
+                        let boundary = self.pending_boundary.expect("a boundary");
+                        if let Tail::BoundaryAlign { last, .. } = &mut self.fragments[boundary].tail
+                        {
+                            *last = Some(current);
+                        }
+                    } else {
+                        let alignment = self.bundle_alignment;
+                        let boundary = self.add_special(Tail::BoundaryAlign {
+                            alignment,
+                            last: None,
+                            size: 0,
+                            align_to_end: false,
+                        });
+                        let current = self.current_fragment.expect("a fragment");
+                        if let Tail::BoundaryAlign { last, .. } = &mut self.fragments[boundary].tail
+                        {
+                            *last = Some(current);
+                        }
+                        self.fragments[boundary].mode = self.mode;
+                        self.pending_boundary = Some(boundary);
+                    }
+                }
+                let current = self.current_fragment.expect("a fragment");
+                self.fragments[current].allow_auto_padding = can_pad;
+                return;
+            }
+            if can_pad {
+                let current = self.current_fragment.expect("a fragment");
+                self.fragments[current].allow_auto_padding = true;
+            }
+            if !self.can_pad_branches(context) {
+                return;
+            }
+            let fused = match &self.previous_instruction {
+                Some(previous) => self.is_macro_fused(previous, instruction),
+                None => false,
+            };
+            if !fused {
+                self.pending_boundary = None;
+            }
+            if !can_pad {
+                return;
+            }
+            if self.pending_boundary.is_some() {
+                return;
+            }
+            if self.needs_alignment(instruction)
+                || (self.align_branch_kinds & 1 != 0
+                    && self.first_fusion_kind(instruction).is_some())
+            {
+                let alignment = self.align_branch_boundary;
+                let boundary = self.add_special(Tail::BoundaryAlign {
+                    alignment,
+                    last: None,
+                    size: 0,
+                    align_to_end: false,
+                });
+                self.fragments[boundary].mode = self.mode;
+                self.pending_boundary = Some(boundary);
+            }
+        }
+
+        fn instruction_end(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+        ) {
+            let current = self.fragment();
+            self.previous_position = Some((current, self.fragments[current].fixed.len()));
+            let previous_was = self.previous_instruction.replace(instruction.clone());
+            let _ = previous_was;
+            if self.bundle_alignment != 0 {
+                if self.bundle_locked {
+                    self.prefix_ends_bundle_lock = self.is_prefix(instruction.opcode);
+                    return;
+                }
+                self.prefix_ends_bundle_lock = false;
+                if let Some(section) = self.current_section() {
+                    let alignment = self.bundle_alignment;
+                    self.ensure_alignment(context, section, alignment);
+                }
+                if !self.is_prefix(instruction.opcode) {
+                    self.pending_boundary = None;
+                }
+                return;
+            }
+            if !self.can_pad_branches(context) {
+                return;
+            }
+            if !self.needs_alignment(instruction) {
+                return;
+            }
+            let Some(boundary) = self.pending_boundary.take() else {
+                return;
+            };
+            if let Tail::BoundaryAlign { last, .. } = &mut self.fragments[boundary].tail {
+                *last = Some(current);
+            }
+            self.new_fragment();
+            let section = self.fragments[current].section;
+            let alignment = self.align_branch_boundary;
+            self.ensure_alignment(context, section, alignment);
+        }
+
+        fn compute_fragment_size(&mut self, context: &mut AssemblyContext, fragment: usize) -> u64 {
+            match self.fragments[fragment].tail.clone() {
+                Tail::Fill {
+                    count,
+                    value_size,
+                    location,
+                    ..
+                } => {
+                    let Some(count) = context.evaluate_absolute(&count, Some(&*self)) else {
+                        self.pending_errors.push((
+                            location,
+                            "expected assembly-time absolute expression".to_string(),
+                        ));
+                        return 0;
+                    };
+                    let size = count.wrapping_mul(value_size as i64);
+                    if size < 0 {
+                        self.pending_errors
+                            .push((location, "invalid number of bytes".to_string()));
+                        return 0;
+                    }
+                    self.fragments[fragment].fixed.len() as u64 + size as u64
+                }
+                Tail::Nops { count, .. } => count.max(0) as u64,
+                Tail::BoundaryAlign { size, .. } => size,
+                Tail::Org {
+                    offset, location, ..
+                } => {
+                    let Some(value) = context.evaluate_relocatable(&offset, Some(&*self), true)
+                    else {
+                        self.pending_errors.push((
+                            location,
+                            "expected assembly-time absolute expression".to_string(),
+                        ));
+                        return 0;
+                    };
+                    let fragment_offset = self.fragments[fragment].offset;
+                    let mut target = value.constant;
+                    if let Some(add) = value.add {
+                        let Some(symbol_offset) = self.symbol_value(context, add) else {
+                            self.pending_errors
+                                .push((location, "expected absolute expression".to_string()));
+                            return 0;
+                        };
+                        target = target.wrapping_add(symbol_offset as i64);
+                    }
+                    if let Some(subtract) = value.subtract {
+                        if let Some(symbol_offset) = self.symbol_value(context, subtract) {
+                            target = target.wrapping_sub(symbol_offset as i64);
+                        }
+                    }
+                    let size = target.wrapping_sub(fragment_offset as i64);
+                    if !(0..0x4000_0000).contains(&size) {
+                        self.pending_errors.push((
+                            location,
+                            format!(
+                                "invalid .org offset '{target}' (at offset '{fragment_offset}')"
+                            ),
+                        ));
+                        return 0;
+                    }
+                    size as u64
+                }
+                _ => self.fragments[fragment].size(),
+            }
+        }
+
+        fn relax_align(&mut self, context: &AssemblyContext, fragment: usize) {
+            let Tail::Align {
+                alignment,
+                maximum,
+                nops,
+                ..
+            } = self.fragments[fragment].tail
+            else {
+                return;
+            };
+            let held = &self.fragments[fragment];
+            let offset = held.offset + held.fixed.len() as u64;
+            let alignment = alignment.max(1);
+            let mut size = (alignment - offset % alignment) % alignment;
+            let _ = context;
+            if nops {
+                let minimum = 1;
+                while !size.is_multiple_of(minimum) {
+                    size += alignment;
+                }
+            }
+            if size > maximum {
+                size = 0;
+            }
+            let fill_length = match self.fragments[fragment].tail {
+                Tail::Align { fill_length, .. } => fill_length.max(1) as u64,
+                _ => 1,
+            };
+            let _ = fill_length;
+            self.fragments[fragment].variable = vec![0u8; size as usize];
+        }
+
+        fn fixup_needs_relaxation(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            fixup: &PlacedFixup,
+        ) -> bool {
+            let (target, value, resolved) = self.evaluate_fixup(context, fragment, fixup, false);
+            let Some(target) = target else {
+                return true;
+            };
+            if let (Isa::Armv7, FixupKind::Arm32(kind)) = (self.target.isa, fixup.fixup.kind) {
+                use armv7::Fixup32;
+                if let Some(add) = target.add {
+                    if self.arm32_needs_interworking(context, add, kind) {
+                        return true;
+                    }
+                }
+                if !resolved {
+                    return true;
+                }
+                let offset = (value as i64).wrapping_sub(4);
+                return match kind {
+                    Fixup32::ThumbBr => !(-2048..=2046).contains(&offset),
+                    Fixup32::ThumbBcc => !(-256..=254).contains(&offset),
+                    Fixup32::ThumbAdrPcrel10 | Fixup32::ThumbCp => {
+                        offset & 3 != 0 || !(0..=1020).contains(&offset)
+                    }
+                    Fixup32::ThumbCb => (value & !1) == 2,
+                    _ => false,
+                };
+            }
+            if resolved {
+                let slack = if self.bundle_alignment != 0
+                    && self.pad_max_prefix_size != 0
+                    && self.is_relaxable_branch(fragment)
+                {
+                    self.bundle_alignment as i64
+                } else {
+                    0
+                };
+                let value = value as i64;
+                return !(-128..=127).contains(&value.wrapping_add(slack))
+                    || !(-128..=127).contains(&value.wrapping_sub(slack))
+                    || target.specifier.is_some();
+            }
+            if fixup.fixup.kind == FixupKind::Data1
+                && target.add.is_some()
+                && target
+                    .specifier
+                    .as_deref()
+                    .is_some_and(|specifier| specifier.eq_ignore_ascii_case("ABS8"))
+            {
+                return false;
+            }
+            true
+        }
+
+        fn is_relaxable_branch(&self, fragment: usize) -> bool {
+            match &self.fragments[fragment].tail {
+                Tail::Relaxable(instruction) => {
+                    let record = self.target.instructions[instruction.opcode].record.as_str();
+                    record == "JCC_1" || record == "JMP_1"
+                }
+                _ => false,
+            }
+        }
+
+        fn relax_relaxable(&mut self, context: &mut AssemblyContext, fragment: usize) {
+            let Tail::Relaxable(instruction) = self.fragments[fragment].tail.clone() else {
+                return;
+            };
+            if self.target.isa == Isa::Armv7 {
+                let bits = self.fragments[fragment].arm_features;
+                self.set_arm_feature_bits(bits);
+            }
+            if !self.may_need_relaxation(&instruction) {
+                return;
+            }
+            let fixups = self.fragments[fragment].variable_fixups.clone();
+            let mut relax = false;
+            for fixup in &fixups {
+                if self.fixup_needs_relaxation(context, fragment, fixup) {
+                    relax = true;
+                    break;
+                }
+            }
+            if !relax {
+                return;
+            }
+            let mode = self.fragments[fragment].mode;
+            let mut relaxed = instruction.clone();
+            self.relax_instruction(&mut relaxed, mode);
+            let location = fixups.first().and_then(|fixup| fixup.location);
+            let Some(encoded) = self.encode(context, &relaxed, mode, location) else {
+                return;
+            };
+            let known = Self::known_locations(&fixups);
+            let base = self.fragments[fragment].fixed.len();
+            let held = &mut self.fragments[fragment];
+            held.tail = Tail::Relaxable(relaxed);
+            held.variable = encoded.bytes;
+            held.variable_fixups = Self::place_fixups(encoded.fixups, base, location, &known);
+        }
+
+        fn relax_leb(&mut self, context: &mut AssemblyContext, fragment: usize) {
+            let Tail::Leb { signed, value } = self.fragments[fragment].tail.clone() else {
+                return;
+            };
+            let pad_to = self.fragments[fragment].variable.len();
+            self.fragments[fragment].variable_fixups.clear();
+            let evaluated = context.evaluate_absolute(&value, Some(&*self));
+            let value = match evaluated {
+                Some(value) => value,
+                None => {
+                    self.pending_errors.push((
+                        None,
+                        format!(
+                            ".{}leb128 expression is not absolute",
+                            if signed { "s" } else { "u" }
+                        ),
+                    ));
+                    if let Tail::Leb { value, .. } = &mut self.fragments[fragment].tail {
+                        *value = Expression::Constant(0);
+                    }
+                    0
+                }
+            };
+            let bytes = if signed {
+                encode_signed_leb128(value, pad_to)
+            } else {
+                encode_unsigned_leb128(value as u64, pad_to)
+            };
+            self.fragments[fragment].variable = bytes;
+        }
+
+        fn relax_frame(&mut self, context: &mut AssemblyContext, fragment: usize) {
+            let Tail::DwarfFrame { delta, location } = self.fragments[fragment].tail.clone() else {
+                return;
+            };
+            let Some(value) = context.evaluate_absolute(&delta, Some(&*self)) else {
+                context.report(
+                    MessageKind::Error,
+                    location,
+                    "invalid CFI advance_loc expression",
+                );
+                if let Tail::DwarfFrame { delta, .. } = &mut self.fragments[fragment].tail {
+                    *delta = Expression::Constant(0);
+                }
+                return;
+            };
+            self.fragments[fragment].variable = encode_advance_location(value as u64);
+            self.fragments[fragment].variable_fixups.clear();
+        }
+
+        fn boundary_size(&mut self, context: &mut AssemblyContext, fragment: usize) -> Option<u64> {
+            let Tail::BoundaryAlign {
+                alignment,
+                last: Some(last),
+                align_to_end,
+                ..
+            } = self.fragments[fragment].tail
+            else {
+                return None;
+            };
+            let aligned_offset = self.fragments[fragment].offset;
+            let mut aligned_size = 0u64;
+            let mut cursor = self.fragments[fragment].next;
+            while let Some(current) = cursor {
+                aligned_size += self.compute_fragment_size(context, current);
+                if current == last {
+                    break;
+                }
+                cursor = self.fragments[current].next;
+            }
+            let alignment = alignment.max(1);
+            let to_alignment = |offset: u64| (alignment - offset % alignment) % alignment;
+            let crosses = |start: u64, size: u64| {
+                let end = start + size;
+                size != 0 && (start / alignment) != ((end - 1) / alignment)
+            };
+            let against = |start: u64, size: u64| (start + size).is_multiple_of(alignment);
+            if self.bundle_alignment == 0 {
+                return Some(
+                    if crosses(aligned_offset, aligned_size)
+                        || against(aligned_offset, aligned_size)
+                    {
+                        to_alignment(aligned_offset)
+                    } else {
+                        0
+                    },
+                );
+            }
+            if align_to_end {
+                return Some(to_alignment(aligned_offset + aligned_size));
+            }
+            Some(if crosses(aligned_offset, aligned_size) {
+                to_alignment(aligned_offset)
+            } else {
+                0
+            })
+        }
+
+        fn relax_fragment(&mut self, context: &mut AssemblyContext, fragment: usize) {
+            match self.fragments[fragment].tail {
+                Tail::Align { .. } => self.relax_align(context, fragment),
+                Tail::Relaxable(_) => self.relax_relaxable(context, fragment),
+                Tail::Leb { .. } => self.relax_leb(context, fragment),
+                Tail::DwarfFrame { .. } => self.relax_frame(context, fragment),
+                Tail::BoundaryAlign { .. } => {
+                    if let Some(size) = self.boundary_size(context, fragment) {
+                        if let Tail::BoundaryAlign { size: held, .. } =
+                            &mut self.fragments[fragment].tail
+                        {
+                            *held = size;
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        fn layout_section(&mut self, context: &mut AssemblyContext, section: usize) {
+            let fragments = self.sections[&section].fragments.clone();
+            let mut offset = 0u64;
+            for fragment in fragments {
+                self.fragments[fragment].offset = offset;
+                if matches!(self.fragments[fragment].tail, Tail::Align { .. }) {
+                    self.relax_align(context, fragment);
+                }
+                offset += self.compute_fragment_size(context, fragment);
+            }
+        }
+
+        fn relax_once(&mut self, context: &mut AssemblyContext, first_stable: usize) -> usize {
+            self.pending_errors.clear();
+            let mut result = 0;
+            let mut first_stable = first_stable;
+            let order = self.section_order.clone();
+            for (index, section) in order.iter().enumerate() {
+                if index >= first_stable {
+                    break;
+                }
+                let fragments = self.sections[section].fragments.clone();
+                let mut iterations = 0usize;
+                loop {
+                    let mut changed = false;
+                    let mut offset = 0u64;
+                    let aligns: Vec<usize> = fragments
+                        .iter()
+                        .filter(|held| matches!(self.fragments[**held].tail, Tail::Align { .. }))
+                        .map(|held| self.fragments[*held].order)
+                        .collect();
+                    for &fragment in &fragments {
+                        let here = self.fragments[fragment].order;
+                        self.stretch_limit = aligns
+                            .iter()
+                            .copied()
+                            .find(|order| *order > here)
+                            .unwrap_or(usize::MAX);
+                        if self.fragments[fragment].offset != offset {
+                            changed = true;
+                        }
+                        self.stretch = offset as i64 - self.fragments[fragment].offset as i64;
+                        self.fragments[fragment].offset = offset;
+                        if !self.fragments[fragment].is_data() {
+                            self.relax_fragment(context, fragment);
+                        }
+                        offset += self.compute_fragment_size(context, fragment);
+                    }
+                    iterations += 1;
+                    if !changed {
+                        break;
+                    }
+                    first_stable = order.len();
+                    result = index;
+                    let last = fragments
+                        .last()
+                        .map(|f| self.fragments[*f].order)
+                        .unwrap_or(0);
+                    if iterations > last {
+                        break;
+                    }
+                }
+            }
+            self.stretch = 0;
+            self.stretch_limit = usize::MAX;
+            result
+        }
+
+        fn layout(&mut self, context: &mut AssemblyContext) {
+            let order = self.section_order.clone();
+            for (ordinal, section) in order.iter().enumerate() {
+                let state = self
+                    .sections
+                    .get_mut(section)
+                    .expect("the section is known");
+                state.ordinal = ordinal;
+                let mut flattened = Vec::new();
+                for (_, list) in &state.subsections {
+                    flattened.extend_from_slice(list);
+                }
+                state.fragments = flattened.clone();
+                for (position, fragment) in flattened.iter().enumerate() {
+                    self.fragments[*fragment].order = position;
+                    self.fragments[*fragment].next = flattened.get(position + 1).copied();
+                }
+            }
+            self.has_layout = true;
+            for section in &order {
+                self.layout_section(context, *section);
+            }
+            let mut first_stable = order.len();
+            loop {
+                first_stable = self.relax_once(context, first_stable);
+                if context.had_error {
+                    self.report_pending(context);
+                    return;
+                }
+                if first_stable == 0 {
+                    break;
+                }
+            }
+            if self.finish_layout(context) {
+                for section in &order {
+                    self.layout_section(context, *section);
+                }
+            }
+            self.report_pending(context);
+            self.post_layout_binding(context);
+            for symbol in 0..context.symbols.len() {
+                let held = &context.symbols[symbol];
+                if held.registered && held.is_variable() && !held.temporary {
+                    let base = self.base_symbol(context, symbol);
+                    self.base_symbols.insert(symbol, base);
+                }
+            }
+            self.has_final_layout = true;
+            self.apply_relocation_directives(context);
+            for section in &order {
+                let fragments = self.sections[section].fragments.clone();
+                for fragment in fragments {
+                    let fixups = self.fragments[fragment].fixups.clone();
+                    for (index, fixup) in fixups.iter().enumerate() {
+                        let (target, value, resolved) =
+                            self.evaluate_fixup(context, fragment, fixup, true);
+                        if let Some(target) = target {
+                            self.apply_fixup(
+                                context, fragment, fixup, &target, value, resolved, false, index,
+                            );
+                        }
+                    }
+                    let fixups = self.fragments[fragment].variable_fixups.clone();
+                    for (index, fixup) in fixups.iter().enumerate() {
+                        let (target, value, resolved) =
+                            self.evaluate_fixup(context, fragment, fixup, true);
+                        if let Some(target) = target {
+                            self.apply_fixup(
+                                context, fragment, fixup, &target, value, resolved, true, index,
+                            );
+                        }
+                    }
+                }
+            }
+        }
+
+        fn finish_layout(&mut self, context: &mut AssemblyContext) -> bool {
+            if self.bundle_alignment != 0 {
+                return self.pad_max_prefix_size != 0 && self.optimize_bundle_nops(context);
+            }
+            let mut labeled = BTreeSet::new();
+            for symbol in &self.symbols_in_order {
+                if let Some(fragment) = context.symbols[*symbol].fragment {
+                    labeled.insert(fragment);
+                }
+            }
+            let mut changed = false;
+            let order = self.section_order.clone();
+            for section in order {
+                if !self.section_is_text(context, section) {
+                    continue;
+                }
+                let fragments = self.sections[&section].fragments.clone();
+                let mut relaxable: Vec<usize> = Vec::new();
+                let mut index = 0;
+                while index < fragments.len() {
+                    let fragment = fragments[index];
+                    index += 1;
+                    if labeled.contains(&fragment) {
+                        relaxable.clear();
+                    }
+                    match self.fragments[fragment].tail {
+                        Tail::Data => continue,
+                        Tail::Relaxable(_) => {
+                            relaxable.push(fragment);
+                            continue;
+                        }
+                        Tail::BoundaryAlign { .. } => {}
+                        Tail::Align { .. } if self.pad_for_align => {}
+                        _ => {
+                            relaxable.clear();
+                            continue;
+                        }
+                    }
+                    let size = self.compute_fragment_size(context, fragment);
+                    let mut remaining = size - self.fragments[fragment].fixed.len() as u64;
+                    self.pad_instructions_backward(context, &mut relaxable, &mut remaining);
+                    let last = match &mut self.fragments[fragment].tail {
+                        Tail::BoundaryAlign { size, last, .. } => {
+                            *size = remaining;
+                            *last
+                        }
+                        _ => None,
+                    };
+                    changed = true;
+                    if let Some(last) = last {
+                        while index < fragments.len() && fragments[index - 1] != last {
+                            index += 1;
+                        }
+                    }
+                }
+            }
+            changed
+        }
+
+        fn pad_instructions_backward(
+            &mut self,
+            context: &mut AssemblyContext,
+            relaxable: &mut Vec<usize>,
+            remaining: &mut u64,
+        ) -> bool {
+            let mut changed = false;
+            while let Some(fragment) = relaxable.pop() {
+                if *remaining == 0 {
+                    break;
+                }
+                changed |= self.pad_instruction_encoding(context, fragment, remaining);
+                let instruction = match &self.fragments[fragment].tail {
+                    Tail::Relaxable(instruction) => instruction.clone(),
+                    _ => continue,
+                };
+                if self.may_need_relaxation(&instruction) {
+                    break;
+                }
+            }
+            relaxable.clear();
+            changed
+        }
+
+        fn pad_instruction_encoding(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            remaining: &mut u64,
+        ) -> bool {
+            let mut changed = false;
+            if *remaining != 0 {
+                changed |= self.pad_via_relaxation(context, fragment, remaining);
+            }
+            if *remaining != 0 {
+                changed |= self.pad_via_prefix(fragment, remaining);
+            }
+            changed
+        }
+
+        fn pad_via_relaxation(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            remaining: &mut u64,
+        ) -> bool {
+            let Tail::Relaxable(instruction) = self.fragments[fragment].tail.clone() else {
+                return false;
+            };
+            if !self.may_need_relaxation(&instruction) {
+                return false;
+            }
+            let mode = self.fragments[fragment].mode;
+            let mut relaxed = instruction;
+            self.relax_instruction(&mut relaxed, mode);
+            let location = self.fragments[fragment]
+                .variable_fixups
+                .first()
+                .and_then(|f| f.location);
+            let Some(encoded) = self.encode(context, &relaxed, mode, location) else {
+                return false;
+            };
+            let old = self.fragments[fragment].variable.len() as u64;
+            let new = encoded.bytes.len() as u64;
+            let delta = new.saturating_sub(old);
+            if delta > *remaining {
+                return false;
+            }
+            let known = Self::known_locations(&self.fragments[fragment].variable_fixups);
+            let base = self.fragments[fragment].fixed.len();
+            let held = &mut self.fragments[fragment];
+            held.tail = Tail::Relaxable(relaxed);
+            held.variable = encoded.bytes;
+            held.variable_fixups = Self::place_fixups(encoded.fixups, base, location, &known);
+            *remaining -= delta;
+            true
+        }
+
+        fn padding_prefix(&self, instruction: &MachineInstruction, mode: Mode) -> u8 {
+            let description = &self.target.instructions[instruction.opcode];
+            let flags = description.flags;
+            let memory = description.memory_operand_index();
+            let mut segment = memory
+                .map(|memory| instruction.register_at(memory + ADDRESS_SEGMENT))
+                .unwrap_or(NO_REGISTER);
+            let ds = self.target.register("DS");
+            match form_of(flags) {
+                RAW_FORM_DESTINATION_SOURCE => {
+                    if instruction.register_at(2) != ds {
+                        segment = instruction.register_at(2);
+                    }
+                }
+                RAW_FORM_SOURCE => {
+                    if instruction.register_at(1) != ds {
+                        segment = instruction.register_at(1);
+                    }
+                }
+                RAW_FORM_MEMORY_OFFSET => segment = instruction.register_at(1),
+                _ => {}
+            }
+            if segment != NO_REGISTER {
+                return match self.target.registers[segment as usize].record.as_str() {
+                    "CS" => 0x2e,
+                    "SS" => 0x36,
+                    "DS" => 0x3e,
+                    "ES" => 0x26,
+                    "FS" => 0x64,
+                    _ => 0x65,
+                };
+            }
+            if mode == Mode::Bits64 {
+                return 0x2e;
+            }
+            if let Some(memory) = memory {
+                let base = instruction.register_at(memory + ADDRESS_BASE);
+                if base != NO_REGISTER {
+                    let name = self.target.registers[base as usize].record.as_str();
+                    if name == "ESP" || name == "EBP" {
+                        return 0x36;
+                    }
+                }
+            }
+            0x3e
+        }
+
+        fn pad_via_prefix(&mut self, fragment: usize, remaining: &mut u64) -> bool {
+            if !self.fragments[fragment].allow_auto_padding {
+                return false;
+            }
+            let Tail::Relaxable(instruction) = self.fragments[fragment].tail.clone() else {
+                return false;
+            };
+            if self.may_need_relaxation(&instruction) {
+                return false;
+            }
+            let old = self.fragments[fragment].variable.len() as u64;
+            if old >= 15 {
+                return false;
+            }
+            let maximum = (15 - old).min(*remaining);
+            let mode = self.fragments[fragment].mode;
+            let encoder = Encoder::new(self.target, mode);
+            let mut prefix_bytes = Vec::new();
+            let _ = encoder.emit_prefix(&instruction, &mut prefix_bytes);
+            let existing = prefix_bytes.len() as u64;
+            let available = (self.pad_max_prefix_size as u64).saturating_sub(existing);
+            let add = maximum.min(available);
+            if add == 0 {
+                return false;
+            }
+            let prefix = self.padding_prefix(&instruction, mode);
+            let held = &mut self.fragments[fragment];
+            let mut bytes = vec![prefix; add as usize];
+            bytes.extend_from_slice(&held.variable);
+            held.variable = bytes;
+            for fixup in &mut held.variable_fixups {
+                fixup.fixup.offset += add as usize;
+            }
+            *remaining -= add;
+            true
+        }
+
+        fn optimize_bundle_nops(&mut self, context: &mut AssemblyContext) -> bool {
+            let bundle = self.bundle_alignment;
+            let mut changed = false;
+            let order = self.section_order.clone();
+            for section in order {
+                if !self.section_is_text(context, section) {
+                    continue;
+                }
+                let fragments = self.sections[&section].fragments.clone();
+                let mut relaxable: Vec<usize> = Vec::new();
+                let mut resume_after: Option<usize> = None;
+                for fragment in fragments {
+                    if let Some(resume) = resume_after {
+                        if fragment == resume {
+                            resume_after = None;
+                        }
+                        continue;
+                    }
+                    let offset = self.fragments[fragment].offset;
+                    if let Some(first) = relaxable.first() {
+                        if self.fragments[*first].offset / bundle != offset / bundle {
+                            relaxable.clear();
+                        }
+                    }
+                    match self.fragments[fragment].tail.clone() {
+                        Tail::BoundaryAlign { size, last, .. } => {
+                            if size == 0 {
+                                continue;
+                            }
+                            changed |= self.fold_bundle_pad(context, fragment, &mut relaxable);
+                            resume_after = last;
+                        }
+                        Tail::Relaxable(_) => relaxable.push(fragment),
+                        Tail::Data => {}
+                        _ => relaxable.clear(),
+                    }
+                }
+            }
+            changed
+        }
+
+        fn fold_bundle_pad(
+            &mut self,
+            context: &mut AssemblyContext,
+            boundary: usize,
+            relaxable: &mut Vec<usize>,
+        ) -> bool {
+            let bundle = self.bundle_alignment;
+            let start = self.fragments[boundary].offset;
+            let (mut remaining, last, align_to_end) = match self.fragments[boundary].tail {
+                Tail::BoundaryAlign {
+                    size,
+                    last,
+                    align_to_end,
+                    ..
+                } => (size, last, align_to_end),
+                _ => return false,
+            };
+            let budget = remaining.min(bundle - start % bundle);
+            let mut left = budget;
+            let mut changed = self.pad_instructions_backward(context, relaxable, &mut left);
+            remaining -= budget - left;
+            if align_to_end && remaining != 0 {
+                let mut group = 0u64;
+                let mut cursor = self.fragments[boundary].next;
+                while let Some(fragment) = cursor {
+                    group += self.compute_fragment_size(context, fragment);
+                    if Some(fragment) == last {
+                        break;
+                    }
+                    cursor = self.fragments[fragment].next;
+                }
+                if group < bundle {
+                    let budget = remaining.min(bundle - group);
+                    let mut left = budget;
+                    let mut cursor = self.fragments[boundary].next;
+                    while let Some(fragment) = cursor {
+                        if matches!(self.fragments[fragment].tail, Tail::Relaxable(_)) {
+                            changed |= self.pad_instruction_encoding(context, fragment, &mut left);
+                        }
+                        if Some(fragment) == last || left == 0 {
+                            break;
+                        }
+                        cursor = self.fragments[fragment].next;
+                    }
+                    remaining -= budget - left;
+                }
+            }
+            if let Tail::BoundaryAlign { size, .. } = &mut self.fragments[boundary].tail {
+                *size = remaining;
+            }
+            changed
+        }
+
+        fn evaluate_fixup(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            fixup: &PlacedFixup,
+            record: bool,
+        ) -> (Option<RelocatableValue>, u64, bool) {
+            let Some(mut target) =
+                context.evaluate_relocatable(&fixup.fixup.expression, Some(&*self), false)
+            else {
+                if record {
+                    context.report(
+                        MessageKind::Error,
+                        fixup.location,
+                        "expected relocatable expression",
+                    );
+                }
+                return (None, 0, false);
+            };
+            if fixup.fixup.pc_relative && context.triple.isa == Isa::X86 {
+                let adjust = match fixup.fixup.kind {
+                    FixupKind::Data1 => 1,
+                    FixupKind::Data2 => 2,
+                    _ => 4,
+                };
+                target.constant = target.constant.wrapping_sub(adjust);
+            }
+            let mut value = target.constant as u64;
+            if let Some(add) = target.add {
+                if self.place_of(context, add) != Place::Undefined {
+                    value = value.wrapping_add(self.symbol_value(context, add).unwrap_or(0));
+                }
+            }
+            if let Some(subtract) = target.subtract {
+                if self.place_of(context, subtract) != Place::Undefined {
+                    value = value.wrapping_sub(self.symbol_value(context, subtract).unwrap_or(0));
+                }
+            }
+            let mut resolved;
+            if fixup.fixup.pc_relative {
+                let mut place = self.fragments[fragment].offset + fixup.fixup.offset as u64;
+                if matches!(fixup.fixup.kind, FixupKind::Arm32(held) if held.aligned_down()) {
+                    place &= !3;
+                }
+                value = value.wrapping_sub(place);
+                if self.stretch != 0 {
+                    let order = self.fragments[fragment].order;
+                    if let Some(add) = target.add {
+                        if let Place::Fragment(other) = self.place_of(context, add) {
+                            if self.fragments[other].order > order
+                                && self.fragments[other].order <= self.stretch_limit
+                            {
+                                value = value.wrapping_add(self.stretch as u64);
+                            }
+                        }
+                    }
+                    if let Some(subtract) = target.subtract {
+                        if let Place::Fragment(other) = self.place_of(context, subtract) {
+                            if self.fragments[other].order > order
+                                && self.fragments[other].order <= self.stretch_limit
+                            {
+                                value = value.wrapping_sub(self.stretch as u64);
+                            }
+                        }
+                    }
+                }
+                resolved = false;
+                if let (Some(add), None) = (target.add, target.subtract) {
+                    let place = self.place_of(context, add);
+                    if place != Place::Undefined && place != Place::Absolute {
+                        resolved = self.binding_of(context, add) == BINDING_LOCAL
+                            && self.type_of(context, add) != TYPE_GNU_IFUNC
+                            && self.symbol_section(context, add)
+                                == Some(self.fragments[fragment].section);
+                    }
+                }
+            } else {
+                resolved = target.is_absolute();
+            }
+            if fixup.fixup.kind == FixupKind::Arm(armv8::ArmFixup::PcrelAdrpImm21) {
+                resolved = false;
+            }
+            if let (Isa::Armv7, FixupKind::Arm32(held), Some(add)) =
+                (context.triple.isa, fixup.fixup.kind, target.add)
+            {
+                use armv7::Fixup32;
+                let function = matches!(self.type_of(context, add), TYPE_FUNCTION | TYPE_GNU_IFUNC);
+                let thumb = self.is_thumb_function(context, add);
+                if function
+                    && if thumb {
+                        held == Fixup32::UncondBranch
+                    } else {
+                        matches!(
+                            held,
+                            Fixup32::ThumbBr
+                                | Fixup32::ThumbBl
+                                | Fixup32::T2CondBranch
+                                | Fixup32::T2UncondBranch
+                        )
+                    }
+                {
+                    resolved = false;
+                }
+                if matches!(
+                    held,
+                    Fixup32::ThumbBlx | Fixup32::Blx | Fixup32::UncondBl | Fixup32::CondBl
+                ) {
+                    resolved = false;
+                }
+            }
+            (Some(target), value, resolved)
+        }
+
+        fn binding_of(&self, context: &AssemblyContext, symbol: usize) -> u8 {
+            if self.unique_bindings.contains(&symbol) {
+                return BINDING_GNU_UNIQUE;
+            }
+            let held = &context.symbols[symbol];
+            match held.binding {
+                Some(SymbolBinding::Local) => BINDING_LOCAL,
+                Some(SymbolBinding::Global) => BINDING_GLOBAL,
+                Some(SymbolBinding::Weak) => BINDING_WEAK,
+                None => {
+                    if self.place_of(context, symbol) != Place::Undefined || held.common.is_some() {
+                        BINDING_LOCAL
+                    } else if held.used_in_relocation {
+                        BINDING_GLOBAL
+                    } else if self.signatures.contains(&symbol) {
+                        BINDING_LOCAL
+                    } else {
+                        BINDING_GLOBAL
+                    }
+                }
+            }
+        }
+
+        fn type_of(&self, context: &AssemblyContext, symbol: usize) -> u8 {
+            element_type(context.symbols[symbol].symbol_type)
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn apply_fixup(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            fixup: &PlacedFixup,
+            target: &RelocatableValue,
+            value: u64,
+            resolved: bool,
+            variable: bool,
+            index: usize,
+        ) {
+            let _ = index;
+            if self.target.isa == Isa::Armv7 {
+                let bits = self.fragments[fragment].arm_features;
+                self.set_arm_feature_bits(bits);
+            }
+            let mut resolved = resolved;
+            let literal = matches!(fixup.fixup.kind, FixupKind::Literal(_));
+            if resolved && literal {
+                resolved = false;
+            }
+            if target.specifier.is_some()
+                && !(context.triple.isa == Isa::Armv8
+                    && (target.is_absolute() || target.specifier.as_deref() == Some("abs")))
+            {
+                resolved = false;
+            }
+            let mut value = value;
+            if !resolved {
+                value = self.record_relocation(context, fragment, fixup, target, value);
+            }
+            if literal {
+                return;
+            }
+            if let FixupKind::Arm32(kind) = fixup.fixup.kind {
+                let thumb_two = self.target.isa == Isa::Armv7 && self.thumb_two_features;
+                let adjusted = match armv7::adjust_fixup_value(
+                    kind,
+                    value,
+                    resolved,
+                    thumb_two,
+                    self.thumb_long_call,
+                ) {
+                    Ok(adjusted) => adjusted,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        return;
+                    }
+                };
+                if adjusted == 0 {
+                    return;
+                }
+                let held = &mut self.fragments[fragment];
+                let (buffer, start) = if variable {
+                    let base = held.fixed.len();
+                    (&mut held.variable, fixup.fixup.offset - base)
+                } else {
+                    (&mut held.fixed, fixup.fixup.offset)
+                };
+                let bytes = if matches!(
+                    kind,
+                    armv7::Fixup32::T2MovwLo16 | armv7::Fixup32::T2MovtHi16
+                ) {
+                    4
+                } else {
+                    kind.bits().div_ceil(8)
+                };
+                for byte in 0..bytes {
+                    if let Some(slot) = buffer.get_mut(start + byte) {
+                        *slot |= (adjusted >> (byte * 8)) as u8;
+                    }
+                }
+                return;
+            }
+            if let FixupKind::Arm(_) = fixup.fixup.kind {
+                if value == 0 {
+                    return;
+                }
+                let specifier = target.specifier.clone().unwrap_or_default();
+                let adjusted = match armv8::adjust_fixup_value(fixup.fixup.kind, &specifier, value)
+                {
+                    Ok(adjusted) => adjusted,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        return;
+                    }
+                };
+                let adjusted = adjusted << armv8::fixup_target_offset(fixup.fixup.kind);
+                let held = &mut self.fragments[fragment];
+                let (buffer, start) = if variable {
+                    let base = held.fixed.len();
+                    (&mut held.variable, fixup.fixup.offset - base)
+                } else {
+                    (&mut held.fixed, fixup.fixup.offset)
+                };
+                for byte in 0..4 {
+                    if let Some(slot) = buffer.get_mut(start + byte) {
+                        *slot |= (adjusted >> (byte * 8)) as u8;
+                    }
+                }
+                if fixup.fixup.kind == FixupKind::Arm(armv8::ArmFixup::Movw) {
+                    let lower = specifier.to_ascii_lowercase();
+                    if lower.is_empty() || (lower.starts_with("abs_g") && lower.ends_with("_s")) {
+                        if let Some(slot) = buffer.get_mut(start + 3) {
+                            if (value as i64) < 0 {
+                                *slot &= !(1 << 6);
+                            } else {
+                                *slot |= 1 << 6;
+                            }
+                        }
+                    }
+                }
+                return;
+            }
+            let size = fixup.fixup.kind.size();
+            if size > 0 && size < 8 {
+                let signed = resolved && fixup.fixup.pc_relative;
+                let mask = !0u64 << (size * 8 - usize::from(signed));
+                let bad = if signed {
+                    value & mask != 0 && value & mask != mask
+                } else {
+                    value & mask != 0 && value.wrapping_neg() & mask != 0
+                };
+                if bad {
+                    context.report(
+                        MessageKind::Error,
+                        fixup.location,
+                        &format!(
+                            "value of {} is too large for field of {size} {}",
+                            value as i64,
+                            if size == 1 { "byte" } else { "bytes" }
+                        ),
+                    );
+                }
+            }
+            let held = &mut self.fragments[fragment];
+            let (buffer, start) = if variable {
+                let base = held.fixed.len();
+                (&mut held.variable, fixup.fixup.offset - base)
+            } else {
+                (&mut held.fixed, fixup.fixup.offset)
+            };
+            for byte in 0..size {
+                if let Some(slot) = buffer.get_mut(start + byte) {
+                    *slot = (value >> (byte * 8)) as u8;
+                }
+            }
+        }
+
+        fn specifier_of(target: &RelocatableValue) -> String {
+            target
+                .specifier
+                .as_deref()
+                .map(|specifier| specifier.to_ascii_uppercase())
+                .unwrap_or_default()
+        }
+
+        fn relocation_type(
+            &mut self,
+            context: &mut AssemblyContext,
+            fixup: &PlacedFixup,
+            target: &RelocatableValue,
+            pc_relative: bool,
+        ) -> u32 {
+            let kind = fixup.fixup.kind;
+            if context.triple.isa == Isa::Armv7 {
+                let specifier = target.specifier.clone().unwrap_or_default();
+                let arm_kind = match kind {
+                    FixupKind::Arm32(held) => Some(held),
+                    _ => None,
+                };
+                if matches!(
+                    arm_kind,
+                    Some(
+                        armv7::Fixup32::MovwLo16
+                            | armv7::Fixup32::MovtHi16
+                            | armv7::Fixup32::T2MovwLo16
+                            | armv7::Fixup32::T2MovtHi16
+                    )
+                ) && !(-32768..=32767).contains(&target.constant)
+                {
+                    context.report(
+                        MessageKind::Error,
+                        fixup.location,
+                        "Relocation Not In Range",
+                    );
+                    return 0;
+                }
+                if matches!(
+                    specifier.to_ascii_lowercase().as_str(),
+                    "tlsgd"
+                        | "tlsldm"
+                        | "tlsldo"
+                        | "gottpoff"
+                        | "tpoff"
+                        | "tlscall"
+                        | "tlsdesc"
+                        | "tlsgd_fdpic"
+                        | "tlsldm_fdpic"
+                        | "gottpoff_fdpic"
+                ) {
+                    if let Some(add) = target.add {
+                        context.symbols[add].symbol_type = Some(SymbolType::ThreadLocal);
+                    }
+                }
+                return match armv7::elf_relocation(arm_kind, kind.size(), &specifier, pc_relative) {
+                    Ok(number) if !self.fdpic && armv7::is_fdpic_relocation(number) => {
+                        context.report(
+                            MessageKind::Error,
+                            fixup.location,
+                            &format!(
+                                "relocation {} only supported in FDPIC mode",
+                                armv7::relocation_name(number)
+                            ),
+                        );
+                        number
+                    }
+                    Ok(3)
+                        if target.add.is_some_and(|add| {
+                            context.symbols[add].name == "_GLOBAL_OFFSET_TABLE_"
+                        }) =>
+                    {
+                        25
+                    }
+                    Ok(number) => number,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        0
+                    }
+                };
+            }
+            if context.triple.isa == Isa::Armv8 {
+                let specifier = target.specifier.clone().unwrap_or_default();
+                return match armv8::elf_relocation(kind, &specifier, pc_relative) {
+                    Ok(number) => number,
+                    Err(message) => {
+                        context.report(MessageKind::Error, fixup.location, message);
+                        0
+                    }
+                };
+            }
+            let mut specifier = Self::specifier_of(target);
+            if matches!(
+                specifier.as_str(),
+                "GOTTPOFF"
+                    | "INDNTPOFF"
+                    | "NTPOFF"
+                    | "GOTNTPOFF"
+                    | "TLSCALL"
+                    | "TLSDESC"
+                    | "TLSGD"
+                    | "TLSLD"
+                    | "TLSLDM"
+                    | "TPOFF"
+                    | "DTPOFF"
+            ) {
+                if let Some(add) = target.add {
+                    context.symbols[add].symbol_type = Some(SymbolType::ThreadLocal);
+                }
+            }
+            let mut pc_relative = pc_relative;
+            let size_class = match kind {
+                FixupKind::None => 0,
+                FixupKind::Data8 => 64,
+                FixupKind::Signed4 | FixupKind::Signed4Relax => {
+                    if specifier.is_empty() && !pc_relative {
+                        33
+                    } else {
+                        32
+                    }
+                }
+                FixupKind::GlobalOffsetTable => {
+                    specifier = "GOT".to_string();
+                    pc_relative = true;
+                    32
+                }
+                FixupKind::Branch4PcRelative => {
+                    specifier = "PLT".to_string();
+                    32
+                }
+                FixupKind::Data2 => 16,
+                FixupKind::Data1 => 8,
+                _ => 32,
+            };
+            let location = fixup.location;
+            if context.triple.is_64_bit() {
+                let check32 = |context: &mut AssemblyContext| {
+                    if size_class != 32 {
+                        context.report(
+                            MessageKind::Error,
+                            location,
+                            "32 bit reloc applied to a field with a different size",
+                        );
+                    }
+                };
+                return match specifier.as_str() {
+                    "" | "ABS8" => match size_class {
+                        0 => RELOCATION_X86_64_NONE,
+                        64 => {
+                            if pc_relative {
+                                RELOCATION_X86_64_PC64
+                            } else {
+                                RELOCATION_X86_64_64
+                            }
+                        }
+                        32 => {
+                            if pc_relative {
+                                RELOCATION_X86_64_PC32
+                            } else {
+                                RELOCATION_X86_64_32
+                            }
+                        }
+                        33 => RELOCATION_X86_64_32S,
+                        16 => {
+                            if pc_relative {
+                                RELOCATION_X86_64_PC16
+                            } else {
+                                RELOCATION_X86_64_16
+                            }
+                        }
+                        _ => {
+                            if pc_relative {
+                                RELOCATION_X86_64_PC8
+                            } else {
+                                RELOCATION_X86_64_8
+                            }
+                        }
+                    },
+                    "GOT" => {
+                        if size_class == 64 {
+                            if pc_relative {
+                                RELOCATION_X86_64_GOTPC64
+                            } else {
+                                RELOCATION_X86_64_GOT64
+                            }
+                        } else if pc_relative {
+                            RELOCATION_X86_64_GOTPC32
+                        } else {
+                            RELOCATION_X86_64_GOT32
+                        }
+                    }
+                    "GOTOFF" => {
+                        if size_class != 64 {
+                            context.report(
+                                MessageKind::Error,
+                                location,
+                                "unsupported relocation type",
+                            );
+                        }
+                        RELOCATION_X86_64_GOTOFF64
+                    }
+                    "TPOFF" => {
+                        if size_class == 64 {
+                            RELOCATION_X86_64_TPOFF64
+                        } else {
+                            RELOCATION_X86_64_TPOFF32
+                        }
+                    }
+                    "DTPOFF" => {
+                        if size_class == 64 {
+                            RELOCATION_X86_64_DTPOFF64
+                        } else {
+                            RELOCATION_X86_64_DTPOFF32
+                        }
+                    }
+                    "SIZE" => {
+                        if size_class == 64 {
+                            RELOCATION_X86_64_SIZE64
+                        } else {
+                            RELOCATION_X86_64_SIZE32
+                        }
+                    }
+                    "TLSCALL" => RELOCATION_X86_64_TLSDESC_CALL,
+                    "TLSDESC" => {
+                        if kind == FixupKind::RipRelative4RelaxRex2 {
+                            RELOCATION_X86_64_CODE_4_GOTPC32_TLSDESC
+                        } else {
+                            RELOCATION_X86_64_GOTPC32_TLSDESC
+                        }
+                    }
+                    "TLSGD" => {
+                        check32(context);
+                        RELOCATION_X86_64_TLSGD
+                    }
+                    "GOTTPOFF" => {
+                        check32(context);
+                        match kind {
+                            FixupKind::RipRelative4MoveLoadRex2
+                            | FixupKind::RipRelative4RelaxRex2 => RELOCATION_X86_64_CODE_4_GOTTPOFF,
+                            FixupKind::RipRelative4RelaxEvex => RELOCATION_X86_64_CODE_6_GOTTPOFF,
+                            _ => RELOCATION_X86_64_GOTTPOFF,
+                        }
+                    }
+                    "TLSLD" => {
+                        check32(context);
+                        RELOCATION_X86_64_TLSLD
+                    }
+                    "PLT" => {
+                        check32(context);
+                        RELOCATION_X86_64_PLT32
+                    }
+                    "GOTPCREL" => {
+                        check32(context);
+                        if !self.relax_relocations {
+                            return RELOCATION_X86_64_GOTPCREL;
+                        }
+                        match kind {
+                            FixupKind::RipRelative4Relax => RELOCATION_X86_64_GOTPCRELX,
+                            FixupKind::RipRelative4RelaxRex | FixupKind::RipRelative4MoveLoad => {
+                                RELOCATION_X86_64_REX_GOTPCRELX
+                            }
+                            FixupKind::RipRelative4RelaxRex2
+                            | FixupKind::RipRelative4MoveLoadRex2 => {
+                                RELOCATION_X86_64_CODE_4_GOTPCRELX
+                            }
+                            _ => RELOCATION_X86_64_GOTPCREL,
+                        }
+                    }
+                    "GOTPCREL_NORELAX" => {
+                        check32(context);
+                        RELOCATION_X86_64_GOTPCREL
+                    }
+                    "PLTOFF" => {
+                        if size_class != 64 {
+                            context.report(
+                                MessageKind::Error,
+                                location,
+                                "64 bit reloc applied to a field with a different size",
+                            );
+                        }
+                        RELOCATION_X86_64_PLTOFF64
+                    }
+                    _ => {
+                        context.report(MessageKind::Error, location, "unsupported relocation type");
+                        RELOCATION_X86_64_NONE
+                    }
+                };
+            }
+            let class = match size_class {
+                0 => 0,
+                64 => {
+                    context.report(MessageKind::Error, location, "unsupported relocation type");
+                    return RELOCATION_386_NONE;
+                }
+                32 | 33 => 32,
+                16 => 16,
+                _ => 8,
+            };
+            let only32 = |result: u32| if class == 32 { Some(result) } else { None };
+            let result = match specifier.as_str() {
+                "" | "ABS8" => Some(match class {
+                    0 => RELOCATION_386_NONE,
+                    32 => {
+                        if pc_relative {
+                            RELOCATION_386_PC32
+                        } else {
+                            RELOCATION_386_32
+                        }
+                    }
+                    16 => {
+                        if pc_relative {
+                            RELOCATION_386_PC16
+                        } else {
+                            RELOCATION_386_16
+                        }
+                    }
+                    _ => {
+                        if pc_relative {
+                            RELOCATION_386_PC8
+                        } else {
+                            RELOCATION_386_8
+                        }
+                    }
+                }),
+                "GOT" => {
+                    if class != 32 {
+                        None
+                    } else if pc_relative {
+                        Some(RELOCATION_386_GOTPC)
+                    } else if !self.relax_relocations {
+                        Some(RELOCATION_386_GOT32)
+                    } else if kind == FixupKind::Signed4Relax {
+                        Some(RELOCATION_386_GOT32X)
+                    } else {
+                        Some(RELOCATION_386_GOT32)
+                    }
+                }
+                "GOTOFF" => only32(RELOCATION_386_GOTOFF),
+                "TLSCALL" => Some(RELOCATION_386_TLS_DESC_CALL),
+                "TLSDESC" => Some(RELOCATION_386_TLS_GOTDESC),
+                "TPOFF" => only32(RELOCATION_386_TLS_LE_32),
+                "DTPOFF" => only32(RELOCATION_386_TLS_LDO_32),
+                "TLSGD" => only32(RELOCATION_386_TLS_GD),
+                "GOTTPOFF" => only32(RELOCATION_386_TLS_IE_32),
+                "PLT" => only32(RELOCATION_386_PLT32),
+                "INDNTPOFF" => only32(RELOCATION_386_TLS_IE),
+                "NTPOFF" => only32(RELOCATION_386_TLS_LE),
+                "GOTNTPOFF" => only32(RELOCATION_386_TLS_GOTIE),
+                "TLSLDM" => only32(RELOCATION_386_TLS_LDM),
+                _ => None,
+            };
+            match result {
+                Some(result) => result,
+                None => {
+                    context.report(MessageKind::Error, location, "unsupported relocation type");
+                    RELOCATION_386_NONE
+                }
+            }
+        }
+
+        fn record_relocation(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            fixup: &PlacedFixup,
+            target: &RelocatableValue,
+            value: u64,
+        ) -> u64 {
+            let _ = value;
+            let section = self.fragments[fragment].section;
+            let mut add = target.add;
+            let mut absolute_literal = false;
+            if let (None, FixupKind::Literal(_), Expression::Symbol { name, .. }) =
+                (add, fixup.fixup.kind, &fixup.fixup.expression)
+            {
+                if let Some(symbol) = context.lookup(name) {
+                    add = Some(symbol);
+                    absolute_literal = true;
+                }
+            }
+            if context.triple.isa == Isa::Armv8 {
+                if let (Some(symbol), Some(specifier)) = (add, target.specifier.as_deref()) {
+                    if ["dtprel", "gottprel", "tprel", "tlsdesc"]
+                        .iter()
+                        .any(|prefix| specifier.starts_with(prefix))
+                    {
+                        context.symbols[symbol].symbol_type = Some(SymbolType::ThreadLocal);
+                    }
+                }
+            }
+            let mut pc_relative = fixup.fixup.pc_relative;
+            let fixup_offset = self.fragments[fragment].offset + fixup.fixup.offset as u64;
+            let mut addend = if absolute_literal { 0 } else { target.constant };
+            if let Some(subtract) = target.subtract {
+                if self.place_of(context, subtract) == Place::Undefined {
+                    let name = context.symbols[subtract].name.clone();
+                    context.report(
+                        MessageKind::Error,
+                        fixup.location,
+                        &format!(
+                            "symbol '{name}' can not be undefined in a subtraction expression"
+                        ),
+                    );
+                    return 0;
+                }
+                if self.symbol_section(context, subtract) != Some(section) {
+                    context.report(
+                        MessageKind::Error,
+                        fixup.location,
+                        "Cannot represent a difference across sections",
+                    );
+                    return 0;
+                }
+                pc_relative = true;
+                let offset = self.symbol_value(context, subtract).unwrap_or(0);
+                addend = addend.wrapping_add(fixup_offset as i64 - offset as i64);
+            }
+            let relocation_type = match fixup.fixup.kind {
+                FixupKind::Literal(number) => number,
+                _ => self.relocation_type(context, fixup, target, pc_relative),
+            };
+            let literal = matches!(fixup.fixup.kind, FixupKind::Literal(_));
+            if let Some(symbol) = add {
+                let local = self.binding_of(context, symbol) == BINDING_LOCAL
+                    && self.place_of(context, symbol) != Place::Undefined
+                    && !literal;
+                if local
+                    && self.use_section_symbol(context, symbol, target, addend, relocation_type)
+                {
+                    addend =
+                        addend.wrapping_add(self.symbol_value(context, symbol).unwrap_or(0) as i64);
+                    if let Some(owner) = self.symbol_section(context, symbol) {
+                        add = Some(self.sections[&owner].begin_symbol);
+                    }
+                } else if let Some(renamed) = self.renames.get(&symbol) {
+                    add = Some(*renamed);
+                }
+            }
+            if let Some(symbol) = add {
+                context.symbols[symbol].used_in_relocation = true;
+            }
+            let uses_addend = self.uses_addend(context)
+                && context.sections[section].section_type != ELF_SECTION_LLVM_CALL_GRAPH_PROFILE;
+            self.relocations
+                .entry(section)
+                .or_default()
+                .push(RelocationEntry {
+                    offset: fixup_offset,
+                    symbol: add,
+                    relocation_type,
+                    addend,
+                });
+            if uses_addend {
+                0
+            } else {
+                addend as u64
+            }
+        }
+
+        fn use_section_symbol(
+            &self,
+            context: &AssemblyContext,
+            symbol: usize,
+            target: &RelocatableValue,
+            addend: i64,
+            relocation_type: u32,
+        ) -> bool {
+            if self.type_of(context, symbol) == TYPE_GNU_IFUNC {
+                return false;
+            }
+            if let Some(section) = self.symbol_section(context, symbol) {
+                let flags = context.sections[section].flags;
+                if flags & ELF_FLAG_MERGE != 0 {
+                    if addend != 0 {
+                        return false;
+                    }
+                    if !context.triple.is_64_bit() && relocation_type == RELOCATION_386_GOTOFF {
+                        return false;
+                    }
+                }
+                if flags & ELF_FLAG_THREAD_LOCAL != 0 {
+                    return false;
+                }
+            }
+            if self.target.isa == Isa::Armv7 {
+                if self.is_thumb_function(context, symbol) {
+                    return false;
+                }
+                return relocation_type == 2 || relocation_type == 42;
+            }
+            !matches!(
+                Self::specifier_of(target).as_str(),
+                "GOT" | "PLT" | "GOTPCREL" | "GOTPCREL_NORELAX"
+            )
+        }
+
+        fn post_layout_binding(&mut self, context: &mut AssemblyContext) {
+            for version in std::mem::take(&mut self.symbol_versions) {
+                let symbol = version.symbol;
+                let Some(at) = version.name.find('@') else {
+                    continue;
+                };
+                let prefix = &version.name[..at];
+                let rest = &version.name[at..];
+                let undefined = self.place_of(context, symbol) == Place::Undefined;
+                let tail = if rest.starts_with("@@@") {
+                    &rest[if undefined { 2 } else { 1 }..]
+                } else {
+                    rest
+                };
+                let alias_name = format!("{prefix}{tail}");
+                let alias = context.symbol(&alias_name);
+                self.register_symbol(context, alias);
+                let source_name = context.symbols[symbol].name.clone();
+                context.symbols[alias].value = Some(Expression::symbol(&source_name));
+                context.symbols[alias].binding = context.symbols[symbol].binding;
+                if self.unique_bindings.contains(&symbol) {
+                    self.unique_bindings.insert(alias);
+                }
+                context.symbols[alias].visibility = context.symbols[symbol].visibility;
+                context.symbols[alias].other = context.symbols[symbol].other;
+                if !undefined && version.keep_original {
+                    continue;
+                }
+                if undefined && rest.starts_with("@@") && !rest.starts_with("@@@") {
+                    context.report(
+                        MessageKind::Error,
+                        version.location,
+                        &format!("default version symbol {} must be defined", version.name),
+                    );
+                    continue;
+                }
+                if let Some(existing) = self.renames.get(&symbol) {
+                    if *existing != alias {
+                        context.report(
+                            MessageKind::Error,
+                            version.location,
+                            &format!("multiple versions for {source_name}"),
+                        );
+                        continue;
+                    }
+                }
+                self.renames.insert(symbol, alias);
+            }
+            if let Some(symbols) = self.address_significance.clone() {
+                let mut updated = Vec::new();
+                for symbol in symbols {
+                    let mut symbol = self.renames.get(&symbol).copied().unwrap_or(symbol);
+                    if let Some(section) = self.symbol_section(context, symbol) {
+                        if context.symbols[symbol].name.starts_with(".L") {
+                            symbol = self.sections[&section].begin_symbol;
+                        }
+                    }
+                    context.symbols[symbol].used_in_relocation = true;
+                    updated.push(symbol);
+                }
+                self.address_significance = Some(updated);
+            }
+            for alias in self.weak_references.clone() {
+                if !context.symbols[alias].registered {
+                    continue;
+                }
+                if let Some(Expression::Symbol {
+                    name,
+                    specifier: None,
+                }) = context.symbols[alias].value.clone()
+                {
+                    let target = match context.lookup(&name) {
+                        Some(target) => target,
+                        None => context.symbol(&name),
+                    };
+                    if self.register_symbol(context, target) {
+                        context.symbols[target].binding = Some(SymbolBinding::Weak);
+                    }
+                }
+            }
+        }
+
+        fn apply_relocation_directives(&mut self, context: &mut AssemblyContext) {
+            let mut groups: BTreeMap<usize, Vec<PlacedFixup>> = BTreeMap::new();
+            for directive in std::mem::take(&mut self.relocation_directives) {
+                let Some(value) =
+                    context.evaluate_relocatable(&directive.offset, Some(&*self), true)
+                else {
+                    context.report(
+                        MessageKind::Error,
+                        Some(directive.location),
+                        ".reloc offset is not relocatable",
+                    );
+                    continue;
+                };
+                let fragment = value.add.and_then(|add| match self.place_of(context, add) {
+                    Place::Fragment(fragment) => Some(fragment),
+                    _ => None,
+                });
+                let (Some(fragment), None) = (fragment, value.subtract) else {
+                    context.report(
+                        MessageKind::Error,
+                        Some(directive.location),
+                        ".reloc offset is not relative to a section",
+                    );
+                    continue;
+                };
+                let add = value.add.expect("a symbol");
+                let offset = (context.symbols[add].offset as i64 + value.constant) as usize;
+                let fixup = PlacedFixup {
+                    fixup: Fixup {
+                        offset,
+                        expression: directive.value.clone(),
+                        kind: FixupKind::Literal(directive.relocation_type),
+                        pc_relative: false,
+                    },
+                    location: Some(directive.location),
+                };
+                let group = groups.entry(fragment).or_default();
+                if group
+                    .first()
+                    .is_some_and(|first| first.fixup.offset < offset)
+                {
+                    let drained = std::mem::take(group);
+                    Self::insert_relocation_fixups(&mut self.fragments[fragment].fixups, drained);
+                }
+                groups.entry(fragment).or_default().push(fixup);
+            }
+            for (fragment, group) in groups {
+                Self::insert_relocation_fixups(&mut self.fragments[fragment].fixups, group);
+            }
+        }
+
+        fn insert_relocation_fixups(fixups: &mut Vec<PlacedFixup>, group: Vec<PlacedFixup>) {
+            if group.is_empty() {
+                return;
+            }
+            let offset = group[0].fixup.offset;
+            let position = fixups
+                .iter()
+                .position(|fixup| fixup.fixup.offset > offset)
+                .unwrap_or(fixups.len());
+            for (shift, fixup) in group.into_iter().enumerate() {
+                fixups.insert(position + shift, fixup);
+            }
+        }
+
+        fn write_nops(
+            &self,
+            out: &mut Vec<u8>,
+            count: u64,
+            offset: u64,
+            maximum: u64,
+            mode: Mode,
+            arm: (bool, bool),
+        ) {
+            let (thumb, arm_nop) = arm;
+            if self.target.isa == Isa::Armv7 {
+                if thumb {
+                    let encoding: u16 = if arm_nop { 0xbf00 } else { 0x46c0 };
+                    for _ in 0..count / 2 {
+                        out.extend_from_slice(&encoding.to_le_bytes());
+                    }
+                    if count & 1 == 1 {
+                        out.push(0);
+                    }
+                } else {
+                    let encoding: u32 = if arm_nop { 0xe320f000 } else { 0xe1a00000 };
+                    for _ in 0..count / 4 {
+                        out.extend_from_slice(&encoding.to_le_bytes());
+                    }
+                    match count % 4 {
+                        1 => out.push(0),
+                        2 => out.extend_from_slice(&[0, 0]),
+                        3 => out.extend_from_slice(&[0, 0, 0xa0]),
+                        _ => {}
+                    }
+                }
+                return;
+            }
+            if self.target.isa == Isa::Armv8 {
+                out.extend(std::iter::repeat_n(0u8, (count % 4) as usize));
+                for _ in 0..count / 4 {
+                    out.extend_from_slice(&0xd503201fu32.to_le_bytes());
+                }
+                return;
+            }
+            let mut remaining = count;
+            let mut offset = offset;
+            while remaining > 0 {
+                let mut size = remaining.min(maximum.max(1));
+                if self.bundle_alignment != 0 {
+                    let bundle = self.bundle_alignment;
+                    size = size.min(bundle - (offset & (bundle - 1)));
+                }
+                write_nop_data(out, size, mode, self.nops);
+                remaining -= size;
+                offset += size;
+            }
+        }
+
+        fn write_fragment(
+            &mut self,
+            context: &mut AssemblyContext,
+            fragment: usize,
+            out: &mut Vec<u8>,
+        ) {
+            let size = self.compute_fragment_size(context, fragment);
+            let start = out.len();
+            let held = self.fragments[fragment].clone();
+            match &held.tail {
+                Tail::Data | Tail::Relaxable(_) | Tail::Leb { .. } | Tail::DwarfFrame { .. } => {
+                    out.extend_from_slice(&held.fixed);
+                    out.extend_from_slice(&held.variable);
+                }
+                Tail::Align {
+                    fill,
+                    fill_length,
+                    nops,
+                    ..
+                } => {
+                    out.extend_from_slice(&held.fixed);
+                    let length = (*fill_length).max(1) as u64;
+                    let count = (size - held.fixed.len() as u64) / length;
+                    if *nops {
+                        let maximum = maximum_nop_size(self.nops, held.mode);
+                        let _ = count;
+                        self.write_nops(
+                            out,
+                            size - held.fixed.len() as u64,
+                            held.offset + held.fixed.len() as u64,
+                            maximum,
+                            held.mode,
+                            (held.thumb, held.arm_nop),
+                        );
+                    } else {
+                        for _ in 0..count {
+                            let bytes = (*fill as u64).to_le_bytes();
+                            out.extend_from_slice(&bytes[..length as usize]);
+                        }
+                    }
+                }
+                Tail::Fill {
+                    value, value_size, ..
+                } => {
+                    out.extend_from_slice(&held.fixed);
+                    let fill_size = size - held.fixed.len() as u64;
+                    let value_size = (*value_size).max(1) as usize;
+                    let mut data = [0u8; 16];
+                    for (index, slot) in data.iter_mut().enumerate().take(value_size) {
+                        *slot = (value >> (index * 8)) as u8;
+                    }
+                    for index in value_size..16 {
+                        data[index] = data[index - value_size];
+                    }
+                    let per_chunk = 16 / value_size;
+                    let chunk = value_size * per_chunk;
+                    for _ in 0..fill_size / chunk as u64 {
+                        out.extend_from_slice(&data[..chunk]);
+                    }
+                    let trailing = (fill_size % chunk as u64) as usize;
+                    out.extend_from_slice(&data[..trailing]);
+                }
+                Tail::Nops {
+                    count,
+                    control,
+                    location,
+                } => {
+                    let maximum = maximum_nop_size(self.nops, held.mode) as i64;
+                    let mut control = *control;
+                    if control > maximum {
+                        context.report(
+                            MessageKind::Error,
+                            *location,
+                            &format!(
+                                "illegal NOP size {control}. (expected within [0, {maximum}])"
+                            ),
+                        );
+                        control = maximum;
+                    }
+                    if control == 0 {
+                        control = maximum;
+                    }
+                    self.write_nops(
+                        out,
+                        *count as u64,
+                        held.offset,
+                        control as u64,
+                        held.mode,
+                        (held.thumb, held.arm_nop),
+                    );
+                }
+                Tail::BoundaryAlign { .. } => {
+                    self.write_nops(
+                        out,
+                        size,
+                        held.offset,
+                        size,
+                        held.mode,
+                        (held.thumb, held.arm_nop),
+                    );
+                }
+                Tail::Org { value, .. } => {
+                    out.extend(std::iter::repeat_n(*value, size as usize));
+                }
+            }
+            let written = (out.len() - start) as u64;
+            if written < size {
+                out.extend(std::iter::repeat_n(0u8, (size - written) as usize));
+            } else if written > size {
+                out.truncate(start + size as usize);
+            }
+        }
+
+        fn section_size(&mut self, context: &mut AssemblyContext, section: usize) -> u64 {
+            let fragments = self.sections[&section].fragments.clone();
+            let Some(&last) = fragments.last() else {
+                return 0;
+            };
+            self.fragments[last].offset + self.compute_fragment_size(context, last)
+        }
+
+        fn write_section_data(&mut self, context: &mut AssemblyContext, section: usize) -> Vec<u8> {
+            let fragments = self.sections[&section].fragments.clone();
+            if self.section_is_virtual(context, section) {
+                let name = context.sections[section].name.clone();
+                for fragment in &fragments {
+                    let held = &self.fragments[*fragment];
+                    let non_zero = match &held.tail {
+                        Tail::Data | Tail::Relaxable(_) => {
+                            held.fixed.iter().any(|byte| *byte != 0)
+                                || held.variable.iter().any(|byte| *byte != 0)
+                        }
+                        Tail::Fill { value, .. } => *value != 0,
+                        Tail::Org { value, .. } => *value != 0,
+                        Tail::Align { .. } => false,
+                        _ => false,
+                    };
+                    if non_zero {
+                        context.report(
+                            MessageKind::Error,
+                            None,
+                            &format!("BSS section '{name}' cannot have non-zero bytes"),
+                        );
+                        break;
+                    }
+                    if !held.fixups.is_empty() || !held.variable_fixups.is_empty() {
+                        context.report(
+                            MessageKind::Error,
+                            None,
+                            &format!("BSS section '{name}' cannot have fixups"),
+                        );
+                        break;
+                    }
+                }
+                return Vec::new();
+            }
+            let mut out = Vec::new();
+            for fragment in fragments {
+                self.write_fragment(context, fragment, &mut out);
+            }
+            self.report_pending(context);
+            out
+        }
+
+        fn in_symbol_table(&self, context: &AssemblyContext, symbol: usize) -> bool {
+            let held = &context.symbols[symbol];
+            if held.used_in_relocation || self.signatures.contains(&symbol) {
+                return true;
+            }
+            if self.renames.contains_key(&symbol) {
+                return false;
+            }
+            if held.is_variable() {
+                if held.weak_reference {
+                    return false;
+                }
+                if self.place_of(context, symbol) == Place::Undefined {
+                    return false;
+                }
+            }
+            if held.temporary {
+                return false;
+            }
+            self.type_of(context, symbol) != TYPE_SECTION
+        }
+
+        fn base_symbol(&self, context: &mut AssemblyContext, symbol: usize) -> Option<usize> {
+            let held = &context.symbols[symbol];
+            let Some(value) = held.value.clone() else {
+                return Some(symbol);
+            };
+            let at = held.value_location;
+            let own_name = held.name.clone();
+            let Some(evaluated) = context.evaluate_relocatable(&value, Some(self), true) else {
+                let mut mentioned = Vec::new();
+                expression_symbols(&value, &mut mentioned);
+                if mentioned.contains(&own_name) {
+                    context.report(
+                        MessageKind::Error,
+                        at,
+                        &format!("cyclic dependency detected for symbol '{own_name}'"),
+                    );
+                }
+                context.report(MessageKind::Error, at, "expression could not be evaluated");
+                return None;
+            };
+            if let Some(subtract) = evaluated.subtract {
+                let name = context.symbols[subtract].name.clone();
+                context.report(
+                    MessageKind::Error,
+                    at,
+                    &format!("symbol '{name}' could not be evaluated in a subtraction expression"),
+                );
+                return None;
+            }
+            let add = evaluated.add?;
+            if context.symbols[add].common.is_some() {
+                let name = context.symbols[add].name.clone();
+                context.report(
+                    MessageKind::Error,
+                    at,
+                    &format!("Common symbol '{name}' cannot be used in assignment expr"),
+                );
+                return None;
+            }
+            Some(add)
+        }
+
+        fn is_indirect_function(&self, context: &AssemblyContext, symbol: usize) -> bool {
+            let mut current = symbol;
+            let mut seen = BTreeSet::new();
+            while self.type_of(context, current) != TYPE_GNU_IFUNC {
+                if !seen.insert(current) {
+                    return false;
+                }
+                let held = &context.symbols[current];
+                let Some(Expression::Symbol {
+                    name,
+                    specifier: None,
+                }) = &held.value
+                else {
+                    return false;
+                };
+                if merge_type_for_set(self.type_of(context, current), TYPE_GNU_IFUNC)
+                    != TYPE_GNU_IFUNC
+                {
+                    return false;
+                }
+                let Some(next) = context.lookup(name) else {
+                    return false;
+                };
+                current = next;
+            }
+            true
+        }
+
+        fn write_object(&mut self, context: &mut AssemblyContext) -> Vec<u8> {
+            let sixty_four = self.is_sixty_four(context);
+            let mut out = ElfOutput {
+                bytes: Vec::new(),
+                sixty_four,
+            };
+            let mut strings = StringTableBuilder::new();
+            let mut table: Vec<SectionHeader> = Vec::new();
+            let strtab = add_section(
+                &mut table,
+                &mut strings,
+                SectionHeader::named(".strtab", ELF_SECTION_STRING_TABLE, 0),
+            );
+            out.bytes.extend_from_slice(&[0x7f, b'E', b'L', b'F']);
+            out.u8(if sixty_four { 2 } else { 1 });
+            out.u8(1);
+            out.u8(1);
+            let abi = if context.triple.system.starts_with("freebsd") {
+                9
+            } else if self.fdpic && context.triple.isa == Isa::Armv7 {
+                65
+            } else if self.seen_gnu_abi {
+                3
+            } else {
+                0
+            };
+            out.u8(abi);
+            out.u8(0);
+            out.bytes.extend_from_slice(&[0u8; 7]);
+            out.u16(1);
+            out.u16(self.machine(context));
+            out.u32(1);
+            out.word(0);
+            out.word(0);
+            out.word(0);
+            out.u32(if context.triple.isa == Isa::Armv7 {
+                0x0500_0000
+            } else {
+                0
+            });
+            out.u16(if sixty_four { 64 } else { 52 });
+            out.u16(0);
+            out.u16(0);
+            out.u16(if sixty_four { 64 } else { 40 });
+            out.u16(0);
+            out.u16(strtab as u16);
+            let mut group_index: BTreeMap<usize, usize> = BTreeMap::new();
+            let mut groups: Vec<(usize, Vec<usize>, usize)> = Vec::new();
+            let mut relocation_sections: Vec<(usize, usize)> = Vec::new();
+            let mut section_ordinal: BTreeMap<usize, usize> = BTreeMap::new();
+            let order = self.section_order.clone();
+            for section in &order {
+                let alignment = context.sections[*section].alignment.max(1);
+                let start = out.align(alignment);
+                let data = self.write_section_data(context, *section);
+                out.bytes.extend_from_slice(&data);
+                let end = out.bytes.len() as u64;
+                let has_relocations = self
+                    .relocations
+                    .get(section)
+                    .is_some_and(|list| !list.is_empty());
+                let signature = context.sections[*section]
+                    .group
+                    .clone()
+                    .map(|group| context.symbol(&group));
+                let mut group_slot = None;
+                if let Some(symbol) = signature {
+                    let slot = match group_index.get(&symbol) {
+                        Some(slot) => *slot,
+                        None => {
+                            let mut header = SectionHeader::named(".group", ELF_SECTION_GROUP, 0);
+                            header.alignment = 4;
+                            header.entry_size = 4;
+                            let ordinal = add_section(&mut table, &mut strings, header);
+                            group_index.insert(symbol, groups.len());
+                            groups.push((ordinal, Vec::new(), symbol));
+                            groups.len() - 1
+                        }
+                    };
+                    group_slot = Some(slot);
+                }
+                let held = &context.sections[*section];
+                let mut header = SectionHeader::named(&held.name, held.section_type, held.flags);
+                header.entry_size = held.entry_size;
+                header.alignment = alignment;
+                header.offset = start;
+                header.size = if held.section_type == ELF_SECTION_NO_BITS {
+                    self.section_size(context, *section)
+                } else {
+                    end - start
+                };
+                header.source = Some(*section);
+                let ordinal = add_section(&mut table, &mut strings, header);
+                section_ordinal.insert(*section, ordinal);
+                self.sections.get_mut(section).expect("the section").ordinal = ordinal;
+                let mut relocation_ordinal = None;
+                if has_relocations {
+                    let uses_addend = self.uses_addend(context)
+                        && context.sections[*section].section_type
+                            != ELF_SECTION_LLVM_CALL_GRAPH_PROFILE;
+                    let name = format!(
+                        "{}{}",
+                        if uses_addend { ".rela" } else { ".rel" },
+                        context.sections[*section].name
+                    );
+                    let flags = if context.sections[*section].flags & ELF_FLAG_GROUP != 0 {
+                        ELF_FLAG_GROUP
+                    } else {
+                        ELF_FLAG_INFORMATION_LINK
+                    };
+                    let mut header = SectionHeader::named(
+                        &name,
+                        if uses_addend {
+                            ELF_SECTION_RELOCATION_ADDENDS
+                        } else {
+                            ELF_SECTION_RELOCATION
+                        },
+                        flags,
+                    );
+                    header.entry_size = match (uses_addend, sixty_four) {
+                        (true, true) => 24,
+                        (true, false) => 12,
+                        (false, true) => 16,
+                        (false, false) => 8,
+                    };
+                    header.alignment = if sixty_four { 8 } else { 4 };
+                    header.info_section = Some(ordinal);
+                    header.relocation_of = Some(*section);
+                    let index = add_section(&mut table, &mut strings, header);
+                    relocation_sections.push((index, *section));
+                    relocation_ordinal = Some(index);
+                }
+                if let Some(slot) = group_slot {
+                    groups[slot].1.push(ordinal);
+                    if let Some(relocation) = relocation_ordinal {
+                        groups[slot].1.push(relocation);
+                    }
+                }
+            }
+            for (ordinal, members, _) in &groups {
+                let comdat = members
+                    .first()
+                    .and_then(|member| table[*member - 1].source)
+                    .is_some_and(|section| context.sections[section].comdat);
+                let start = out.align(4);
+                out.u32(if comdat { GROUP_COMDAT } else { 0 });
+                for member in members {
+                    out.u32(*member as u32);
+                }
+                let end = out.bytes.len() as u64;
+                table[*ordinal - 1].offset = start;
+                table[*ordinal - 1].size = end - start;
+            }
+            let address_ordinal = if self.address_significance.is_some() {
+                Some(add_section(
+                    &mut table,
+                    &mut strings,
+                    SectionHeader::named(
+                        ".llvm_addrsig",
+                        ELF_SECTION_LLVM_ADDRESS_SIGNIFICANCE,
+                        ELF_FLAG_EXCLUDE,
+                    ),
+                ))
+            } else {
+                None
+            };
+            let symbol_table = self.write_symbol_table(
+                context,
+                &mut out,
+                &mut table,
+                &mut strings,
+                &section_ordinal,
+                &group_index,
+                &groups,
+            );
+            for (index, section) in &relocation_sections {
+                let alignment = table[*index - 1].alignment;
+                let start = out.align(alignment);
+                let uses_addend = table[*index - 1].section_type == ELF_SECTION_RELOCATION_ADDENDS;
+                let entries = self.relocations.get(section).cloned().unwrap_or_default();
+                for entry in entries {
+                    let symbol_index = entry
+                        .symbol
+                        .and_then(|symbol| self.symbol_indices.get(&symbol).copied())
+                        .unwrap_or(0);
+                    if sixty_four {
+                        out.u64(entry.offset);
+                        out.u64(((symbol_index as u64) << 32) | entry.relocation_type as u64);
+                        if uses_addend {
+                            out.u64(entry.addend as u64);
+                        }
+                    } else {
+                        out.u32(entry.offset as u32);
+                        out.u32((symbol_index << 8) | (entry.relocation_type & 0xff));
+                        if uses_addend {
+                            out.u32(entry.addend as u32);
+                        }
+                    }
+                }
+                let end = out.bytes.len() as u64;
+                table[*index - 1].offset = start;
+                table[*index - 1].size = end - start;
+                table[*index - 1].link = symbol_table as u32;
+            }
+            if let Some(ordinal) = address_ordinal {
+                let start = out.bytes.len() as u64;
+                for symbol in self.address_significance.clone().unwrap_or_default() {
+                    if let Some(index) = self.symbol_indices.get(&symbol) {
+                        if *index != 0 {
+                            out.bytes
+                                .extend_from_slice(&encode_unsigned_leb128(*index as u64, 0));
+                        }
+                    }
+                }
+                let end = out.bytes.len() as u64;
+                table[ordinal - 1].offset = start;
+                table[ordinal - 1].size = end - start;
+                table[ordinal - 1].link = symbol_table as u32;
+            }
+            let start = out.bytes.len() as u64;
+            out.bytes.extend_from_slice(&strings.bytes());
+            let end = out.bytes.len() as u64;
+            table[strtab - 1].offset = start;
+            table[strtab - 1].size = end - start;
+            for (ordinal, _, symbol) in &groups {
+                table[*ordinal - 1].link = symbol_table as u32;
+                table[*ordinal - 1].info = self.symbol_indices.get(symbol).copied().unwrap_or(0);
+            }
+            let header_offset = out.align(if sixty_four { 8 } else { 4 });
+            let count = table.len() + 1;
+            for _ in 0..if sixty_four { 64 } else { 40 } {
+                out.u8(0);
+            }
+            if count >= SECTION_INDEX_RESERVED as usize {
+                let size_offset = header_offset as usize + if sixty_four { 32 } else { 20 };
+                let bytes = (count as u64).to_le_bytes();
+                let width = if sixty_four { 8 } else { 4 };
+                out.bytes[size_offset..size_offset + width].copy_from_slice(&bytes[..width]);
+            }
+            for header in &table {
+                let mut link = header.link;
+                let mut info = header.info;
+                if let Some(target) = header.info_section {
+                    info = target as u32;
+                }
+                if let Some(section) = header.source {
+                    if header.flags & ELF_FLAG_LINK_ORDER != 0 {
+                        if let Some(owner) = context.sections[section].linked_section {
+                            link = section_ordinal.get(&owner).copied().unwrap_or(0) as u32;
+                        } else if let Some(linked) = context.sections[section].linked_symbol.clone()
+                        {
+                            if let Some(symbol) = context.lookup(&linked) {
+                                if let Some(owner) = self.symbol_section(context, symbol) {
+                                    link = section_ordinal.get(&owner).copied().unwrap_or(0) as u32;
+                                }
+                            }
+                        }
+                    }
+                    if header.section_type == ELF_SECTION_LLVM_CALL_GRAPH_PROFILE {
+                        link = symbol_table as u32;
+                    }
+                }
+                let flags = header.flags;
+                out.u32(strings.offset(header.name.as_bytes()));
+                out.u32(header.section_type);
+                out.word(flags);
+                out.word(0);
+                out.word(header.offset);
+                out.word(header.size);
+                out.u32(link);
+                out.u32(info);
+                out.word(header.alignment);
+                out.word(header.entry_size);
+            }
+            let shoff_at = if sixty_four { 0x28 } else { 0x20 };
+            if sixty_four {
+                out.bytes[shoff_at..shoff_at + 8].copy_from_slice(&header_offset.to_le_bytes());
+            } else {
+                out.bytes[shoff_at..shoff_at + 4]
+                    .copy_from_slice(&(header_offset as u32).to_le_bytes());
+            }
+            let shnum_at = if sixty_four { 0x3c } else { 0x30 };
+            let number = if count >= SECTION_INDEX_RESERVED as usize {
+                0u16
+            } else {
+                count as u16
+            };
+            out.bytes[shnum_at..shnum_at + 2].copy_from_slice(&number.to_le_bytes());
+            out.bytes
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn write_symbol_table(
+            &mut self,
+            context: &mut AssemblyContext,
+            out: &mut ElfOutput,
+            table: &mut Vec<SectionHeader>,
+            strings: &mut StringTableBuilder,
+            section_ordinal: &BTreeMap<usize, usize>,
+            group_index: &BTreeMap<usize, usize>,
+            groups: &[(usize, Vec<usize>, usize)],
+        ) -> usize {
+            let sixty_four = out.sixty_four;
+            let mut header = SectionHeader::named(".symtab", ELF_SECTION_SYMBOL_TABLE, 0);
+            header.entry_size = if sixty_four { 24 } else { 16 };
+            header.alignment = if sixty_four { 8 } else { 4 };
+            let symtab = add_section(table, strings, header);
+            let start = out.align(if sixty_four { 8 } else { 4 });
+            let mut locals = Vec::new();
+            let mut externals = Vec::new();
+            let mut large_index = false;
+            for name in self
+                .file_names
+                .iter()
+                .map(|(name, _)| name.clone())
+                .collect::<Vec<_>>()
+            {
+                strings.add(name.as_bytes());
+            }
+            for (order, symbol) in self.symbols_in_order.clone().into_iter().enumerate() {
+                if !self.in_symbol_table(context, symbol) {
+                    continue;
+                }
+                let held = context.symbols[symbol].clone();
+                let place = self.place_of(context, symbol);
+                if held.temporary && place == Place::Undefined {
+                    context.report(
+                        MessageKind::Error,
+                        None,
+                        &format!("Undefined temporary symbol {}", held.name),
+                    );
+                    continue;
+                }
+                let local = self.binding_of(context, symbol) == BINDING_LOCAL;
+                let section_index = if held.common.is_some() {
+                    SECTION_INDEX_COMMON
+                } else if place == Place::Absolute {
+                    SECTION_INDEX_ABSOLUTE
+                } else if place == Place::Undefined {
+                    if self.signatures.contains(&symbol) && !held.used_in_relocation {
+                        let index = group_index
+                            .get(&symbol)
+                            .map(|slot| groups[*slot].0 as u32)
+                            .unwrap_or(0);
+                        if index >= SECTION_INDEX_RESERVED {
+                            large_index = true;
+                        }
+                        index
+                    } else {
+                        0
+                    }
+                } else {
+                    let owner = self.symbol_section(context, symbol).unwrap_or(0);
+                    let index = section_ordinal.get(&owner).copied().unwrap_or(0) as u32;
+                    if index >= SECTION_INDEX_RESERVED {
+                        large_index = true;
+                    }
+                    index
+                };
+                let name = if held.name.is_empty() {
+                    ".L0 ".to_string()
+                } else {
+                    held.name.clone()
+                };
+                let named = self.type_of(context, symbol) != TYPE_SECTION;
+                if named {
+                    strings.add(name.as_bytes());
+                }
+                let record = (
+                    symbol,
+                    section_index,
+                    order,
+                    if named { Some(name) } else { None },
+                );
+                if local {
+                    locals.push(record);
+                } else {
+                    externals.push(record);
+                }
+            }
+            let mut shndx_header = None;
+            if large_index {
+                let mut header =
+                    SectionHeader::named(".symtab_shndx", SECTION_SYMBOL_TABLE_INDICES, 0);
+                header.entry_size = 4;
+                header.alignment = 4;
+                shndx_header = Some(add_section(table, strings, header));
+            }
+            strings.finalize();
+            let mut rows: Vec<(u32, u8, u8, u64, u64, u32, bool)> = vec![(0, 0, 0, 0, 0, 0, false)];
+            let mut file_order: Vec<(String, usize)> = self.file_names.clone();
+            if let Some(first) = file_order.first_mut() {
+                first.1 = 0;
+            }
+            let mut next_index = 1u32;
+            let mut file_cursor = 0usize;
+            let file_row = |strings: &StringTableBuilder, name: &str| {
+                (
+                    strings.offset(name.as_bytes()),
+                    TYPE_FILE,
+                    0u8,
+                    0u64,
+                    0u64,
+                    SECTION_INDEX_ABSOLUTE,
+                    true,
+                )
+            };
+            for (symbol, section_index, order, name) in &locals {
+                while file_cursor < file_order.len() && file_order[file_cursor].1 <= *order {
+                    rows.push(file_row(strings, &file_order[file_cursor].0));
+                    next_index += 1;
+                    file_cursor += 1;
+                }
+                self.symbol_indices.insert(*symbol, next_index);
+                next_index += 1;
+                let row =
+                    self.symbol_row(context, strings, *symbol, name.as_deref(), *section_index);
+                rows.push(row);
+            }
+            while file_cursor < file_order.len() {
+                rows.push(file_row(strings, &file_order[file_cursor].0));
+                next_index += 1;
+                file_cursor += 1;
+            }
+            let last_local = next_index;
+            for (symbol, section_index, _, name) in &externals {
+                self.symbol_indices.insert(*symbol, next_index);
+                next_index += 1;
+                let row =
+                    self.symbol_row(context, strings, *symbol, name.as_deref(), *section_index);
+                rows.push(row);
+            }
+            let any_large = rows
+                .iter()
+                .any(|row| row.5 >= SECTION_INDEX_RESERVED && !row.6);
+            let mut extended: Vec<u32> = Vec::new();
+            for (name, info, other, value, size, shndx, reserved) in rows {
+                let large = shndx >= SECTION_INDEX_RESERVED && !reserved;
+                if any_large {
+                    extended.push(if large { shndx } else { 0 });
+                }
+                let index = if large {
+                    SECTION_INDEX_EXTENDED as u16
+                } else {
+                    shndx as u16
+                };
+                if sixty_four {
+                    out.u32(name);
+                    out.u8(info);
+                    out.u8(other);
+                    out.u16(index);
+                    out.u64(value);
+                    out.u64(size);
+                } else {
+                    out.u32(name);
+                    out.u32(value as u32);
+                    out.u32(size as u32);
+                    out.u8(info);
+                    out.u8(other);
+                    out.u16(index);
+                }
+            }
+            let end = out.bytes.len() as u64;
+            table[symtab - 1].offset = start;
+            table[symtab - 1].size = end - start;
+            table[symtab - 1].info = last_local;
+            table[symtab - 1].link = 1;
+            if let Some(shndx) = shndx_header {
+                let start = out.bytes.len() as u64;
+                for index in extended {
+                    out.u32(index);
+                }
+                let end = out.bytes.len() as u64;
+                table[shndx - 1].offset = start;
+                table[shndx - 1].size = end - start;
+                table[shndx - 1].link = symtab as u32;
+            }
+            symtab
+        }
+    }
+
+    #[derive(Clone, Debug)]
+    struct SectionHeader {
+        name: String,
+        section_type: u32,
+        flags: u64,
+        offset: u64,
+        size: u64,
+        link: u32,
+        info: u32,
+        alignment: u64,
+        entry_size: u64,
+        source: Option<usize>,
+        info_section: Option<usize>,
+        relocation_of: Option<usize>,
+    }
+
+    impl SectionHeader {
+        fn named(name: &str, section_type: u32, flags: u64) -> SectionHeader {
+            SectionHeader {
+                name: name.to_string(),
+                section_type,
+                flags,
+                offset: 0,
+                size: 0,
+                link: 0,
+                info: 0,
+                alignment: 1,
+                entry_size: 0,
+                source: None,
+                info_section: None,
+                relocation_of: None,
+            }
+        }
+    }
+
+    fn add_section(
+        table: &mut Vec<SectionHeader>,
+        strings: &mut StringTableBuilder,
+        header: SectionHeader,
+    ) -> usize {
+        strings.add(header.name.as_bytes());
+        table.push(header);
+        table.len()
+    }
+
+    #[derive(Clone, Copy, Debug, Default)]
+    pub struct NopCapability {
+        pub long_nops: bool,
+        pub fast_7: bool,
+        pub fast_11: bool,
+        pub fast_15: bool,
+    }
+
+    pub fn nop_capability(target: &Target, cpu: &str, features: &[String]) -> NopCapability {
+        let mut cpu = if cpu.is_empty() { "generic" } else { cpu }.to_string();
+        if let Some(alias) = target
+            .records
+            .values()
+            .find(|record| record.is_a("ProcessorAlias") && table_text(record, "Name") == cpu)
+        {
+            cpu = table_text(alias, "Alias");
+        }
+        let mut enabled: BTreeSet<String> = BTreeSet::new();
+        let mut pending: Vec<String> = Vec::new();
+        for record in target.records.values() {
+            if record.is_a("Processor") && table_text(record, "Name") == cpu {
+                pending.extend(table_record_list(record, "Features"));
+                pending.extend(table_record_list(record, "TuneFeatures"));
+                break;
+            }
+        }
+        while let Some(name) = pending.pop() {
+            if !enabled.insert(name.clone()) {
+                continue;
+            }
+            if let Some(record) = target.records.get(&name) {
+                pending.extend(table_record_list(record, "Implies"));
+            }
+        }
+        for feature in features {
+            let (add, name) = match feature.strip_prefix('-') {
+                Some(name) => (false, name),
+                None => (true, feature.strip_prefix('+').unwrap_or(feature)),
+            };
+            let found = target
+                .records
+                .iter()
+                .find(|(_, record)| {
+                    record.is_a("SubtargetFeature") && table_text(record, "Name") == name
+                })
+                .map(|(key, _)| key.clone());
+            if let Some(key) = found {
+                if add {
+                    enabled.insert(key);
+                } else {
+                    enabled.remove(&key);
+                }
+            }
+        }
+        NopCapability {
+            long_nops: enabled.contains("FeatureNOPL"),
+            fast_7: enabled.contains("TuningFast7ByteNOP"),
+            fast_11: enabled.contains("TuningFast11ByteNOP"),
+            fast_15: enabled.contains("TuningFast15ByteNOP"),
+        }
+    }
+
+    pub fn maximum_nop_size(capability: NopCapability, mode: Mode) -> u64 {
+        if mode == Mode::Bits16 {
+            return 4;
+        }
+        if !capability.long_nops && mode != Mode::Bits64 {
+            return 1;
+        }
+        if capability.fast_7 {
+            return 7;
+        }
+        if capability.fast_15 {
+            return 15;
+        }
+        if capability.fast_11 {
+            return 11;
+        }
+        10
+    }
+
+    pub fn write_nop_data(out: &mut Vec<u8>, count: u64, mode: Mode, capability: NopCapability) {
+        const NOPS_32: [&[u8]; 10] = [
+            &[0x90],
+            &[0x66, 0x90],
+            &[0x0f, 0x1f, 0x00],
+            &[0x0f, 0x1f, 0x40, 0x00],
+            &[0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x44, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x80, 0x00, 0x00, 0x00, 0x00],
+            &[0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0x66, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+            &[0x66, 0x2e, 0x0f, 0x1f, 0x84, 0x00, 0x00, 0x00, 0x00, 0x00],
+        ];
+        const NOPS_16: [&[u8]; 4] = [
+            &[0x90],
+            &[0x66, 0x90],
+            &[0x8d, 0x74, 0x00],
+            &[0x8d, 0xb4, 0x00, 0x00],
+        ];
+        let maximum = maximum_nop_size(capability, mode);
+        let mut remaining = count;
+        while remaining != 0 {
+            let length = remaining.min(maximum);
+            let prefixes = length.saturating_sub(10);
+            for _ in 0..prefixes {
+                out.push(0x66);
+            }
+            let rest = (length - prefixes) as usize;
+            if rest != 0 {
+                if mode == Mode::Bits16 {
+                    out.extend_from_slice(NOPS_16[rest - 1]);
+                } else {
+                    out.extend_from_slice(NOPS_32[rest - 1]);
+                }
+            }
+            remaining -= length;
+        }
+    }
+
+    pub fn encode_advance_location(delta: u64) -> Vec<u8> {
+        if delta == 0 {
+            return Vec::new();
+        }
+        if delta < 64 {
+            return vec![0x40 | delta as u8];
+        }
+        if delta < 256 {
+            return vec![0x02, delta as u8];
+        }
+        if delta < 65536 {
+            let mut out = vec![0x03];
+            out.extend_from_slice(&(delta as u16).to_le_bytes());
+            return out;
+        }
+        let mut out = vec![0x04];
+        out.extend_from_slice(&(delta as u32).to_le_bytes());
+        out
+    }
+
+    fn first_macro_fusion_kind(record: &str) -> Option<u8> {
+        let test = [
+            "TEST16i16",
+            "TEST16mr",
+            "TEST16ri",
+            "TEST16rr",
+            "TEST32i32",
+            "TEST32mr",
+            "TEST32ri",
+            "TEST32rr",
+            "TEST64i32",
+            "TEST64mr",
+            "TEST64ri32",
+            "TEST64rr",
+            "TEST8i8",
+            "TEST8mr",
+            "TEST8ri",
+            "TEST8rr",
+        ];
+        if test.contains(&record) {
+            return Some(0);
+        }
+        let family = |prefix: &str| {
+            [
+                "16i16", "16ri", "16ri8", "16rm", "16rr", "32i32", "32ri", "32ri8", "32rm", "32rr",
+                "64i32", "64ri32", "64ri8", "64rm", "64rr", "8i8", "8ri", "8ri8", "8rm", "8rr",
+            ]
+            .iter()
+            .any(|suffix| record == format!("{prefix}{suffix}"))
+        };
+        if family("AND") {
+            return Some(2);
+        }
+        let compare = [
+            "CMP16i16",
+            "CMP16mr",
+            "CMP16ri",
+            "CMP16ri8",
+            "CMP16rm",
+            "CMP16rr",
+            "CMP32i32",
+            "CMP32mr",
+            "CMP32ri",
+            "CMP32ri8",
+            "CMP32rm",
+            "CMP32rr",
+            "CMP64i32",
+            "CMP64mr",
+            "CMP64ri32",
+            "CMP64ri8",
+            "CMP64rm",
+            "CMP64rr",
+            "CMP8i8",
+            "CMP8mr",
+            "CMP8ri",
+            "CMP8ri8",
+            "CMP8rm",
+            "CMP8rr",
+        ];
+        if compare.contains(&record) {
+            return Some(1);
+        }
+        if family("ADD") || family("SUB") {
+            return Some(3);
+        }
+        let step = [
+            "INC16r",
+            "INC16r_alt",
+            "INC32r",
+            "INC32r_alt",
+            "INC64r",
+            "INC8r",
+            "DEC16r",
+            "DEC16r_alt",
+            "DEC32r",
+            "DEC32r_alt",
+            "DEC64r",
+            "DEC8r",
+        ];
+        if step.contains(&record) {
+            return Some(4);
+        }
+        None
+    }
+
+    fn macro_fused(kind: u8, condition: i64) -> bool {
+        let second = match condition {
+            4 | 5 | 12 | 13 | 14 | 15 => 1,
+            2 | 3 | 6 | 7 => 0,
+            8..=11 | 0 | 1 => 2,
+            _ => 3,
+        };
+        match kind {
+            0 | 2 => true,
+            1 | 3 => second == 0 || second == 1,
+            4 => second == 1,
+            _ => false,
+        }
+    }
+
+    impl ObjectStreamer {
+        fn symbol_row(
+            &mut self,
+            context: &mut AssemblyContext,
+            strings: &StringTableBuilder,
+            symbol: usize,
+            name: Option<&str>,
+            section_index: u32,
+        ) -> (u32, u8, u8, u64, u64, u32, bool) {
+            let held = context.symbols[symbol].clone();
+            let base = match self.base_symbols.get(&symbol) {
+                Some(cached) => *cached,
+                None => self.base_symbol(context, symbol),
+            };
+            let reserved = base.is_none() || held.common.is_some();
+            let binding = self.binding_of(context, symbol);
+            let mut kind = self.type_of(context, symbol);
+            if self.is_indirect_function(context, symbol) {
+                kind = TYPE_GNU_IFUNC;
+            }
+            if let Some(base) = base {
+                kind = merge_type_for_set(kind, self.type_of(context, base));
+            }
+            let info = (binding << 4) | kind;
+            let visibility = match held.visibility {
+                SymbolVisibility::Default => 0,
+                SymbolVisibility::Internal => 1,
+                SymbolVisibility::Hidden => 2,
+                SymbolVisibility::Protected => 3,
+            };
+            let other = held.other | visibility;
+            let mut value = if let Some((_, alignment)) = held.common {
+                alignment
+            } else {
+                self.symbol_value(context, symbol).unwrap_or(0)
+            };
+            if self.target.isa == Isa::Armv7
+                && held.common.is_none()
+                && self.symbol_value(context, symbol).is_some()
+                && self.is_thumb_function(context, symbol)
+            {
+                value |= 1;
+            }
+            let mut size_expression = held.size.clone();
+            if size_expression.is_none() {
+                if let Some(base) = base {
+                    size_expression = context.symbols[base].size.clone();
+                    let mut current = symbol;
+                    let mut seen = BTreeSet::new();
+                    while context.symbols[current].is_variable() && seen.insert(current) {
+                        let Some(Expression::Symbol { name, .. }) =
+                            context.symbols[current].value.clone()
+                        else {
+                            break;
+                        };
+                        let Some(next) = context.lookup(&name) else {
+                            break;
+                        };
+                        current = next;
+                        if context.symbols[current].size.is_none() {
+                            continue;
+                        }
+                        size_expression = context.symbols[current].size.clone();
+                        break;
+                    }
+                }
+            }
+            let size = match size_expression {
+                Some(expression) => match context.evaluate_absolute(&expression, Some(&*self)) {
+                    Some(size) => size as u64,
+                    None => {
+                        context.report(
+                            MessageKind::Error,
+                            None,
+                            "size expression must be absolute",
+                        );
+                        0
+                    }
+                },
+                None => 0,
+            };
+            let name_offset = name
+                .map(|name| strings.offset(name.as_bytes()))
+                .unwrap_or(0);
+            (
+                name_offset,
+                info,
+                other,
+                value,
+                size,
+                section_index,
+                reserved,
+            )
+        }
+
+        fn current_frame(
+            &mut self,
+            context: &mut AssemblyContext,
+            location: Option<SourceLocation>,
+        ) -> Option<usize> {
+            match self.frame_stack.last() {
+                Some((frame, _)) => Some(*frame),
+                None => {
+                    context.report(
+                        MessageKind::Error,
+                        location,
+                        "this directive must appear between .cfi_startproc and .cfi_endproc directives",
+                    );
+                    None
+                }
+            }
+        }
+
+        fn cfi_label(&mut self, context: &mut AssemblyContext) -> usize {
+            let label = context.temporary_symbol();
+            self.emit_label(context, label, None);
+            label
+        }
+
+        fn push_frame_instruction(
+            &mut self,
+            context: &mut AssemblyContext,
+            operation: FrameOperation,
+            location: SourceLocation,
+        ) {
+            let label = self.cfi_label(context);
+            let Some(frame) = self.current_frame(context, Some(location)) else {
+                return;
+            };
+            self.frames[frame].instructions.push(FrameInstruction {
+                label: Some(label),
+                operation,
+                location: Some(location),
+            });
+        }
+
+        fn emit_integer(&mut self, value: u64, size: usize) {
+            let bytes = value.to_le_bytes();
+            self.append(&bytes[..size]);
+        }
+
+        fn emit_unsigned(&mut self, value: u64) {
+            let bytes = encode_unsigned_leb128(value, 0);
+            self.append(&bytes);
+        }
+
+        fn emit_signed(&mut self, value: i64) {
+            let bytes = encode_signed_leb128(value, 0);
+            self.append(&bytes);
+        }
+
+        fn emit_symbol_difference(
+            &mut self,
+            context: &mut AssemblyContext,
+            end: usize,
+            start: usize,
+            adjust: i64,
+            size: u32,
+        ) {
+            let end_name = context.symbols[end].name.clone();
+            let start_name = context.symbols[start].name.clone();
+            let mut expression = Expression::Binary {
+                operator: BinaryOperator::Subtract,
+                left: Box::new(Expression::symbol(&end_name)),
+                right: Box::new(Expression::symbol(&start_name)),
+            };
+            if adjust != 0 {
+                expression = Expression::Binary {
+                    operator: BinaryOperator::Subtract,
+                    left: Box::new(expression),
+                    right: Box::new(Expression::Constant(adjust)),
+                };
+            }
+            let temporary = context.temporary_symbol();
+            context.symbols[temporary].value = Some(expression);
+            let name = context.symbols[temporary].name.clone();
+            let location = SourceLocation {
+                buffer: 0,
+                position: 0,
+            };
+            self.emit_value(context, &Expression::symbol(&name), size, location);
+        }
+
+        fn frame_register(&self, context: &AssemblyContext) -> (i64, i64, i64) {
+            if self.is_sixty_four(context) || context.triple.x32 {
+                (7, 8, 16)
+            } else {
+                (4, 4, 8)
+            }
+        }
+
+        fn emit_frame_operation(
+            &mut self,
+            context: &mut AssemblyContext,
+            operation: &FrameOperation,
+            frame_offset: &mut i64,
+            exception: bool,
+        ) {
+            let (_, slot, _) = self.frame_register(context);
+            let data_alignment = -slot;
+            let register = |register: i64| -> u64 {
+                if exception || context.triple.is_64_bit() {
+                    register as u64
+                } else {
+                    match register {
+                        4 => 5,
+                        5 => 4,
+                        other => other as u64,
+                    }
+                }
+            };
+            match operation {
+                FrameOperation::Register(first, second) => {
+                    let (first, second) = (register(*first), register(*second));
+                    self.append(&[0x09]);
+                    self.emit_unsigned(first);
+                    self.emit_unsigned(second);
+                }
+                FrameOperation::WindowSave => self.append(&[0x2d]),
+                FrameOperation::NegateReturnAddressStateWithPc => self.append(&[0x2c]),
+                FrameOperation::SetReturnAddressState(state, offset) => {
+                    self.append(&[0x2b]);
+                    self.emit_unsigned(*state as u64);
+                    self.emit_signed(*offset);
+                }
+                FrameOperation::Undefined(target) => {
+                    self.append(&[0x07]);
+                    self.emit_unsigned(*target as u64);
+                }
+                FrameOperation::AdjustFrameOffset(amount) => {
+                    self.append(&[0x0e]);
+                    *frame_offset += amount;
+                    self.emit_unsigned(*frame_offset as u64);
+                }
+                FrameOperation::DefineFrameOffset(offset) => {
+                    self.append(&[0x0e]);
+                    *frame_offset = *offset;
+                    self.emit_unsigned(*frame_offset as u64);
+                }
+                FrameOperation::DefineFrame(target, offset) => {
+                    let target = register(*target);
+                    self.append(&[0x0c]);
+                    self.emit_unsigned(target);
+                    *frame_offset = *offset;
+                    self.emit_unsigned(*frame_offset as u64);
+                }
+                FrameOperation::DefineFrameRegister(target) => {
+                    let target = register(*target);
+                    self.append(&[0x0d]);
+                    self.emit_unsigned(target);
+                }
+                FrameOperation::Offset(target, offset)
+                | FrameOperation::RelativeOffset(target, offset) => {
+                    let relative = matches!(operation, FrameOperation::RelativeOffset(..));
+                    let target = register(*target);
+                    let mut offset = *offset;
+                    if relative {
+                        offset -= *frame_offset;
+                    }
+                    offset /= data_alignment;
+                    if offset < 0 {
+                        self.append(&[0x11]);
+                        self.emit_unsigned(target);
+                        self.emit_signed(offset);
+                    } else if target < 64 {
+                        self.append(&[0x80 + target as u8]);
+                        self.emit_unsigned(offset as u64);
+                    } else {
+                        self.append(&[0x05]);
+                        self.emit_unsigned(target);
+                        self.emit_unsigned(offset as u64);
+                    }
+                }
+                FrameOperation::RememberState => self.append(&[0x0a]),
+                FrameOperation::RestoreState => self.append(&[0x0b]),
+                FrameOperation::SameValue(target) => {
+                    self.append(&[0x08]);
+                    self.emit_unsigned(*target as u64);
+                }
+                FrameOperation::Restore(target) => {
+                    let target = register(*target);
+                    if target < 64 {
+                        self.append(&[0xc0 | target as u8]);
+                    } else {
+                        self.append(&[0x06]);
+                        self.emit_unsigned(target);
+                    }
+                }
+                FrameOperation::GnuArgumentsSize(size) => {
+                    self.append(&[0x2e]);
+                    self.emit_unsigned(*size as u64);
+                }
+                FrameOperation::Escape(bytes) => self.append(bytes),
+                FrameOperation::Label(symbol) => self.emit_label(context, *symbol, None),
+                FrameOperation::ValueOffset(target, offset) => {
+                    let target = register(*target);
+                    let offset = offset / data_alignment;
+                    if offset < 0 {
+                        self.append(&[0x15]);
+                        self.emit_unsigned(target);
+                        self.emit_signed(offset);
+                    } else {
+                        self.append(&[0x14]);
+                        self.emit_unsigned(target);
+                        self.emit_unsigned(offset as u64);
+                    }
+                }
+            }
+        }
+
+        fn emit_frame_instructions(
+            &mut self,
+            context: &mut AssemblyContext,
+            instructions: &[FrameInstruction],
+            base: Option<usize>,
+            frame_offset: &mut i64,
+            exception: bool,
+        ) {
+            let mut base = base;
+            for instruction in instructions {
+                if let Some(label) = instruction.label {
+                    if self.place_of(context, label) == Place::Undefined {
+                        continue;
+                    }
+                    if let Some(previous) = base {
+                        if label != previous {
+                            self.advance_frame(context, previous, label, instruction.location);
+                            base = Some(label);
+                        }
+                    }
+                }
+                self.emit_frame_operation(context, &instruction.operation, frame_offset, exception);
+            }
+        }
+
+        fn advance_frame(
+            &mut self,
+            context: &mut AssemblyContext,
+            from: usize,
+            to: usize,
+            location: Option<SourceLocation>,
+        ) {
+            let from_name = context.symbols[from].name.clone();
+            let to_name = context.symbols[to].name.clone();
+            let delta = Expression::Binary {
+                operator: BinaryOperator::Subtract,
+                left: Box::new(Expression::symbol(&to_name)),
+                right: Box::new(Expression::symbol(&from_name)),
+            };
+            let fragment = self.fragment();
+            self.fragments[fragment].tail = Tail::DwarfFrame { delta, location };
+            self.new_fragment();
+        }
+
+        fn emit_value_alignment(&mut self, context: &mut AssemblyContext, alignment: u64) {
+            self.emit_value_to_alignment(context, alignment, 0, 1, 0);
+        }
+
+        fn emit_common_information_entry(
+            &mut self,
+            context: &mut AssemblyContext,
+            frame: &FrameInfo,
+            exception: bool,
+            initial_offset: &mut i64,
+        ) -> usize {
+            let start = context.temporary_symbol();
+            self.emit_label(context, start, None);
+            let end = context.temporary_symbol();
+            self.emit_symbol_difference(context, end, start, 4, 4);
+            let identifier = if exception { 0 } else { 0xffff_ffff };
+            self.emit_integer(identifier, 4);
+            self.append(&[1]);
+            if exception {
+                let mut augmentation = String::from("z");
+                if frame.personality.is_some() {
+                    augmentation.push('P');
+                }
+                if frame.lsda.is_some() {
+                    augmentation.push('L');
+                }
+                augmentation.push('R');
+                if frame.signal {
+                    augmentation.push('S');
+                }
+                if frame.b_key {
+                    augmentation.push('B');
+                }
+                self.append(augmentation.as_bytes());
+            }
+            self.append(&[0]);
+            self.emit_unsigned(1);
+            let (stack, slot, return_address) = self.frame_register(context);
+            self.emit_signed(-slot);
+            let return_register = frame.return_register.unwrap_or(return_address);
+            self.append(&[return_register as u8]);
+            if exception {
+                let mut length = 0u64;
+                if frame.personality.is_some() {
+                    length += 1 + self.encoding_size(context, frame.personality_encoding);
+                }
+                if frame.lsda.is_some() {
+                    length += 1;
+                }
+                length += 1;
+                self.emit_unsigned(length);
+                if let Some(personality) = frame.personality {
+                    self.append(&[frame.personality_encoding]);
+                    let size = self.encoding_size(context, frame.personality_encoding) as u32;
+                    self.emit_encoded_symbol(
+                        context,
+                        personality,
+                        frame.personality_encoding,
+                        size,
+                    );
+                }
+                if frame.lsda.is_some() {
+                    self.append(&[frame.lsda_encoding]);
+                }
+                let encoding = self.frame_encoding(context);
+                self.append(&[encoding]);
+            }
+            let mut frame_offset = 0i64;
+            if !frame.simple {
+                let initial = vec![
+                    FrameInstruction {
+                        label: None,
+                        operation: FrameOperation::DefineFrame(stack, slot),
+                        location: None,
+                    },
+                    FrameInstruction {
+                        label: None,
+                        operation: FrameOperation::Offset(return_address, -slot),
+                        location: None,
+                    },
+                ];
+                self.emit_frame_instructions(context, &initial, None, &mut frame_offset, exception);
+            }
+            *initial_offset = frame_offset;
+            let alignment = if exception {
+                4
+            } else {
+                self.pointer_size(context)
+            };
+            self.emit_value_alignment(context, alignment);
+            self.emit_label(context, end, None);
+            start
+        }
+
+        fn frame_encoding(&self, _context: &AssemblyContext) -> u8 {
+            0x1b
+        }
+
+        fn encoding_size(&self, context: &AssemblyContext, encoding: u8) -> u64 {
+            match encoding & 0x0f {
+                0x00 | 0x08 => self.pointer_size(context),
+                0x02 | 0x0a => 2,
+                0x03 | 0x0b => 4,
+                0x04 | 0x0c => 8,
+                _ => 4,
+            }
+        }
+
+        fn emit_encoded_symbol(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            encoding: u8,
+            size: u32,
+        ) {
+            let name = context.symbols[symbol].name.clone();
+            let mut expression = Expression::symbol(&name);
+            if encoding & 0x70 == 0x10 {
+                let here = context.temporary_symbol();
+                self.emit_label(context, here, None);
+                let here_name = context.symbols[here].name.clone();
+                expression = Expression::Binary {
+                    operator: BinaryOperator::Subtract,
+                    left: Box::new(expression),
+                    right: Box::new(Expression::symbol(&here_name)),
+                };
+            }
+            let location = SourceLocation {
+                buffer: 0,
+                position: 0,
+            };
+            self.emit_value(context, &expression, size, location);
+        }
+
+        #[allow(clippy::too_many_arguments)]
+        fn emit_frame_description_entry(
+            &mut self,
+            context: &mut AssemblyContext,
+            common: usize,
+            frame: &FrameInfo,
+            last: bool,
+            exception: bool,
+            initial_offset: i64,
+            section_start: usize,
+        ) {
+            let start = context.temporary_symbol();
+            let end = context.temporary_symbol();
+            self.emit_symbol_difference(context, end, start, 0, 4);
+            self.emit_label(context, start, None);
+            if exception {
+                self.emit_symbol_difference(context, start, common, 0, 4);
+            } else {
+                let common_name = context.symbols[common].name.clone();
+                let location = SourceLocation {
+                    buffer: 0,
+                    position: 0,
+                };
+                let _ = section_start;
+                self.emit_value(context, &Expression::symbol(&common_name), 4, location);
+            }
+            let encoding = if exception {
+                self.frame_encoding(context)
+            } else {
+                0
+            };
+            let size = self.encoding_size(context, encoding) as u32;
+            if let Some(begin) = frame.begin {
+                self.emit_encoded_symbol(context, begin, encoding, size);
+                if let Some(finish) = frame.end {
+                    self.emit_symbol_difference(context, finish, begin, 0, size);
+                }
+            }
+            if exception {
+                let mut length = 0u64;
+                if frame.lsda.is_some() {
+                    length += self.encoding_size(context, frame.lsda_encoding);
+                }
+                self.emit_unsigned(length);
+                if let Some(lsda) = frame.lsda {
+                    let size = self.encoding_size(context, frame.lsda_encoding) as u32;
+                    self.emit_encoded_symbol(context, lsda, frame.lsda_encoding, size);
+                }
+            }
+            let mut frame_offset = initial_offset;
+            let instructions = frame.instructions.clone();
+            self.emit_frame_instructions(
+                context,
+                &instructions,
+                frame.begin,
+                &mut frame_offset,
+                exception,
+            );
+            let alignment = if last {
+                self.pointer_size(context)
+            } else {
+                size as u64
+            };
+            self.emit_value_alignment(context, alignment);
+            self.emit_label(context, end, None);
+        }
+
+        fn emit_frames(&mut self, context: &mut AssemblyContext, exception: bool) {
+            if self.frames.is_empty() {
+                return;
+            }
+            let section = if exception {
+                let kind = if context.triple.is_64_bit() {
+                    ELF_SECTION_X86_64_UNWIND
+                } else {
+                    ELF_SECTION_PROGRAM_BITS
+                };
+                context.elf_section(".eh_frame", kind, ELF_FLAG_ALLOCATE, 0, "", None)
+            } else {
+                context.elf_section(".debug_frame", ELF_SECTION_PROGRAM_BITS, 0, 0, "", None)
+            };
+            self.switch_section(context, section, 0);
+            let section_start = context.temporary_symbol();
+            self.emit_label(context, section_start, None);
+            let mut frames = self.frames.clone();
+            let key = |frame: &FrameInfo, context: &AssemblyContext| {
+                let personality = frame
+                    .personality
+                    .map(|symbol| context.symbols[symbol].name.clone())
+                    .unwrap_or_default();
+                if exception {
+                    (
+                        personality,
+                        frame.personality_encoding,
+                        frame.lsda.map(|_| frame.lsda_encoding as i32).unwrap_or(-1),
+                        frame.signal,
+                        frame.b_key,
+                        frame.simple,
+                        frame.return_register.unwrap_or(i64::MAX),
+                    )
+                } else {
+                    (
+                        String::new(),
+                        0,
+                        0,
+                        false,
+                        false,
+                        frame.simple,
+                        frame.return_register.unwrap_or(i64::MAX),
+                    )
+                }
+            };
+            frames.sort_by_key(|frame| key(frame, context));
+            let mut last_key = None;
+            let mut last_common = None;
+            let mut initial_offset = 0i64;
+            let count = frames.len();
+            for (index, frame) in frames.iter().enumerate() {
+                let this_key = key(frame, context);
+                if last_common.is_none() || last_key.as_ref() != Some(&this_key) {
+                    last_key = Some(this_key);
+                    last_common = Some(self.emit_common_information_entry(
+                        context,
+                        frame,
+                        exception,
+                        &mut initial_offset,
+                    ));
+                }
+                let common = last_common.expect("a common entry");
+                self.emit_frame_description_entry(
+                    context,
+                    common,
+                    frame,
+                    index + 1 == count,
+                    exception,
+                    initial_offset,
+                    section_start,
+                );
+            }
+        }
+
+        pub fn finish_object(&mut self, context: &mut AssemblyContext) {
+            if self.bundle_locked {
+                context.report(
+                    MessageKind::Error,
+                    self.statement_location,
+                    "unterminated .bundle_lock",
+                );
+            }
+            if self.emit_exception_frame {
+                self.emit_frames(context, true);
+            }
+            if self.emit_debug_frame {
+                self.emit_frames(context, false);
+            }
+            let attributes = if self.arm32_attributes.is_empty() {
+                self.arm_attributes.encode()
+            } else {
+                std::mem::take(&mut self.arm32_attributes)
+            };
+            if !attributes.is_empty() {
+                let section = context.elf_section(".ARM.attributes", 0x7000_0003, 0, 0, "", None);
+                self.switch_section(context, section, 0);
+                self.emit_bytes(context, &attributes);
+            }
+            self.arm_finish_implicit_mapping(context);
+            self.layout(context);
+            if context.had_error {
+                return;
+            }
+            self.output = self.write_object(context);
+        }
+    }
+
+    impl Streamer for ObjectStreamer {
+        fn symbol_layout(&self) -> Option<&dyn SymbolLayout> {
+            Some(self)
+        }
+
+        fn set_arm_features(&mut self, features: &BTreeSet<String>) {
+            self.thumb_two_features = features.contains("FeatureThumb2");
+            self.thumb_long_call = armv7::long_call_features(features);
+            self.thumb_v8m_baseline = features.contains("HasV8MBaselineOps");
+            self.arm32_nop = features.contains("HasV6T2Ops");
+        }
+
+        fn emit_arm_subsection(&mut self, name: &str, optional: u8, kind: u8) {
+            self.arm_attributes.subsection(name, optional, kind);
+        }
+
+        fn emit_arm32_attributes(&mut self, contents: &[u8]) {
+            self.arm32_attributes = contents.to_vec();
+        }
+
+        fn emits_object(&self) -> bool {
+            true
+        }
+
+        fn set_arm_thumb(&mut self, thumb: bool) {
+            self.arm32_thumb = thumb;
+        }
+
+        fn emit_arm32_inst(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: i64,
+            suffix: char,
+            _location: SourceLocation,
+        ) {
+            self.arm32_thumb = suffix != '\0';
+            self.arm_mapping(context, true);
+            let value = value as u32;
+            match suffix {
+                'n' => self.append(&(value as u16).to_le_bytes()),
+                'w' => {
+                    self.append(&((value >> 16) as u16).to_le_bytes());
+                    self.append(&(value as u16).to_le_bytes());
+                }
+                _ => self.append(&value.to_le_bytes()),
+            }
+        }
+
+        fn emit_arm_attribute(&mut self, vendor: &str, tag: u32, value: Option<u32>, text: &str) {
+            self.arm_attributes.attribute(vendor, tag, value, text);
+        }
+
+        fn note_expression_locations(
+            &mut self,
+            locations: &[(Expression, Option<SourceLocation>)],
+        ) {
+            self.expression_locations = locations.to_vec();
+        }
+
+        fn note_statement_start(&mut self, location: SourceLocation) {
+            self.statement_location = Some(location);
+        }
+
+        fn initialize_sections(&mut self, context: &mut AssemblyContext) {
+            let section = context.elf_section(
+                ".text",
+                ELF_SECTION_PROGRAM_BITS,
+                ELF_FLAG_EXECUTE | ELF_FLAG_ALLOCATE,
+                0,
+                "",
+                None,
+            );
+            self.switch_section(context, section, 0);
+            let mode = self.mode;
+            self.emit_code_alignment(context, 4, 0, mode);
+        }
+
+        fn switch_section(
+            &mut self,
+            context: &mut AssemblyContext,
+            section: usize,
+            subsection: i64,
+        ) {
+            let current = context.current_section();
+            if let Some(top) = context.section_stack.last_mut() {
+                top.1 = top.0;
+            }
+            if current != Some((section, subsection)) || self.current.is_none() {
+                self.change_section(context, section, subsection);
+                if let Some(top) = context.section_stack.last_mut() {
+                    top.0 = Some((section, subsection));
+                }
+            }
+        }
+
+        fn emit_label(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            location: Option<SourceLocation>,
+        ) {
+            let held = &mut context.symbols[symbol];
+            if held.redefinable {
+                held.value = None;
+                held.defined = false;
+                held.redefinable = false;
+                held.fragment = None;
+            }
+            if !held.is_undefined() || held.is_variable() {
+                let name = held.name.clone();
+                context.report(
+                    MessageKind::Error,
+                    location,
+                    &format!("symbol '{name}' is already defined"),
+                );
+                return;
+            }
+            if self.current.is_none() {
+                return;
+            }
+            self.register_symbol(context, symbol);
+            let fragment = self.fragment();
+            let section = self.fragments[fragment].section;
+            let offset = self.fragments[fragment].fixed.len() as u64;
+            let held = &mut context.symbols[symbol];
+            held.defined = true;
+            held.section = Some(section);
+            held.fragment = Some(fragment);
+            held.offset = offset;
+            if location.is_some() {
+                held.definition = location;
+            }
+            if context.sections[section].flags & ELF_FLAG_THREAD_LOCAL != 0 {
+                context.symbols[symbol].symbol_type = Some(SymbolType::ThreadLocal);
+            }
+            self.emit_assignments_for(context, symbol);
+        }
+
+        fn emit_assignment(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            value: &Expression,
+        ) {
+            self.register_symbol(context, symbol);
+            self.visit_used(context, value);
+            context.symbols[symbol].value = Some(value.clone());
+            context.symbols[symbol].fragment = None;
+            self.emit_assignments_for(context, symbol);
+        }
+
+        fn emit_conditional_assignment(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            value: &Expression,
+        ) {
+            let Expression::Symbol { name, .. } = value else {
+                return;
+            };
+            let target = match context.lookup(name) {
+                Some(target) => target,
+                None => context.symbol(name),
+            };
+            if context.symbols[target].registered {
+                self.emit_assignment(context, symbol, value);
+            } else {
+                self.pending_assignments
+                    .entry(target)
+                    .or_default()
+                    .push((symbol, value.clone()));
+            }
+        }
+
+        fn emit_weak_reference(
+            &mut self,
+            context: &mut AssemblyContext,
+            alias: usize,
+            symbol: usize,
+        ) {
+            if self.place_of(context, alias) != Place::Undefined {
+                let name = context.symbols[alias].name.clone();
+                context.report(
+                    MessageKind::Error,
+                    None,
+                    &format!("symbol '{name}' is already defined"),
+                );
+                return;
+            }
+            let name = context.symbols[symbol].name.clone();
+            context.symbols[alias].value = Some(Expression::symbol(&name));
+            context.symbols[alias].weak_reference = true;
+            self.weak_references.push(alias);
+        }
+
+        fn emit_variant_pcs(&mut self, context: &mut AssemblyContext, symbol: usize) {
+            self.register_symbol(context, symbol);
+            context.symbols[symbol].other |= 0x80;
+        }
+
+        fn emit_symbol_attribute(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            attribute: SymbolAttribute,
+        ) -> bool {
+            self.register_symbol(context, symbol);
+            let name = context.symbols[symbol].name.clone();
+            let current = element_type(context.symbols[symbol].symbol_type);
+            let set_type = |context: &mut AssemblyContext, new: u8| {
+                context.symbols[symbol].symbol_type =
+                    Some(symbol_type_of(combine_symbol_types(current, new)));
+            };
+            match attribute {
+                SymbolAttribute::Cold
+                | SymbolAttribute::Extern
+                | SymbolAttribute::LazyReference
+                | SymbolAttribute::Reference
+                | SymbolAttribute::SymbolResolver
+                | SymbolAttribute::PrivateExtern
+                | SymbolAttribute::WeakDefinition
+                | SymbolAttribute::WeakDefinitionAutoPrivate
+                | SymbolAttribute::WeakAntiDependency
+                | SymbolAttribute::AlternateEntry => return false,
+                SymbolAttribute::NoDeadStrip => {}
+                SymbolAttribute::TypeGnuUniqueObject => {
+                    set_type(context, TYPE_OBJECT);
+                    context.symbols[symbol].binding = Some(SymbolBinding::Global);
+                    self.unique_bindings.insert(symbol);
+                    self.seen_gnu_abi = true;
+                }
+                SymbolAttribute::Global => {
+                    let binding = context.symbols[symbol].binding;
+                    if binding.is_some() && binding != Some(SymbolBinding::Global)
+                        || self.unique_bindings.contains(&symbol)
+                    {
+                        context.report(
+                            MessageKind::Error,
+                            None,
+                            &format!("{name} changed binding to STB_GLOBAL"),
+                        );
+                    }
+                    self.unique_bindings.remove(&symbol);
+                    context.symbols[symbol].binding = Some(SymbolBinding::Global);
+                }
+                SymbolAttribute::Weak | SymbolAttribute::WeakReference => {
+                    let binding = context.symbols[symbol].binding;
+                    if binding.is_some() && binding != Some(SymbolBinding::Weak)
+                        || self.unique_bindings.contains(&symbol)
+                    {
+                        context.report(
+                            MessageKind::Warning,
+                            None,
+                            &format!("{name} changed binding to STB_WEAK"),
+                        );
+                    }
+                    self.unique_bindings.remove(&symbol);
+                    context.symbols[symbol].binding = Some(SymbolBinding::Weak);
+                }
+                SymbolAttribute::Local => {
+                    let binding = context.symbols[symbol].binding;
+                    if binding.is_some() && binding != Some(SymbolBinding::Local)
+                        || self.unique_bindings.contains(&symbol)
+                    {
+                        context.report(
+                            MessageKind::Error,
+                            None,
+                            &format!("{name} changed binding to STB_LOCAL"),
+                        );
+                    }
+                    self.unique_bindings.remove(&symbol);
+                    context.symbols[symbol].binding = Some(SymbolBinding::Local);
+                }
+                SymbolAttribute::TypeFunction => set_type(context, TYPE_FUNCTION),
+                SymbolAttribute::TypeIndirectFunction => {
+                    set_type(context, TYPE_GNU_IFUNC);
+                    self.seen_gnu_abi = true;
+                }
+                SymbolAttribute::TypeObject | SymbolAttribute::TypeCommon => {
+                    set_type(context, TYPE_OBJECT)
+                }
+                SymbolAttribute::ThreadLocal => set_type(context, TYPE_TLS),
+                SymbolAttribute::TypeNoType => set_type(context, TYPE_NOTYPE),
+                SymbolAttribute::Protected => {
+                    context.symbols[symbol].visibility = SymbolVisibility::Protected
+                }
+                SymbolAttribute::Hidden => {
+                    context.symbols[symbol].visibility = SymbolVisibility::Hidden
+                }
+                SymbolAttribute::Internal => {
+                    context.symbols[symbol].visibility = SymbolVisibility::Internal
+                }
+                SymbolAttribute::Memtag => {}
+            }
+            true
+        }
+
+        fn emit_symbol_version(
+            &mut self,
+            _context: &mut AssemblyContext,
+            symbol: usize,
+            name: &str,
+            keep_original: bool,
+        ) {
+            self.symbol_versions.push(SymbolVersion {
+                symbol,
+                name: name.to_string(),
+                keep_original,
+                location: None,
+            });
+        }
+
+        fn emit_elf_size(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            value: &Expression,
+        ) {
+            context.symbols[symbol].size = Some(value.clone());
+        }
+
+        fn emit_common_symbol(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            size: u64,
+            alignment: u64,
+            local: bool,
+        ) {
+            self.register_symbol(context, symbol);
+            if local {
+                context.symbols[symbol].binding = Some(SymbolBinding::Local);
+            }
+            if context.symbols[symbol].binding.is_none() {
+                context.symbols[symbol].binding = Some(SymbolBinding::Global);
+            }
+            context.symbols[symbol].symbol_type = Some(SymbolType::Object);
+            if context.symbols[symbol].binding == Some(SymbolBinding::Local) {
+                let bss = context.elf_section(
+                    ".bss",
+                    ELF_SECTION_NO_BITS,
+                    ELF_FLAG_WRITE | ELF_FLAG_ALLOCATE,
+                    0,
+                    "",
+                    None,
+                );
+                let previous = context.current_section();
+                self.switch_section(context, bss, 0);
+                self.emit_value_to_alignment(context, alignment.max(1), 0, 1, 0);
+                self.emit_label(context, symbol, None);
+                if size != 0 {
+                    let location = SourceLocation {
+                        buffer: 0,
+                        position: 0,
+                    };
+                    self.emit_fill_bytes(context, &Expression::Constant(size as i64), 0, location);
+                }
+                if let Some((section, subsection)) = previous {
+                    self.switch_section(context, section, subsection);
+                }
+            } else {
+                match context.symbols[symbol].common {
+                    Some((held_size, held_alignment))
+                        if held_size != size || held_alignment != alignment =>
+                    {
+                        let name = context.symbols[symbol].name.clone();
+                        context.report(
+                            MessageKind::Error,
+                            None,
+                            &format!("Symbol: {name} redeclared as different type"),
+                        );
+                    }
+                    _ => context.symbols[symbol].common = Some((size, alignment.max(1))),
+                }
+            }
+            context.symbols[symbol].size = Some(Expression::Constant(size as i64));
+        }
+
+        fn emit_bytes(&mut self, context: &mut AssemblyContext, data: &[u8]) {
+            self.arm_mapping(context, false);
+            self.append(data);
+        }
+
+        fn emit_inst(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: i64,
+            _location: SourceLocation,
+        ) {
+            self.arm_mapping(context, true);
+            self.append(&(value as u32).to_le_bytes());
+        }
+
+        fn emit_value(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: &Expression,
+            size: u32,
+            location: SourceLocation,
+        ) {
+            self.arm_mapping(context, false);
+            self.visit_used(context, value);
+            if let Some(constant) = context.evaluate_absolute(value, Some(&*self)) {
+                let bits = size * 8;
+                let fits = bits >= 64
+                    || (constant >= 0 && (constant as u64) < (1u64 << bits))
+                    || (constant >= -(1i64 << (bits - 1)) && constant < (1i64 << (bits - 1)));
+                if !fits {
+                    context.report(
+                        MessageKind::Error,
+                        Some(location),
+                        &format!("value evaluated as {constant} is out of range."),
+                    );
+                    return;
+                }
+                self.emit_integer(constant as u64, size as usize);
+                return;
+            }
+            if context.triple.isa == Isa::Armv7 && size != 4 {
+                if let Expression::Symbol {
+                    specifier: Some(held),
+                    ..
+                } = value
+                {
+                    if held.eq_ignore_ascii_case("sbrel") {
+                        context.report(
+                            MessageKind::Error,
+                            Some(location),
+                            "relocated expression must be 32-bit",
+                        );
+                        return;
+                    }
+                }
+            }
+            let kind = match size {
+                1 => FixupKind::Data1,
+                2 => FixupKind::Data2,
+                4 => FixupKind::Data4,
+                _ => FixupKind::Data8,
+            };
+            let offset = {
+                let fragment = self.fragment();
+                self.fragments[fragment].fixed.len()
+            };
+            let pc_relative = false;
+            self.add_fixup(
+                Fixup {
+                    offset,
+                    expression: value.clone(),
+                    kind,
+                    pc_relative,
+                },
+                Some(location),
+            );
+            self.append(&vec![0u8; size as usize]);
+        }
+
+        fn emit_arm_marker_fixup(
+            &mut self,
+            context: &mut AssemblyContext,
+            value: &Expression,
+            literal: Option<u32>,
+            location: SourceLocation,
+        ) {
+            self.visit_used(context, value);
+            let offset = {
+                let fragment = self.fragment();
+                self.fragments[fragment].fixed.len()
+            };
+            self.add_fixup(
+                Fixup {
+                    offset,
+                    expression: value.clone(),
+                    kind: literal.map_or(FixupKind::Data4, FixupKind::Literal),
+                    pc_relative: false,
+                },
+                Some(location),
+            );
+        }
+
+        fn emit_leb128(&mut self, context: &mut AssemblyContext, value: &Expression, signed: bool) {
+            if let Some(constant) = context.evaluate_absolute(value, Some(&*self)) {
+                let bytes = if signed {
+                    encode_signed_leb128(constant, 0)
+                } else {
+                    encode_unsigned_leb128(constant as u64, 0)
+                };
+                self.append(&bytes);
+                return;
+            }
+            let fragment = self.fragment();
+            self.fragments[fragment].tail = Tail::Leb {
+                signed,
+                value: value.clone(),
+            };
+            self.new_fragment();
+        }
+
+        fn emit_fill_bytes(
+            &mut self,
+            context: &mut AssemblyContext,
+            count: &Expression,
+            value: u64,
+            location: SourceLocation,
+        ) {
+            self.arm_mapping(context, false);
+            if constant_of(count) == Some(0) {
+                return;
+            }
+            self.add_special(Tail::Fill {
+                value,
+                value_size: 1,
+                count: count.clone(),
+                location: Some(location),
+            });
+        }
+
+        fn emit_fill(
+            &mut self,
+            context: &mut AssemblyContext,
+            count: &Expression,
+            size: i64,
+            value: i64,
+            location: SourceLocation,
+        ) {
+            self.arm_mapping(context, false);
+            if let Some(count) = context.evaluate_absolute(count, Some(&*self)) {
+                if count < 0 {
+                    context.report(
+                        MessageKind::Warning,
+                        Some(location),
+                        "'.fill' directive with negative repeat count has no effect",
+                    );
+                    return;
+                }
+            }
+            self.add_special(Tail::Fill {
+                value: value as u64,
+                value_size: size as u8,
+                count: count.clone(),
+                location: Some(location),
+            });
+        }
+
+        fn emit_value_to_alignment(
+            &mut self,
+            context: &mut AssemblyContext,
+            alignment: u64,
+            value: i64,
+            value_size: u32,
+            maximum: u64,
+        ) {
+            let maximum = if maximum == 0 { alignment } else { maximum };
+            let fragment = self.fragment();
+            self.fragments[fragment].tail = Tail::Align {
+                alignment,
+                fill: value,
+                fill_length: value_size as u8,
+                maximum,
+                nops: false,
+            };
+            self.new_fragment();
+            let section = self.fragments[fragment].section;
+            self.ensure_alignment(context, section, alignment);
+        }
+
+        fn emit_code_alignment(
+            &mut self,
+            context: &mut AssemblyContext,
+            alignment: u64,
+            maximum: u64,
+            mode: Mode,
+        ) {
+            let fragment = self.fragment();
+            self.emit_value_to_alignment(context, alignment, 0, 1, maximum);
+            if let Tail::Align { nops, .. } = &mut self.fragments[fragment].tail {
+                *nops = true;
+            }
+            self.fragments[fragment].mode = mode;
+            self.fragments[fragment].thumb = self.arm32_thumb;
+            self.fragments[fragment].arm_nop = self.arm32_nop;
+        }
+
+        fn emit_value_to_offset(
+            &mut self,
+            _context: &mut AssemblyContext,
+            offset: &Expression,
+            value: u8,
+            location: SourceLocation,
+        ) {
+            self.add_special(Tail::Org {
+                offset: offset.clone(),
+                value,
+                location: Some(location),
+            });
+        }
+
+        fn emit_instruction(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: &MachineInstruction,
+            mode: Mode,
+            location: SourceLocation,
+        ) {
+            if self.current.is_none() {
+                return;
+            }
+            self.mode = mode;
+            self.arm32_thumb = instruction.flags & armv7::THUMB_MODE != 0;
+            self.arm_mapping(context, true);
+            let padding = self.auto_padding() || self.pad_for_align || self.bundle_alignment != 0;
+            if !padding {
+                self.object_emit_instruction(context, instruction, mode, Some(location));
+                return;
+            }
+            self.instruction_begin(context, instruction);
+            self.object_emit_instruction(context, instruction, mode, Some(location));
+            self.instruction_end(context, instruction);
+        }
+
+        fn emit_nops(
+            &mut self,
+            _context: &mut AssemblyContext,
+            count: i64,
+            control: i64,
+            mode: Mode,
+            location: SourceLocation,
+        ) {
+            let fragment = self.add_special(Tail::Nops {
+                count,
+                control,
+                location: Some(location),
+            });
+            self.fragments[fragment].mode = mode;
+        }
+
+        fn emit_cfi(
+            &mut self,
+            context: &mut AssemblyContext,
+            instruction: CfiInstruction,
+            location: SourceLocation,
+        ) {
+            match instruction {
+                CfiInstruction::Sections(exception, debug, _) => {
+                    self.emit_exception_frame = exception;
+                    self.emit_debug_frame = debug;
+                }
+                CfiInstruction::StartProcedure(simple) => {
+                    let section = self.current_section().unwrap_or(0);
+                    if self
+                        .frame_stack
+                        .last()
+                        .is_some_and(|(_, held)| *held == section)
+                    {
+                        context.report(
+                            MessageKind::Error,
+                            Some(location),
+                            "starting new .cfi frame before finishing the previous one",
+                        );
+                        return;
+                    }
+                    let begin = context.temporary_symbol();
+                    self.emit_label(context, begin, None);
+                    self.frame_stack.push((self.frames.len(), section));
+                    self.frames.push(FrameInfo {
+                        begin: Some(begin),
+                        end: None,
+                        instructions: Vec::new(),
+                        personality: None,
+                        personality_encoding: 0,
+                        lsda: None,
+                        lsda_encoding: 0,
+                        simple,
+                        signal: false,
+                        b_key: false,
+                        return_register: None,
+                    });
+                }
+                CfiInstruction::EndProcedure => {
+                    let Some(frame) = self.current_frame(context, Some(location)) else {
+                        return;
+                    };
+                    let end = context.temporary_symbol();
+                    self.emit_label(context, end, None);
+                    self.frames[frame].end = Some(end);
+                    self.frame_stack.pop();
+                }
+                CfiInstruction::DefineFrame(register, offset) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::DefineFrame(register, offset),
+                    location,
+                ),
+                CfiInstruction::DefineFrameOffset(offset) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::DefineFrameOffset(offset),
+                    location,
+                ),
+                CfiInstruction::AdjustFrameOffset(offset) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::AdjustFrameOffset(offset),
+                    location,
+                ),
+                CfiInstruction::DefineFrameRegister(register) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::DefineFrameRegister(register),
+                    location,
+                ),
+                CfiInstruction::Offset(register, offset) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::Offset(register, offset),
+                    location,
+                ),
+                CfiInstruction::RelativeOffset(register, offset) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::RelativeOffset(register, offset),
+                    location,
+                ),
+                CfiInstruction::RememberState => {
+                    self.push_frame_instruction(context, FrameOperation::RememberState, location)
+                }
+                CfiInstruction::RestoreState => {
+                    self.push_frame_instruction(context, FrameOperation::RestoreState, location)
+                }
+                CfiInstruction::SameValue(register) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::SameValue(register),
+                    location,
+                ),
+                CfiInstruction::Restore(register) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::Restore(register),
+                    location,
+                ),
+                CfiInstruction::ReturnColumn(register) => {
+                    if let Some(frame) = self.current_frame(context, Some(location)) {
+                        self.frames[frame].return_register = Some(register);
+                    }
+                }
+                CfiInstruction::SignalFrame => {
+                    if let Some(frame) = self.current_frame(context, Some(location)) {
+                        self.frames[frame].signal = true;
+                    }
+                }
+                CfiInstruction::Undefined(register) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::Undefined(register),
+                    location,
+                ),
+                CfiInstruction::Register(first, second) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::Register(first, second),
+                    location,
+                ),
+                CfiInstruction::WindowSave => {
+                    self.push_frame_instruction(context, FrameOperation::WindowSave, location)
+                }
+                CfiInstruction::NegateReturnAddressStateWithPc => self.push_frame_instruction(
+                    context,
+                    FrameOperation::NegateReturnAddressStateWithPc,
+                    location,
+                ),
+                CfiInstruction::NegateReturnAddressState => {
+                    self.push_frame_instruction(context, FrameOperation::WindowSave, location)
+                }
+                CfiInstruction::BKeyFrame => {
+                    if let Some(frame) = self.current_frame(context, Some(location)) {
+                        self.frames[frame].b_key = true;
+                    }
+                }
+                CfiInstruction::SetReturnAddressState(state, offset) => self
+                    .push_frame_instruction(
+                        context,
+                        FrameOperation::SetReturnAddressState(state, offset),
+                        location,
+                    ),
+                CfiInstruction::ValueOffset(register, offset) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::ValueOffset(register, offset),
+                    location,
+                ),
+                CfiInstruction::GnuArgumentsSize(size) => self.push_frame_instruction(
+                    context,
+                    FrameOperation::GnuArgumentsSize(size),
+                    location,
+                ),
+            }
+        }
+
+        fn emit_cfi_escape(
+            &mut self,
+            context: &mut AssemblyContext,
+            values: &[u8],
+            location: SourceLocation,
+        ) {
+            self.push_frame_instruction(context, FrameOperation::Escape(values.to_vec()), location);
+        }
+
+        fn emit_cfi_personality(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: usize,
+            encoding: i64,
+            lsda: bool,
+        ) {
+            let Some(frame) = self.current_frame(context, None) else {
+                return;
+            };
+            self.register_symbol(context, symbol);
+            if lsda {
+                self.frames[frame].lsda = Some(symbol);
+                self.frames[frame].lsda_encoding = encoding as u8;
+            } else {
+                self.frames[frame].personality = Some(symbol);
+                self.frames[frame].personality_encoding = encoding as u8;
+            }
+        }
+
+        fn emit_cfi_label(
+            &mut self,
+            context: &mut AssemblyContext,
+            name: &str,
+            location: SourceLocation,
+        ) {
+            let label = context.symbol(name);
+            let Some(frame) = self.current_frame(context, Some(location)) else {
+                return;
+            };
+            let at = self.cfi_label(context);
+            self.frames[frame].instructions.push(FrameInstruction {
+                label: Some(at),
+                operation: FrameOperation::Label(label),
+                location: Some(location),
+            });
+        }
+
+        fn emit_bundle_align_mode(&mut self, context: &mut AssemblyContext, power: u32) {
+            let alignment = 1u64 << power;
+            if self.bundle_alignment != 0 {
+                if self.bundle_alignment != alignment {
+                    context.report(
+                        MessageKind::Error,
+                        self.statement_location,
+                        ".bundle_align_mode cannot be changed once set",
+                    );
+                }
+                return;
+            }
+            if self.auto_padding() {
+                context.report(
+                    MessageKind::Error,
+                    self.statement_location,
+                    ".bundle_align_mode is incompatible with branch alignment",
+                );
+            }
+            self.bundle_alignment = alignment;
+        }
+
+        fn emit_bundle_lock(
+            &mut self,
+            context: &mut AssemblyContext,
+            align_to_end: bool,
+            location: SourceLocation,
+        ) {
+            if self.bundle_alignment == 0 {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    ".bundle_lock forbidden when bundling is disabled",
+                );
+                return;
+            }
+            if self.bundle_locked {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    "nested .bundle_lock is not allowed",
+                );
+                return;
+            }
+            let Some(section) = self.current_section() else {
+                return;
+            };
+            if !self.section_is_text(context, section) {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    ".bundle_lock is only allowed in an executable section",
+                );
+                return;
+            }
+            self.bundle_locked = true;
+            let alignment = self.bundle_alignment;
+            let boundary = self.add_special(Tail::BoundaryAlign {
+                alignment,
+                last: None,
+                size: 0,
+                align_to_end,
+            });
+            self.fragments[boundary].mode = self.mode;
+            self.bundle_boundary = Some(boundary);
+        }
+
+        fn emit_bundle_unlock(&mut self, context: &mut AssemblyContext, location: SourceLocation) {
+            if self.bundle_alignment == 0 {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    ".bundle_unlock forbidden when bundling is disabled",
+                );
+                return;
+            }
+            if !self.bundle_locked {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    ".bundle_unlock without matching lock",
+                );
+                return;
+            }
+            self.bundle_locked = false;
+            let current = self.fragment();
+            let Some(boundary) = self.bundle_boundary.take() else {
+                return;
+            };
+            if let Tail::BoundaryAlign { last, .. } = &mut self.fragments[boundary].tail {
+                *last = Some(current);
+            }
+            let mut group = 0u64;
+            let mut cursor = self.fragments[boundary].next;
+            while let Some(fragment) = cursor {
+                if matches!(
+                    self.fragments[fragment].tail,
+                    Tail::Align { .. } | Tail::Org { .. }
+                ) {
+                    context.report(
+                        MessageKind::Error,
+                        Some(location),
+                        "alignment and .org directives are not supported inside a .bundle_lock group",
+                    );
+                    break;
+                }
+                group += self.compute_fragment_size(context, fragment);
+                if fragment == current {
+                    break;
+                }
+                cursor = self.fragments[fragment].next;
+            }
+            if group > self.bundle_alignment {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    ".bundle_lock group is larger than the bundle size",
+                );
+            }
+            self.new_fragment();
+            let section = self.fragments[current].section;
+            let alignment = self.bundle_alignment;
+            self.ensure_alignment(context, section, alignment);
+        }
+
+        fn emit_relocation_directive(
+            &mut self,
+            context: &mut AssemblyContext,
+            offset: &Expression,
+            name: &str,
+            value: Option<&Expression>,
+            location: SourceLocation,
+        ) {
+            let relocation_type = if context.triple.isa == Isa::Armv8 {
+                armv8::relocation_number(name)
+            } else if context.triple.isa == Isa::Armv7 {
+                armv7::relocation_number(name)
+            } else {
+                relocation_number(name, context.triple.is_64_bit())
+            };
+            let Some(relocation_type) = relocation_type else {
+                context.report(
+                    MessageKind::Error,
+                    Some(location),
+                    "unknown relocation name",
+                );
+                return;
+            };
+            let value = match value {
+                Some(value) => {
+                    self.visit_used(context, value);
+                    value.clone()
+                }
+                None => {
+                    let temporary = context.temporary_symbol();
+                    Expression::symbol(&context.symbols[temporary].name.clone())
+                }
+            };
+            let mut offset = offset.clone();
+            if let Some(constant) = context.evaluate_absolute(&offset, None) {
+                if let Some(section) = self.current_section() {
+                    let begin = self.sections[&section].begin_symbol;
+                    let name = context.symbols[begin].name.clone();
+                    let begin_expression = if context.lookup(&name) == Some(begin) {
+                        Expression::symbol(&name)
+                    } else {
+                        let alias = context.temporary_symbol();
+                        context.symbols[alias].value = Some(Expression::Constant(0));
+                        context.symbols[alias].fragment = context.symbols[begin].fragment;
+                        context.symbols[alias].defined = true;
+                        context.symbols[alias].section = Some(section);
+                        context.symbols[alias].value = None;
+                        Expression::symbol(&context.symbols[alias].name.clone())
+                    };
+                    offset = Expression::sum(begin_expression, Expression::Constant(constant));
+                }
+            }
+            self.relocation_directives.push(RelocationDirective {
+                offset,
+                value,
+                relocation_type,
+                location,
+            });
+        }
+
+        fn emit_identifier(&mut self, context: &mut AssemblyContext, text: &[u8]) {
+            let comment = context.elf_section(
+                ".comment",
+                ELF_SECTION_PROGRAM_BITS,
+                ELF_FLAG_MERGE | ELF_FLAG_STRINGS,
+                1,
+                "",
+                None,
+            );
+            let previous = context.current_section();
+            self.switch_section(context, comment, 0);
+            self.arm_mapping(context, false);
+            if !self.seen_identifier {
+                self.append(&[0]);
+                self.seen_identifier = true;
+            }
+            self.append(text);
+            self.append(&[0]);
+            if let Some((section, subsection)) = previous {
+                self.switch_section(context, section, subsection);
+            }
+        }
+
+        fn emit_file(&mut self, _context: &mut AssemblyContext, name: &[u8]) {
+            let name = String::from_utf8_lossy(name).into_owned();
+            self.file_names.push((name, self.symbols_in_order.len()));
+        }
+
+        fn emit_raw_text(&mut self, _context: &mut AssemblyContext, _text: &str) {}
+
+        fn emit_address_significance(
+            &mut self,
+            context: &mut AssemblyContext,
+            symbol: Option<usize>,
+        ) {
+            let list = self.address_significance.get_or_insert_with(Vec::new);
+            if let Some(symbol) = symbol {
+                list.push(symbol);
+                self.register_symbol(context, symbol);
+            }
+        }
+
+        fn emit_mode_change(&mut self, _context: &mut AssemblyContext, mode: Mode) {
+            self.mode = mode;
+        }
+
+        fn emit_coff_directive(
+            &mut self,
+            _context: &mut AssemblyContext,
+            _text: &str,
+            _symbol: Option<usize>,
+            _value: i64,
+        ) {
+        }
+
+        fn add_blank_line(&mut self) {}
+
+        fn add_explicit_comment(&mut self, _text: &str) {}
+
+        fn finish(&mut self, context: &mut AssemblyContext) {
+            self.finish_object(context);
+        }
+
+        fn output(&mut self) -> Vec<u8> {
+            std::mem::take(&mut self.output)
+        }
+    }
+
+    fn relocation_number(name: &str, sixty_four: bool) -> Option<u32> {
+        if sixty_four {
+            let table: &[(&str, u32)] = &[
+                ("R_X86_64_NONE", 0),
+                ("R_X86_64_64", 1),
+                ("R_X86_64_PC32", 2),
+                ("R_X86_64_GOT32", 3),
+                ("R_X86_64_PLT32", 4),
+                ("R_X86_64_COPY", 5),
+                ("R_X86_64_GLOB_DAT", 6),
+                ("R_X86_64_JUMP_SLOT", 7),
+                ("R_X86_64_RELATIVE", 8),
+                ("R_X86_64_GOTPCREL", 9),
+                ("R_X86_64_32", 10),
+                ("R_X86_64_32S", 11),
+                ("R_X86_64_16", 12),
+                ("R_X86_64_PC16", 13),
+                ("R_X86_64_8", 14),
+                ("R_X86_64_PC8", 15),
+                ("R_X86_64_DTPMOD64", 16),
+                ("R_X86_64_DTPOFF64", 17),
+                ("R_X86_64_TPOFF64", 18),
+                ("R_X86_64_TLSGD", 19),
+                ("R_X86_64_TLSLD", 20),
+                ("R_X86_64_DTPOFF32", 21),
+                ("R_X86_64_GOTTPOFF", 22),
+                ("R_X86_64_TPOFF32", 23),
+                ("R_X86_64_PC64", 24),
+                ("R_X86_64_GOTOFF64", 25),
+                ("R_X86_64_GOTPC32", 26),
+                ("R_X86_64_GOT64", 27),
+                ("R_X86_64_GOTPCREL64", 28),
+                ("R_X86_64_GOTPC64", 29),
+                ("R_X86_64_GOTPLT64", 30),
+                ("R_X86_64_PLTOFF64", 31),
+                ("R_X86_64_SIZE32", 32),
+                ("R_X86_64_SIZE64", 33),
+                ("R_X86_64_GOTPC32_TLSDESC", 34),
+                ("R_X86_64_TLSDESC_CALL", 35),
+                ("R_X86_64_TLSDESC", 36),
+                ("R_X86_64_IRELATIVE", 37),
+                ("R_X86_64_GOTPCRELX", 41),
+                ("R_X86_64_REX_GOTPCRELX", 42),
+                ("R_X86_64_CODE_4_GOTPCRELX", 43),
+                ("R_X86_64_CODE_4_GOTTPOFF", 44),
+                ("R_X86_64_CODE_4_GOTPC32_TLSDESC", 45),
+                ("R_X86_64_CODE_5_GOTPCRELX", 46),
+                ("R_X86_64_CODE_5_GOTTPOFF", 47),
+                ("R_X86_64_CODE_5_GOTPC32_TLSDESC", 48),
+                ("R_X86_64_CODE_6_GOTPCRELX", 49),
+                ("R_X86_64_CODE_6_GOTTPOFF", 50),
+                ("R_X86_64_CODE_6_GOTPC32_TLSDESC", 51),
+                ("BFD_RELOC_NONE", 0),
+                ("BFD_RELOC_8", 14),
+                ("BFD_RELOC_16", 12),
+                ("BFD_RELOC_32", 10),
+                ("BFD_RELOC_64", 1),
+            ];
+            return table
+                .iter()
+                .find(|(key, _)| *key == name)
+                .map(|(_, value)| *value);
+        }
+        let table: &[(&str, u32)] = &[
+            ("R_386_NONE", 0),
+            ("R_386_32", 1),
+            ("R_386_PC32", 2),
+            ("R_386_GOT32", 3),
+            ("R_386_PLT32", 4),
+            ("R_386_COPY", 5),
+            ("R_386_GLOB_DAT", 6),
+            ("R_386_JUMP_SLOT", 7),
+            ("R_386_RELATIVE", 8),
+            ("R_386_GOTOFF", 9),
+            ("R_386_GOTPC", 10),
+            ("R_386_32PLT", 11),
+            ("R_386_TLS_TPOFF", 14),
+            ("R_386_TLS_IE", 15),
+            ("R_386_TLS_GOTIE", 16),
+            ("R_386_TLS_LE", 17),
+            ("R_386_TLS_GD", 18),
+            ("R_386_TLS_LDM", 19),
+            ("R_386_16", 20),
+            ("R_386_PC16", 21),
+            ("R_386_8", 22),
+            ("R_386_PC8", 23),
+            ("R_386_TLS_GD_32", 24),
+            ("R_386_TLS_GD_PUSH", 25),
+            ("R_386_TLS_GD_CALL", 26),
+            ("R_386_TLS_GD_POP", 27),
+            ("R_386_TLS_LDM_32", 28),
+            ("R_386_TLS_LDM_PUSH", 29),
+            ("R_386_TLS_LDM_CALL", 30),
+            ("R_386_TLS_LDM_POP", 31),
+            ("R_386_TLS_LDO_32", 32),
+            ("R_386_TLS_IE_32", 33),
+            ("R_386_TLS_LE_32", 34),
+            ("R_386_TLS_DTPMOD32", 35),
+            ("R_386_TLS_DTPOFF32", 36),
+            ("R_386_TLS_TPOFF32", 37),
+            ("R_386_TLS_GOTDESC", 39),
+            ("R_386_TLS_DESC_CALL", 40),
+            ("R_386_TLS_DESC", 41),
+            ("R_386_IRELATIVE", 42),
+            ("R_386_GOT32X", 43),
+            ("BFD_RELOC_NONE", 0),
+            ("BFD_RELOC_8", 22),
+            ("BFD_RELOC_16", 20),
+            ("BFD_RELOC_32", 1),
+        ];
+        table
+            .iter()
+            .find(|(key, _)| *key == name)
+            .map(|(_, value)| *value)
+    }
+}
+
+pub mod codegen {
+    use super::*;
+    use crate::compilers::compiler_infrastructure::{
+        AtomicOp, BinaryOp, BlockCall, ClassId, Comparison, Conversion, DataLayout,
+        FloatComparison, Function, FunctionId, GlobalContent, Instruction, Linkage, Module,
+        Operation, Scalar, Signature, Symbol, Terminator, Type, UnaryOp, Value,
+    };
+
+    pub const TRAP_NULL_REFERENCE: i64 = 1;
+    pub const TRAP_INDEX_OUT_OF_BOUNDS: i64 = 2;
+    pub const TRAP_DIVISION_BY_ZERO: i64 = 3;
+    pub const TRAP_CONVERSION_RANGE: i64 = 4;
+    pub const TRAP_NEGATIVE_LENGTH: i64 = 5;
+    pub const TRAP_MEMORY_EXHAUSTED: i64 = 6;
+    pub const TRAP_ABSTRACT_METHOD: i64 = 7;
+    pub const TRAP_MISSING_IMPLEMENTATION: i64 = 8;
+    pub const TRAP_UNREACHABLE: i64 = 9;
+    pub const TRAP_OVERLAPPING_COPY: i64 = 10;
+    pub const TRAP_EXPLICIT: i64 = 11;
+    pub const TRAP_ABORT: i64 = 12;
+
+    pub const INSTANCE_HEADER: u32 = 16;
+    pub const ARRAY_LENGTH_OFFSET: u32 = 16;
+    pub const ARRAY_HEADER: u32 = 24;
+
+    pub(super) const INTRINSIC_SYSCALL: &str = "omni.machine.syscall";
+    pub(super) const INTRINSIC_ADDRESS: &str = "omni.machine.address";
+    pub(super) const INTRINSIC_REFERENCE: &str = "omni.machine.reference";
+
+    pub fn unsupported(feature: &str) -> Diagnostic {
+        fail(
+            "EI500",
+            "The native code generator does not support this yet.",
+        )
+        .with_context(format!("Feature: {feature}"))
+    }
+
+    pub(super) fn assembly_failed(text: &str) -> Diagnostic {
+        fail(
+            "EI501",
+            "The generated machine code could not be assembled.",
+        )
+        .with_context(format!("Cause: {text}"))
+    }
+
+    pub(super) fn link_failed(text: &str) -> Diagnostic {
+        fail("EI502", "The generated program could not be linked.")
+            .with_context(format!("Cause: {text}"))
+    }
+
+    fn plain_name(name: &str) -> bool {
+        let mut bytes = name.bytes();
+        let Some(first) = bytes.next() else {
+            return false;
+        };
+        (first.is_ascii_alphabetic() || first == b'_' || first == b'.')
+            && bytes.all(|byte| byte.is_ascii_alphanumeric() || matches!(byte, b'_' | b'.' | b'$'))
+    }
+
+    pub fn function_symbol(module: &Module, id: FunctionId) -> String {
+        let function = &module.functions[id.index()];
+        if function.linkage != Linkage::Internal && plain_name(&function.name) {
+            function.name.clone()
+        } else if function.linkage != Linkage::Internal {
+            let hex: String = function
+                .name
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("__omni_n_{hex}")
+        } else {
+            format!("__omni_f{}", id.0)
+        }
+    }
+
+    pub(super) fn global_symbol(module: &Module, index: usize) -> String {
+        let global = &module.globals[index];
+        if global.linkage != Linkage::Internal && plain_name(&global.name) {
+            global.name.clone()
+        } else if global.linkage != Linkage::Internal {
+            let hex: String = global
+                .name
+                .bytes()
+                .map(|byte| format!("{byte:02x}"))
+                .collect();
+            format!("__omni_n_{hex}")
+        } else {
+            format!("__omni_g{index}")
+        }
+    }
+
+    pub(super) fn type_bits(ty: Type) -> u32 {
+        ty.element().bits()
+    }
+
+    pub(super) fn is_float(ty: Type) -> bool {
+        ty.is_scalar_float()
+    }
+
+    pub(super) fn single(ty: Type) -> bool {
+        ty == Type::F32
+    }
+
+    fn suffix(ty: Type) -> &'static str {
+        if single(ty) {
+            "ss"
+        } else {
+            "sd"
+        }
+    }
+
+    fn register_32(register: &str) -> String {
+        match register {
+            "rax" => "eax".into(),
+            "rcx" => "ecx".into(),
+            "rdx" => "edx".into(),
+            "rsi" => "esi".into(),
+            "rdi" => "edi".into(),
+            other => format!("{other}d"),
+        }
+    }
+
+    fn register_16(register: &str) -> String {
+        match register {
+            "rax" => "ax".into(),
+            "rcx" => "cx".into(),
+            "rdx" => "dx".into(),
+            "rsi" => "si".into(),
+            "rdi" => "di".into(),
+            other => format!("{other}w"),
+        }
+    }
+
+    fn register_8(register: &str) -> String {
+        match register {
+            "rax" => "al".into(),
+            "rcx" => "cl".into(),
+            "rdx" => "dl".into(),
+            "rsi" => "sil".into(),
+            "rdi" => "dil".into(),
+            other => format!("{other}b"),
+        }
+    }
+
+    pub(super) fn all_ones(bits: u32) -> u64 {
+        if bits >= 64 {
+            u64::MAX
+        } else {
+            (1u64 << bits) - 1
+        }
+    }
+
+    const ARGUMENT_REGISTERS: [&str; 6] = ["rdi", "rsi", "rdx", "rcx", "r8", "r9"];
+
+    #[derive(Clone, Copy)]
+    enum Place {
+        Integer(usize),
+        Float(usize),
+        Stack(usize),
+    }
+
+    fn classify(types: &[Type]) -> (Vec<Place>, usize) {
+        let mut integers = 0;
+        let mut floats = 0;
+        let mut stack = 0;
+        let mut places = Vec::with_capacity(types.len());
+        for ty in types {
+            if is_float(*ty) {
+                if floats < 8 {
+                    places.push(Place::Float(floats));
+                    floats += 1;
+                } else {
+                    places.push(Place::Stack(stack));
+                    stack += 1;
+                }
+            } else if integers < 6 {
+                places.push(Place::Integer(integers));
+                integers += 1;
+            } else {
+                places.push(Place::Stack(stack));
+                stack += 1;
+            }
+        }
+        (places, stack)
+    }
+
+    fn ancestors_of(module: &Module, class: ClassId) -> Vec<u32> {
+        let mut pending = vec![class];
+        let mut seen = BTreeSet::new();
+        while let Some(at) = pending.pop() {
+            if !seen.insert(at.0) {
+                continue;
+            }
+            let Some(data) = module.classes.get(at.index()) else {
+                continue;
+            };
+            pending.extend(data.implementations.iter().map(|(interface, _)| *interface));
+            pending.extend(data.parent);
+        }
+        seen.into_iter().collect()
+    }
+
+    fn interface_tables(module: &Module, class: ClassId) -> Vec<(u32, Vec<Option<FunctionId>>)> {
+        let mut tables: Vec<(u32, Vec<Option<FunctionId>>)> = Vec::new();
+        let mut current = Some(class);
+        let mut steps = 0;
+        while let Some(at) = current {
+            let data = &module.classes[at.index()];
+            for (interface, slots) in &data.implementations {
+                if tables.iter().any(|(held, _)| *held == interface.0) {
+                    continue;
+                }
+                let defaults = &module.classes[interface.index()].methods;
+                let length = slots.len().max(defaults.len());
+                let resolved = (0..length)
+                    .map(|slot| {
+                        slots
+                            .get(slot)
+                            .copied()
+                            .flatten()
+                            .or_else(|| defaults.get(slot).copied().flatten())
+                    })
+                    .collect();
+                tables.push((interface.0, resolved));
+            }
+            current = data.parent;
+            steps += 1;
+            if steps > module.classes.len() {
+                break;
+            }
+        }
+        tables
+    }
+
+    pub fn field_offsets(module: &Module, layout: &DataLayout, class: ClassId) -> (Vec<u32>, u32) {
+        let mut offset = INSTANCE_HEADER;
+        let mut offsets = Vec::new();
+        for ty in module.field_types(class) {
+            let align = layout.align_of(ty).max(1);
+            offset = offset.div_ceil(align) * align;
+            offsets.push(offset);
+            offset += layout.size_of(ty);
+        }
+        (offsets, offset.div_ceil(8) * 8)
+    }
+
+    pub(super) fn check_supported(module: &Module) -> Result<(), Diagnostic> {
+        for global in &module.globals {
+            if global.thread_local {
+                return Err(unsupported("thread-local globals"));
+            }
+        }
+        if module.layout.data().pointer_bytes != 8 {
+            return Err(unsupported("a layout other than lp64"));
+        }
+        for function in &module.functions {
+            let types = function
+                .value_types
+                .iter()
+                .chain(function.signature.parameters.iter())
+                .chain(function.signature.result.iter());
+            for ty in types {
+                if matches!(ty, Type::Vector { .. }) {
+                    return Err(unsupported("vector values"));
+                }
+                if ty.element() == Scalar::I128 {
+                    return Err(unsupported("128-bit integers"));
+                }
+            }
+            for instruction in &function.instructions {
+                if matches!(
+                    instruction.operation,
+                    Operation::Splat | Operation::ExtractLane(_) | Operation::InsertLane(_)
+                ) {
+                    return Err(unsupported("vector lanes"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    pub(super) struct Emitter<'m> {
+        pub(super) module: &'m Module,
+        pub(super) layout: DataLayout,
+        pub(super) out: String,
+        pub(super) labels: usize,
+        pub(super) fields: BTreeMap<u32, (Vec<u32>, u32)>,
+    }
+
+    struct Frame {
+        function: FunctionId,
+        slots: BTreeMap<usize, i64>,
+    }
+
+    impl<'m> Emitter<'m> {
+        pub(super) fn line(&mut self, text: &str) {
+            self.out.push('\t');
+            self.out.push_str(text);
+            self.out.push('\n');
+        }
+
+        pub(super) fn label(&mut self, name: &str) {
+            self.out.push_str(name);
+            self.out.push_str(":\n");
+        }
+
+        pub(super) fn fresh(&mut self) -> String {
+            self.labels += 1;
+            format!(".LT{}", self.labels)
+        }
+
+        fn slot(value: Value) -> i64 {
+            -16 * (i64::from(value.0) + 1)
+        }
+
+        fn load(&mut self, value: Value, register: &str) {
+            self.line(&format!("movq {}(%rbp), %{register}", Self::slot(value)));
+        }
+
+        fn store(&mut self, register: &str, value: Value) {
+            self.line(&format!("movq %{register}, {}(%rbp)", Self::slot(value)));
+        }
+
+        fn load_signed(&mut self, value: Value, register: &str, bits: u32) {
+            let at = Self::slot(value);
+            match bits {
+                1 => {
+                    self.line(&format!("movq {at}(%rbp), %{register}"));
+                    self.line(&format!("negq %{register}"));
+                }
+                8 => self.line(&format!("movsbq {at}(%rbp), %{register}")),
+                16 => self.line(&format!("movswq {at}(%rbp), %{register}")),
+                32 => self.line(&format!("movslq {at}(%rbp), %{register}")),
+                _ => self.line(&format!("movq {at}(%rbp), %{register}")),
+            }
+        }
+
+        fn load_float(&mut self, value: Value, register: &str, ty: Type) {
+            self.line(&format!(
+                "movs{} {}(%rbp), %{register}",
+                if single(ty) { "s" } else { "d" },
+                Self::slot(value)
+            ));
+        }
+
+        fn store_float(&mut self, register: &str, value: Value, ty: Type) {
+            self.line(&format!(
+                "movs{} %{register}, {}(%rbp)",
+                if single(ty) { "s" } else { "d" },
+                Self::slot(value)
+            ));
+        }
+
+        fn mask(&mut self, register: &str, bits: u32) {
+            match bits {
+                1 => self.line(&format!("andl $1, %{}", register_32(register))),
+                8 => self.line(&format!(
+                    "movzbl %{}, %{}",
+                    register_8(register),
+                    register_32(register)
+                )),
+                16 => self.line(&format!(
+                    "movzwl %{}, %{}",
+                    register_16(register),
+                    register_32(register)
+                )),
+                32 => self.line(&format!(
+                    "movl %{}, %{}",
+                    register_32(register),
+                    register_32(register)
+                )),
+                _ => {}
+            }
+        }
+
+        fn sign_extend_register(&mut self, register: &str, bits: u32) {
+            match bits {
+                1 => {
+                    self.line(&format!("andq $1, %{register}"));
+                    self.line(&format!("negq %{register}"));
+                }
+                8 => self.line(&format!("movsbq %{}, %{register}", register_8(register))),
+                16 => self.line(&format!("movswq %{}, %{register}", register_16(register))),
+                32 => self.line(&format!("movslq %{}, %{register}", register_32(register))),
+                _ => {}
+            }
+        }
+
+        fn constant(&mut self, value: u64, register: &str) {
+            if value == 0 {
+                self.line(&format!("xorl %{0}, %{0}", register_32(register)));
+            } else if value <= u64::from(u32::MAX) {
+                self.line(&format!("movl ${value}, %{}", register_32(register)));
+            } else {
+                self.line(&format!("movabsq ${}, %{register}", value as i64));
+            }
+        }
+
+        fn trap(&mut self, code: i64) {
+            self.line(&format!("movl ${code}, %edi"));
+            self.line("xorl %esi, %esi");
+            self.line("call __omni_trap");
+        }
+
+        fn trap_unless_nonzero(&mut self, register: &str, code: i64) {
+            let skip = self.fresh();
+            self.line(&format!("testq %{register}, %{register}"));
+            self.line(&format!("jne {skip}"));
+            self.trap(code);
+            self.label(&skip);
+        }
+
+        fn canonical_nan(&mut self, register: &str, ty: Type) {
+            let skip = self.fresh();
+            self.line(&format!("ucomi{} %{register}, %{register}", suffix(ty)));
+            self.line(&format!("jnp {skip}"));
+            if single(ty) {
+                self.line("movl $0x7fc00000, %r11d");
+                self.line(&format!("movd %r11d, %{register}"));
+            } else {
+                self.line("movabsq $0x7ff8000000000000, %r11");
+                self.line(&format!("movq %r11, %{register}"));
+            }
+            self.label(&skip);
+        }
+
+        fn memory_load(&mut self, ty: Type, address: &str, offset: i64, register: &str) {
+            let size = self.layout.size_of(ty);
+            match size {
+                1 => self.line(&format!(
+                    "movzbl {offset}(%{address}), %{}",
+                    register_32(register)
+                )),
+                2 => self.line(&format!(
+                    "movzwl {offset}(%{address}), %{}",
+                    register_32(register)
+                )),
+                4 => self.line(&format!(
+                    "movl {offset}(%{address}), %{}",
+                    register_32(register)
+                )),
+                _ => self.line(&format!("movq {offset}(%{address}), %{register}")),
+            }
+        }
+
+        fn memory_store(&mut self, ty: Type, register: &str, address: &str, offset: i64) {
+            let size = self.layout.size_of(ty);
+            match size {
+                1 => self.line(&format!(
+                    "movb %{}, {offset}(%{address})",
+                    register_8(register)
+                )),
+                2 => self.line(&format!(
+                    "movw %{}, {offset}(%{address})",
+                    register_16(register)
+                )),
+                4 => self.line(&format!(
+                    "movl %{}, {offset}(%{address})",
+                    register_32(register)
+                )),
+                _ => self.line(&format!("movq %{register}, {offset}(%{address})")),
+            }
+        }
+
+        pub(super) fn field_layout(&mut self, class: ClassId) -> (Vec<u32>, u32) {
+            if let Some(found) = self.fields.get(&class.0) {
+                return found.clone();
+            }
+            let computed = field_offsets(self.module, &self.layout, class);
+            self.fields.insert(class.0, computed.clone());
+            computed
+        }
+
+        fn function_by_name(&self, id: FunctionId) -> &'m Function {
+            &self.module.functions[id.index()]
+        }
+
+        fn emit_module(&mut self) -> Result<(), Diagnostic> {
+            check_supported(self.module)?;
+            for index in 0..self.module.functions.len() {
+                let id = FunctionId(index as u32);
+                if !self.module.functions[index].is_declaration() {
+                    self.emit_function(id)?;
+                }
+            }
+            self.emit_globals();
+            self.emit_strings();
+            self.emit_classes();
+            Ok(())
+        }
+
+        pub(super) fn emit_globals(&mut self) {
+            for index in 0..self.module.globals.len() {
+                let global = &self.module.globals[index];
+                if global.linkage == Linkage::Import {
+                    continue;
+                }
+                let symbol = global_symbol(self.module, index);
+                let zero =
+                    matches!(global.content, GlobalContent::Zero) && global.relocations.is_empty();
+                if zero && global.mutable {
+                    self.line(".bss");
+                } else if global.mutable || !global.relocations.is_empty() {
+                    self.line(".data");
+                } else {
+                    self.line(".section .rodata");
+                }
+                match global.linkage {
+                    Linkage::Export => self.line(&format!(".globl {symbol}")),
+                    Linkage::Weak => self.line(&format!(".weak {symbol}")),
+                    _ => {}
+                }
+                self.line(&format!(
+                    ".p2align {}",
+                    global.align.max(1).trailing_zeros()
+                ));
+                self.line(&format!(".type {symbol}, @object"));
+                self.label(&symbol);
+                let mut bytes = match &global.content {
+                    GlobalContent::Zero => vec![0u8; global.size as usize],
+                    GlobalContent::Bytes(bytes) => bytes.clone(),
+                };
+                bytes.resize(global.size as usize, 0);
+                if zero {
+                    self.line(&format!(".zero {}", global.size.max(1)));
+                } else {
+                    let mut relocations: Vec<_> = global.relocations.iter().collect();
+                    relocations.sort_by_key(|relocation| relocation.offset);
+                    let mut at = 0usize;
+                    for relocation in relocations {
+                        let start = relocation.offset as usize;
+                        if start > at {
+                            self.emit_bytes(&bytes[at..start.min(bytes.len())]);
+                        }
+                        let target = match relocation.target {
+                            Symbol::Global(id) => global_symbol(self.module, id.index()),
+                            Symbol::Function(id) => function_symbol(self.module, id),
+                        };
+                        if relocation.addend == 0 {
+                            self.line(&format!(".quad {target}"));
+                        } else {
+                            self.line(&format!(".quad {target}{:+}", relocation.addend));
+                        }
+                        at = start + 8;
+                    }
+                    if at < bytes.len() {
+                        self.emit_bytes(&bytes[at..]);
+                    }
+                    if global.size == 0 {
+                        self.line(".zero 1");
+                    }
+                }
+                self.line(&format!(".size {symbol}, {}", global.size.max(1)));
+            }
+        }
+
+        pub(super) fn emit_bytes(&mut self, bytes: &[u8]) {
+            for chunk in bytes.chunks(16) {
+                let listed: Vec<String> = chunk.iter().map(|byte| byte.to_string()).collect();
+                self.line(&format!(".byte {}", listed.join(", ")));
+            }
+        }
+
+        pub(super) fn emit_strings(&mut self) {
+            if self.module.strings.is_empty() {
+                return;
+            }
+            self.line(".data");
+            for index in 0..self.module.strings.len() {
+                let text = self.module.strings[index].clone();
+                self.line(".p2align 3");
+                self.label(&format!("__omni_s{index}"));
+                self.line(".quad __omni_text_descriptor");
+                self.line(".quad 0");
+                self.line(&format!(".quad {}", text.len()));
+                self.emit_bytes(text.as_bytes());
+                self.line(".byte 0");
+            }
+        }
+
+        pub(super) fn emit_classes(&mut self) {
+            if self.module.classes.is_empty() {
+                return;
+            }
+            self.line(".section .rodata");
+            for index in 0..self.module.classes.len() {
+                let class = ClassId(index as u32);
+                let ancestors = ancestors_of(self.module, class);
+                let methods: Vec<Option<FunctionId>> = self.module.classes[index].methods.clone();
+                let interfaces = interface_tables(self.module, class);
+                self.line(".p2align 3");
+                self.label(&format!("__omni_c{index}"));
+                self.line(&format!(".quad {index}"));
+                self.line(&format!(".quad __omni_ca{index}"));
+                self.line(&format!(".quad {}", ancestors.len()));
+                self.line(&format!(".quad __omni_cv{index}"));
+                self.line(&format!(".quad {}", methods.len()));
+                self.line(&format!(".quad __omni_ci{index}"));
+                self.line(&format!(".quad {}", interfaces.len()));
+                self.label(&format!("__omni_ca{index}"));
+                for ancestor in &ancestors {
+                    self.line(&format!(".long {ancestor}"));
+                }
+                self.line(".p2align 3");
+                self.label(&format!("__omni_cv{index}"));
+                for method in &methods {
+                    match method {
+                        Some(function) => {
+                            let symbol = function_symbol(self.module, *function);
+                            self.line(&format!(".quad {symbol}"));
+                        }
+                        None => self.line(".quad 0"),
+                    }
+                }
+                self.label(&format!("__omni_ci{index}"));
+                for (position, (interface, slots)) in interfaces.iter().enumerate() {
+                    self.line(&format!(".quad {interface}"));
+                    self.line(&format!(".quad __omni_cis{index}_{position}"));
+                    self.line(&format!(".quad {}", slots.len()));
+                }
+                for (position, (_, slots)) in interfaces.iter().enumerate() {
+                    self.label(&format!("__omni_cis{index}_{position}"));
+                    for slot in slots {
+                        match slot {
+                            Some(function) => {
+                                let symbol = function_symbol(self.module, *function);
+                                self.line(&format!(".quad {symbol}"));
+                            }
+                            None => self.line(".quad 0"),
+                        }
+                    }
+                }
+            }
+        }
+
+        pub(super) fn block_label(function: FunctionId, block: usize) -> String {
+            format!(".LF{}B{block}", function.0)
+        }
+
+        fn emit_function(&mut self, id: FunctionId) -> Result<(), Diagnostic> {
+            let function = self.function_by_name(id);
+            let symbol = function_symbol(self.module, id);
+            let values = function.value_types.len() as i64;
+            let mut base = 16 * values;
+            let mut slots = BTreeMap::new();
+            let mut outgoing = 0usize;
+            let mut calls: Vec<&Instruction> = function.instructions.iter().collect();
+            for block in &function.blocks {
+                if let Terminator::Invoke { call, .. } = &block.terminator {
+                    calls.push(call);
+                }
+            }
+            for (index, instruction) in function.instructions.iter().enumerate() {
+                if let Operation::StackSlot { size, align } = instruction.operation {
+                    let align = i64::from(align.clamp(1, 16));
+                    base = (base + i64::from(size.max(1)) + align - 1) / align * align;
+                    slots.insert(index, -base);
+                }
+            }
+            for call in &calls {
+                let types: Vec<Type> = match &call.operation {
+                    Operation::Call(_) => call
+                        .arguments
+                        .iter()
+                        .map(|value| function.type_of(*value))
+                        .collect(),
+                    Operation::CallIndirect(_) => call.arguments[1..]
+                        .iter()
+                        .map(|value| function.type_of(*value))
+                        .collect(),
+                    _ => continue,
+                };
+                let (_, stack) = classify(&types);
+                outgoing = outgoing.max(stack);
+            }
+            let frame_size = (base + 15) / 16 * 16 + (outgoing as i64 * 8 + 15) / 16 * 16;
+            self.line(".text");
+            self.line(".p2align 4");
+            match function.linkage {
+                Linkage::Export => self.line(&format!(".globl {symbol}")),
+                Linkage::Weak => self.line(&format!(".weak {symbol}")),
+                _ => {}
+            }
+            self.line(&format!(".type {symbol}, @function"));
+            self.label(&symbol);
+            self.line("pushq %rbp");
+            self.line("movq %rsp, %rbp");
+            if frame_size > 0 {
+                self.line(&format!("subq ${frame_size}, %rsp"));
+            }
+            let parameters = function.blocks[0].parameters.clone();
+            let types: Vec<Type> = parameters
+                .iter()
+                .map(|value| function.type_of(*value))
+                .collect();
+            let (places, _) = classify(&types);
+            for ((parameter, ty), place) in parameters.iter().zip(&types).zip(&places) {
+                match place {
+                    Place::Integer(index) => self.store(ARGUMENT_REGISTERS[*index], *parameter),
+                    Place::Float(index) => {
+                        self.store_float(&format!("xmm{index}"), *parameter, *ty)
+                    }
+                    Place::Stack(index) => {
+                        self.line(&format!("movq {}(%rbp), %rax", 16 + 8 * *index as i64));
+                        self.store("rax", *parameter);
+                    }
+                }
+            }
+            let frame = Frame {
+                function: id,
+                slots,
+            };
+            for (index, block) in function.blocks.iter().enumerate() {
+                self.label(&Self::block_label(id, index));
+                for inst in &block.instructions {
+                    let instruction = &function.instructions[inst.index()];
+                    self.emit_instruction(&frame, function, inst.index(), instruction)?;
+                }
+                self.emit_terminator(&frame, function, &block.terminator)?;
+            }
+            self.label(&format!(".LF{}R", id.0));
+            self.line("leave");
+            self.line("ret");
+            self.label(&format!(".LF{}O", id.0));
+            self.line("xorl %eax, %eax");
+            self.line("leave");
+            self.line("ret");
+            self.line(&format!(".size {symbol}, .-{symbol}"));
+            Ok(())
+        }
+
+        fn edge(&mut self, frame: &Frame, function: &Function, call: &BlockCall, prefix: bool) {
+            let parameters = &function.blocks[call.block.index()].parameters;
+            let mut incoming = 0;
+            if prefix {
+                self.line("pushq %rax");
+                incoming += 1;
+            }
+            for argument in &call.arguments {
+                self.line(&format!("pushq {}(%rbp)", Self::slot(*argument)));
+                incoming += 1;
+            }
+            for parameter in parameters.iter().take(incoming).rev() {
+                self.line(&format!("popq {}(%rbp)", Self::slot(*parameter)));
+            }
+            for _ in parameters.len()..incoming {
+                self.line("addq $8, %rsp");
+            }
+            let target = Self::block_label(frame.function, call.block.index());
+            self.line(&format!("jmp {target}"));
+        }
+
+        fn may_throw(&self, instruction: &Instruction) -> bool {
+            match &instruction.operation {
+                Operation::Call(callee) => !self.module.functions[callee.index()].is_declaration(),
+                Operation::CallIndirect(_) => true,
+                _ => false,
+            }
+        }
+
+        fn emit_call(
+            &mut self,
+            function: &Function,
+            instruction: &Instruction,
+        ) -> Result<(), Diagnostic> {
+            let (arguments, signature, target): (&[Value], Signature, Option<FunctionId>) =
+                match &instruction.operation {
+                    Operation::Call(callee) => (
+                        &instruction.arguments,
+                        self.module.functions[callee.index()].signature.clone(),
+                        Some(*callee),
+                    ),
+                    Operation::CallIndirect(signature) => {
+                        (&instruction.arguments[1..], signature.clone(), None)
+                    }
+                    _ => return Ok(()),
+                };
+            if let Some(callee) = target {
+                let name = self.module.functions[callee.index()].name.as_str();
+                if self.module.functions[callee.index()].is_declaration() {
+                    match name {
+                        INTRINSIC_SYSCALL => {
+                            let registers = ["rax", "rdi", "rsi", "rdx", "r10", "r8", "r9"];
+                            for (argument, register) in arguments.iter().zip(registers) {
+                                self.load(*argument, register);
+                            }
+                            self.line("syscall");
+                            if let Some(result) = instruction.result {
+                                self.store("rax", result);
+                            }
+                            return Ok(());
+                        }
+                        INTRINSIC_ADDRESS | INTRINSIC_REFERENCE => {
+                            self.load(arguments[0], "rax");
+                            if let Some(result) = instruction.result {
+                                self.store("rax", result);
+                            }
+                            return Ok(());
+                        }
+                        _ => {}
+                    }
+                }
+            }
+            let types: Vec<Type> = arguments
+                .iter()
+                .map(|value| function.type_of(*value))
+                .collect();
+            let (places, _) = classify(&types);
+            let mut floats = 0;
+            for (argument, place) in arguments.iter().zip(&places) {
+                if let Place::Stack(index) = place {
+                    self.load(*argument, "rax");
+                    self.line(&format!("movq %rax, {}(%rsp)", 8 * index));
+                }
+            }
+            if target.is_none() {
+                self.load(instruction.arguments[0], "r11");
+            }
+            for ((argument, place), ty) in arguments.iter().zip(&places).zip(&types) {
+                match place {
+                    Place::Integer(index) => self.load(*argument, ARGUMENT_REGISTERS[*index]),
+                    Place::Float(index) => {
+                        floats += 1;
+                        self.load_float(*argument, &format!("xmm{index}"), *ty)
+                    }
+                    Place::Stack(_) => {}
+                }
+            }
+            if signature.variadic {
+                self.line(&format!("movl ${floats}, %eax"));
+            }
+            match target {
+                Some(callee) => {
+                    let symbol = function_symbol(self.module, callee);
+                    self.line(&format!("call {symbol}"));
+                }
+                None => self.line("call *%r11"),
+            }
+            if let Some(result) = instruction.result {
+                let ty = function.type_of(result);
+                if is_float(ty) {
+                    self.store_float("xmm0", result, ty);
+                } else {
+                    self.mask("rax", type_bits(ty));
+                    self.store("rax", result);
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_terminator(
+            &mut self,
+            frame: &Frame,
+            function: &Function,
+            terminator: &Terminator,
+        ) -> Result<(), Diagnostic> {
+            match terminator {
+                Terminator::Jump(call) => self.edge(frame, function, call, false),
+                Terminator::Branch {
+                    condition,
+                    taken,
+                    otherwise,
+                } => {
+                    let label = self.fresh();
+                    self.load(*condition, "rax");
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jne {label}"));
+                    self.edge(frame, function, otherwise, false);
+                    self.label(&label);
+                    self.edge(frame, function, taken, false);
+                }
+                Terminator::Switch {
+                    value,
+                    cases,
+                    default,
+                } => {
+                    let bits = type_bits(function.type_of(*value));
+                    self.load(*value, "rax");
+                    let mut targets = Vec::new();
+                    for (case, _) in cases {
+                        let label = self.fresh();
+                        self.constant((*case as u64) & all_ones(bits), "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line(&format!("je {label}"));
+                        targets.push(label);
+                    }
+                    self.edge(frame, function, default, false);
+                    for ((_, call), label) in cases.iter().zip(targets) {
+                        self.label(&label);
+                        self.edge(frame, function, call, false);
+                    }
+                }
+                Terminator::Return(value) => {
+                    if let Some(value) = value {
+                        let ty = function.type_of(*value);
+                        if is_float(ty) {
+                            self.load_float(*value, "xmm0", ty);
+                        } else {
+                            self.load(*value, "rax");
+                        }
+                    }
+                    self.line(&format!("jmp .LF{}R", frame.function.0));
+                }
+                Terminator::Unreachable => self.trap(TRAP_UNREACHABLE),
+                Terminator::Throw(value) => {
+                    self.load(*value, "rax");
+                    self.trap_unless_nonzero("rax", TRAP_NULL_REFERENCE);
+                    self.line("movq %rax, __omni_pending(%rip)");
+                    self.line(&format!("jmp .LF{}O", frame.function.0));
+                }
+                Terminator::Invoke {
+                    call,
+                    normal,
+                    unwind,
+                } => {
+                    self.emit_call(function, call)?;
+                    if self.may_throw(call) {
+                        let caught = self.fresh();
+                        self.line("movq __omni_pending(%rip), %rax");
+                        self.line("testq %rax, %rax");
+                        self.line(&format!("jne {caught}"));
+                        self.edge(frame, function, normal, false);
+                        self.label(&caught);
+                        self.line("movq $0, __omni_pending(%rip)");
+                        self.edge(frame, function, unwind, true);
+                    } else {
+                        self.edge(frame, function, normal, false);
+                    }
+                }
+            }
+            Ok(())
+        }
+
+        fn emit_instruction(
+            &mut self,
+            frame: &Frame,
+            function: &Function,
+            index: usize,
+            instruction: &Instruction,
+        ) -> Result<(), Diagnostic> {
+            let arguments = &instruction.arguments;
+            let result = instruction.result;
+            let result_type = result.map(|value| function.type_of(value));
+            let argument_type = |at: usize| function.type_of(arguments[at]);
+            match &instruction.operation {
+                Operation::IntegerConstant(value) => {
+                    let bits = type_bits(result_type.unwrap_or(Type::I64));
+                    self.constant((*value as u64) & all_ones(bits), "rax");
+                    self.store_result("rax", result);
+                }
+                Operation::FloatConstant(bits) => {
+                    let ty = result_type.unwrap_or(Type::F64);
+                    let raw = if single(ty) {
+                        bits & 0xffff_ffff
+                    } else {
+                        *bits
+                    };
+                    self.constant(raw, "rax");
+                    self.store_result("rax", result);
+                }
+                Operation::Null | Operation::Poison => {
+                    self.line("xorl %eax, %eax");
+                    self.store_result("rax", result);
+                }
+                Operation::GlobalAddress(id) => {
+                    let symbol = global_symbol(self.module, id.index());
+                    self.line(&format!("leaq {symbol}(%rip), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::FunctionAddress(id) => {
+                    let symbol = function_symbol(self.module, *id);
+                    self.line(&format!("leaq {symbol}(%rip), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::StringConstant(index) => {
+                    self.line(&format!("leaq __omni_s{index}(%rip), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::Binary(op) => {
+                    let ty = argument_type(0);
+                    if op.is_float() {
+                        self.float_binary(*op, ty, arguments[0], arguments[1], result);
+                    } else {
+                        self.integer_binary(*op, type_bits(ty), arguments[0], arguments[1], result);
+                    }
+                }
+                Operation::Unary(op) => {
+                    let ty = argument_type(0);
+                    if op.is_float() {
+                        self.float_unary(*op, ty, arguments[0], result);
+                    } else {
+                        self.integer_unary(*op, type_bits(ty), arguments[0], result);
+                    }
+                }
+                Operation::Compare(comparison) => {
+                    let bits = type_bits(argument_type(0));
+                    let signed = matches!(
+                        comparison,
+                        Comparison::LessSigned
+                            | Comparison::LessEqualSigned
+                            | Comparison::GreaterSigned
+                            | Comparison::GreaterEqualSigned
+                    );
+                    if signed {
+                        self.load_signed(arguments[0], "rax", bits);
+                        self.load_signed(arguments[1], "rcx", bits);
+                    } else {
+                        self.load(arguments[0], "rax");
+                        self.load(arguments[1], "rcx");
+                    }
+                    let condition = match comparison {
+                        Comparison::Equal => "e",
+                        Comparison::NotEqual => "ne",
+                        Comparison::LessSigned => "l",
+                        Comparison::LessEqualSigned => "le",
+                        Comparison::GreaterSigned => "g",
+                        Comparison::GreaterEqualSigned => "ge",
+                        Comparison::LessUnsigned => "b",
+                        Comparison::LessEqualUnsigned => "be",
+                        Comparison::GreaterUnsigned => "a",
+                        Comparison::GreaterEqualUnsigned => "ae",
+                    };
+                    self.line("cmpq %rcx, %rax");
+                    self.line(&format!("set{condition} %al"));
+                    self.line("movzbl %al, %eax");
+                    self.store_result("rax", result);
+                }
+                Operation::FloatCompare(comparison) => {
+                    self.float_compare(*comparison, argument_type(0), arguments, result);
+                }
+                Operation::Convert(conversion) => {
+                    let to = result_type.unwrap_or(Type::I64);
+                    self.convert(*conversion, arguments[0], argument_type(0), to, result);
+                }
+                Operation::Select => {
+                    self.load(arguments[0], "rdx");
+                    self.load(arguments[1], "rax");
+                    self.load(arguments[2], "rcx");
+                    self.line("testq %rdx, %rdx");
+                    self.line("cmoveq %rcx, %rax");
+                    self.store_result("rax", result);
+                }
+                Operation::Splat | Operation::ExtractLane(_) | Operation::InsertLane(_) => {
+                    return Err(unsupported("vector lanes"));
+                }
+                Operation::StackSlot { .. } => {
+                    let at = frame.slots.get(&index).copied().unwrap_or(0);
+                    self.line(&format!("leaq {at}(%rbp), %rax"));
+                    self.store_result("rax", result);
+                }
+                Operation::Load { .. } => {
+                    let ty = result_type.unwrap_or(Type::I64);
+                    self.load(arguments[0], "rcx");
+                    self.memory_load(ty, "rcx", 0, "rax");
+                    self.store_result("rax", result);
+                }
+                Operation::Store { .. } => {
+                    let ty = argument_type(0);
+                    self.load(arguments[0], "rax");
+                    self.load(arguments[1], "rcx");
+                    self.memory_store(ty, "rax", "rcx", 0);
+                }
+                Operation::Offset => {
+                    let bits = type_bits(argument_type(1));
+                    self.load(arguments[0], "rax");
+                    self.load_signed(arguments[1], "rcx", bits);
+                    self.line("addq %rcx, %rax");
+                    self.store_result("rax", result);
+                }
+                Operation::FieldAddress(structure, field) => {
+                    let (offsets, _, _) = self
+                        .layout
+                        .struct_layout(&self.module.structs[structure.index()]);
+                    let offset = offsets.get(*field as usize).copied().unwrap_or(0);
+                    self.load(arguments[0], "rax");
+                    if offset != 0 {
+                        self.line(&format!("addq ${offset}, %rax"));
+                    }
+                    self.store_result("rax", result);
+                }
+                Operation::ElementAddress(ty) => {
+                    let bits = type_bits(argument_type(1));
+                    let size = self.layout.size_of(*ty);
+                    self.load(arguments[0], "rax");
+                    self.load_signed(arguments[1], "rcx", bits);
+                    self.line(&format!("imulq ${size}, %rcx, %rcx"));
+                    self.line("addq %rcx, %rax");
+                    self.store_result("rax", result);
+                }
+                Operation::AtomicUpdate(op, _) => {
+                    let ty = argument_type(1);
+                    let bits = type_bits(ty);
+                    self.load(arguments[0], "rdi");
+                    self.memory_load(ty, "rdi", 0, "rax");
+                    let signed = matches!(op, AtomicOp::MinimumSigned | AtomicOp::MaximumSigned);
+                    if signed {
+                        self.load_signed(arguments[1], "rcx", bits);
+                        self.line("movq %rax, %rdx");
+                        self.sign_extend_register("rdx", bits);
+                    } else {
+                        self.load(arguments[1], "rcx");
+                        self.line("movq %rax, %rdx");
+                    }
+                    match op {
+                        AtomicOp::Exchange => self.line("movq %rcx, %rdx"),
+                        AtomicOp::Add => self.line("addq %rcx, %rdx"),
+                        AtomicOp::Subtract => self.line("subq %rcx, %rdx"),
+                        AtomicOp::And => self.line("andq %rcx, %rdx"),
+                        AtomicOp::Nand => {
+                            self.line("andq %rcx, %rdx");
+                            self.line("notq %rdx");
+                        }
+                        AtomicOp::Or => self.line("orq %rcx, %rdx"),
+                        AtomicOp::Xor => self.line("xorq %rcx, %rdx"),
+                        AtomicOp::MinimumSigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovgq %rcx, %rdx");
+                        }
+                        AtomicOp::MaximumSigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovlq %rcx, %rdx");
+                        }
+                        AtomicOp::MinimumUnsigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovaq %rcx, %rdx");
+                        }
+                        AtomicOp::MaximumUnsigned => {
+                            self.line("cmpq %rcx, %rdx");
+                            self.line("cmovbq %rcx, %rdx");
+                        }
+                    }
+                    self.memory_store(ty, "rdx", "rdi", 0);
+                    self.store_result("rax", result);
+                }
+                Operation::CompareExchange(..) => {
+                    let ty = argument_type(1);
+                    let skip = self.fresh();
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rcx");
+                    self.load(arguments[2], "rdx");
+                    self.memory_load(ty, "rdi", 0, "rax");
+                    self.line("cmpq %rcx, %rax");
+                    self.line(&format!("jne {skip}"));
+                    self.memory_store(ty, "rdx", "rdi", 0);
+                    self.label(&skip);
+                    self.store_result("rax", result);
+                }
+                Operation::Fence(_) => self.line("mfence"),
+                Operation::MemoryCopy => {
+                    let skip = self.fresh();
+                    let fine = self.fresh();
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rsi");
+                    self.load(arguments[2], "rcx");
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("je {skip}"));
+                    self.line("leaq (%rsi,%rcx), %rax");
+                    self.line("cmpq %rax, %rdi");
+                    self.line(&format!("jae {fine}"));
+                    self.line("leaq (%rdi,%rcx), %rax");
+                    self.line("cmpq %rax, %rsi");
+                    self.line(&format!("jae {fine}"));
+                    self.trap(TRAP_OVERLAPPING_COPY);
+                    self.label(&fine);
+                    self.line("rep movsb");
+                    self.label(&skip);
+                }
+                Operation::MemoryMove => {
+                    let forward = self.fresh();
+                    let done = self.fresh();
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rsi");
+                    self.load(arguments[2], "rcx");
+                    self.line("cmpq %rsi, %rdi");
+                    self.line(&format!("jbe {forward}"));
+                    self.line("leaq (%rsi,%rcx), %rax");
+                    self.line("cmpq %rax, %rdi");
+                    self.line(&format!("jae {forward}"));
+                    self.line("leaq -1(%rsi,%rcx), %rsi");
+                    self.line("leaq -1(%rdi,%rcx), %rdi");
+                    self.line("std");
+                    self.line("rep movsb");
+                    self.line("cld");
+                    self.line(&format!("jmp {done}"));
+                    self.label(&forward);
+                    self.line("rep movsb");
+                    self.label(&done);
+                }
+                Operation::MemoryFill => {
+                    self.load(arguments[0], "rdi");
+                    self.load(arguments[1], "rax");
+                    self.load(arguments[2], "rcx");
+                    self.line("rep stosb");
+                }
+                Operation::Call(_) | Operation::CallIndirect(_) => {
+                    self.emit_call(function, instruction)?;
+                    if self.may_throw(instruction) {
+                        self.line("cmpq $0, __omni_pending(%rip)");
+                        self.line(&format!("jne .LF{}O", frame.function.0));
+                    }
+                }
+                Operation::Allocate(class) => {
+                    let (_, size) = self.field_layout(*class);
+                    self.constant(u64::from(size), "rdi");
+                    self.line(&format!("leaq __omni_c{}(%rip), %rsi", class.0));
+                    self.line("call __omni_allocate");
+                    self.store_result("rax", result);
+                }
+                Operation::AllocateArray(class) => {
+                    let element = self.module.classes[class.index()]
+                        .element
+                        .unwrap_or(Type::I8);
+                    let size = self.layout.size_of(element);
+                    let bits = type_bits(argument_type(0));
+                    self.load_signed(arguments[0], "rdi", bits);
+                    self.constant(u64::from(size), "rsi");
+                    self.line(&format!("leaq __omni_c{}(%rip), %rdx", class.0));
+                    self.line("call __omni_allocate_array");
+                    self.store_result("rax", result);
+                }
+                Operation::LoadField(class, field) | Operation::StoreField(class, field) => {
+                    let (offsets, _) = self.field_layout(*class);
+                    let offset = i64::from(offsets.get(*field as usize).copied().unwrap_or(0));
+                    let ty = self
+                        .module
+                        .field_types(*class)
+                        .get(*field as usize)
+                        .copied()
+                        .unwrap_or(Type::I64);
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    if matches!(instruction.operation, Operation::StoreField(..)) {
+                        self.load(arguments[1], "rax");
+                        self.memory_store(ty, "rax", "rcx", offset);
+                    } else {
+                        self.memory_load(ty, "rcx", offset, "rax");
+                        self.store_result("rax", result);
+                    }
+                }
+                Operation::LoadElement(ty) | Operation::StoreElement(ty) => {
+                    let bits = type_bits(argument_type(1));
+                    let size = i64::from(self.layout.size_of(*ty));
+                    let fine = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.load_signed(arguments[1], "rdx", bits);
+                    self.line(&format!("cmpq {ARRAY_LENGTH_OFFSET}(%rcx), %rdx"));
+                    self.line(&format!("jb {fine}"));
+                    self.trap(TRAP_INDEX_OUT_OF_BOUNDS);
+                    self.label(&fine);
+                    self.line(&format!("imulq ${size}, %rdx, %rdx"));
+                    self.line("addq %rdx, %rcx");
+                    let offset = i64::from(ARRAY_HEADER);
+                    if matches!(instruction.operation, Operation::StoreElement(_)) {
+                        self.load(arguments[2], "rax");
+                        self.memory_store(*ty, "rax", "rcx", offset);
+                    } else {
+                        self.memory_load(*ty, "rcx", offset, "rax");
+                        self.store_result("rax", result);
+                    }
+                }
+                Operation::ArrayLength => {
+                    let bits = type_bits(result_type.unwrap_or(Type::I32));
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.line(&format!("movq {ARRAY_LENGTH_OFFSET}(%rcx), %rax"));
+                    self.mask("rax", bits);
+                    self.store_result("rax", result);
+                }
+                Operation::InstanceOf(class) => {
+                    let done = self.fresh();
+                    let scan = self.fresh();
+                    let found = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.line("xorl %eax, %eax");
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("je {done}"));
+                    self.line("movq (%rcx), %rdx");
+                    self.line("movq 8(%rdx), %rsi");
+                    self.line("movq 16(%rdx), %rcx");
+                    self.label(&scan);
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("je {done}"));
+                    self.line(&format!("cmpl ${}, (%rsi)", class.0));
+                    self.line(&format!("je {found}"));
+                    self.line("addq $4, %rsi");
+                    self.line("decq %rcx");
+                    self.line(&format!("jmp {scan}"));
+                    self.label(&found);
+                    self.line("movl $1, %eax");
+                    self.label(&done);
+                    self.store_result("rax", result);
+                }
+                Operation::VirtualMethod(_, slot) => {
+                    let fine = self.fresh();
+                    let present = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.line("movq (%rcx), %rdx");
+                    self.line(&format!("cmpq ${slot}, 32(%rdx)"));
+                    self.line(&format!("ja {fine}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&fine);
+                    self.line("movq 24(%rdx), %rdx");
+                    self.line(&format!("movq {}(%rdx), %rax", 8 * *slot as i64));
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jne {present}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&present);
+                    self.store_result("rax", result);
+                }
+                Operation::InterfaceMethod(class, slot) => {
+                    let scan = self.fresh();
+                    let found = self.fresh();
+                    let fine = self.fresh();
+                    let present = self.fresh();
+                    self.load(arguments[0], "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_NULL_REFERENCE);
+                    self.line("movq (%rcx), %rdx");
+                    self.line("movq 40(%rdx), %rsi");
+                    self.line("movq 48(%rdx), %rcx");
+                    self.label(&scan);
+                    self.line("testq %rcx, %rcx");
+                    self.line(&format!("jne {found}"));
+                    self.trap(TRAP_MISSING_IMPLEMENTATION);
+                    self.label(&found);
+                    let next = self.fresh();
+                    self.line(&format!("cmpq ${}, (%rsi)", class.0));
+                    self.line(&format!("je {next}"));
+                    self.line("addq $24, %rsi");
+                    self.line("decq %rcx");
+                    self.line(&format!("jmp {scan}"));
+                    self.label(&next);
+                    self.line(&format!("cmpq ${slot}, 16(%rsi)"));
+                    self.line(&format!("ja {fine}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&fine);
+                    self.line("movq 8(%rsi), %rdx");
+                    self.line(&format!("movq {}(%rdx), %rax", 8 * *slot as i64));
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jne {present}"));
+                    self.trap(TRAP_ABSTRACT_METHOD);
+                    self.label(&present);
+                    self.store_result("rax", result);
+                }
+                Operation::SameObject => {
+                    self.load(arguments[0], "rax");
+                    self.load(arguments[1], "rcx");
+                    self.line("cmpq %rcx, %rax");
+                    self.line("sete %al");
+                    self.line("movzbl %al, %eax");
+                    self.store_result("rax", result);
+                }
+                Operation::Trap(code) => {
+                    self.line(&format!("movl ${TRAP_EXPLICIT}, %edi"));
+                    self.line(&format!("movl ${code}, %esi"));
+                    self.line("call __omni_trap");
+                }
+            }
+            Ok(())
+        }
+
+        fn store_result(&mut self, register: &str, result: Option<Value>) {
+            if let Some(result) = result {
+                self.store(register, result);
+            }
+        }
+
+        fn integer_binary(
+            &mut self,
+            op: BinaryOp,
+            bits: u32,
+            left: Value,
+            right: Value,
+            result: Option<Value>,
+        ) {
+            let wide = bits >= 64;
+            let highest = if wide {
+                i64::MAX
+            } else {
+                (1i64 << (bits.max(1) - 1)) - 1
+            };
+            let lowest = if wide { i64::MIN } else { -highest - 1 };
+            match op {
+                BinaryOp::Add
+                | BinaryOp::Subtract
+                | BinaryOp::Multiply
+                | BinaryOp::And
+                | BinaryOp::Or
+                | BinaryOp::Xor => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    let mnemonic = match op {
+                        BinaryOp::Add => "addq",
+                        BinaryOp::Subtract => "subq",
+                        BinaryOp::Multiply => "imulq",
+                        BinaryOp::And => "andq",
+                        BinaryOp::Or => "orq",
+                        _ => "xorq",
+                    };
+                    self.line(&format!("{mnemonic} %rcx, %rax"));
+                    self.mask("rax", bits);
+                }
+                BinaryOp::DivideSigned | BinaryOp::RemainderSigned => {
+                    let general = self.fresh();
+                    let done = self.fresh();
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    self.trap_unless_nonzero("rcx", TRAP_DIVISION_BY_ZERO);
+                    self.line("cmpq $-1, %rcx");
+                    self.line(&format!("jne {general}"));
+                    if op == BinaryOp::DivideSigned {
+                        self.line("negq %rax");
+                    } else {
+                        self.line("xorl %eax, %eax");
+                    }
+                    self.line(&format!("jmp {done}"));
+                    self.label(&general);
+                    self.line("cqto");
+                    self.line("idivq %rcx");
+                    if op == BinaryOp::RemainderSigned {
+                        self.line("movq %rdx, %rax");
+                    }
+                    self.label(&done);
+                    self.mask("rax", bits);
+                }
+                BinaryOp::DivideUnsigned | BinaryOp::RemainderUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.trap_unless_nonzero("rcx", TRAP_DIVISION_BY_ZERO);
+                    self.line("xorl %edx, %edx");
+                    self.line("divq %rcx");
+                    if op == BinaryOp::RemainderUnsigned {
+                        self.line("movq %rdx, %rax");
+                    }
+                }
+                BinaryOp::ShiftLeft
+                | BinaryOp::ShiftRightLogical
+                | BinaryOp::ShiftRightArithmetic => {
+                    if op == BinaryOp::ShiftRightArithmetic {
+                        self.load_signed(left, "rax", bits);
+                    } else {
+                        self.load(left, "rax");
+                    }
+                    self.load(right, "rcx");
+                    self.line(&format!("andl ${}, %ecx", bits.max(1) - 1));
+                    let mnemonic = match op {
+                        BinaryOp::ShiftLeft => "shlq",
+                        BinaryOp::ShiftRightLogical => "shrq",
+                        _ => "sarq",
+                    };
+                    self.line(&format!("{mnemonic} %cl, %rax"));
+                    self.mask("rax", bits);
+                }
+                BinaryOp::RotateLeft | BinaryOp::RotateRight => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    if bits >= 8 {
+                        self.line(&format!("andl ${}, %ecx", bits - 1));
+                        let direction = if op == BinaryOp::RotateLeft {
+                            "rol"
+                        } else {
+                            "ror"
+                        };
+                        let (width, register) = match bits {
+                            8 => ("b", "al"),
+                            16 => ("w", "ax"),
+                            32 => ("l", "eax"),
+                            _ => ("q", "rax"),
+                        };
+                        self.line(&format!("{direction}{width} %cl, %{register}"));
+                        self.mask("rax", bits);
+                    }
+                }
+                BinaryOp::MinimumSigned | BinaryOp::MaximumSigned => {
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    self.line("cmpq %rcx, %rax");
+                    if op == BinaryOp::MinimumSigned {
+                        self.line("cmovgq %rcx, %rax");
+                    } else {
+                        self.line("cmovlq %rcx, %rax");
+                    }
+                    self.mask("rax", bits);
+                }
+                BinaryOp::MinimumUnsigned | BinaryOp::MaximumUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("cmpq %rcx, %rax");
+                    if op == BinaryOp::MinimumUnsigned {
+                        self.line("cmovaq %rcx, %rax");
+                    } else {
+                        self.line("cmovbq %rcx, %rax");
+                    }
+                }
+                BinaryOp::AddSaturatingSigned | BinaryOp::SubtractSaturatingSigned => {
+                    let adding = op == BinaryOp::AddSaturatingSigned;
+                    let mnemonic = if adding { "addq" } else { "subq" };
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    if wide {
+                        let done = self.fresh();
+                        self.line(&format!("{mnemonic} %rcx, %rax"));
+                        self.line(&format!("jno {done}"));
+                        self.constant(i64::MAX as u64, "rax");
+                        self.line("testq %rcx, %rcx");
+                        self.line(&format!("{} {done}", if adding { "jns" } else { "js" }));
+                        self.constant(i64::MIN as u64, "rax");
+                        self.label(&done);
+                    } else {
+                        self.line(&format!("{mnemonic} %rcx, %rax"));
+                        self.constant(highest as u64, "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line("cmovgq %rcx, %rax");
+                        self.constant(lowest as u64, "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line("cmovlq %rcx, %rax");
+                        self.mask("rax", bits);
+                    }
+                }
+                BinaryOp::AddSaturatingUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("addq %rcx, %rax");
+                    if wide {
+                        let done = self.fresh();
+                        self.line(&format!("jnc {done}"));
+                        self.line("movq $-1, %rax");
+                        self.label(&done);
+                    } else {
+                        self.constant(all_ones(bits), "rcx");
+                        self.line("cmpq %rcx, %rax");
+                        self.line("cmovaq %rcx, %rax");
+                    }
+                }
+                BinaryOp::SubtractSaturatingUnsigned => {
+                    let done = self.fresh();
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("subq %rcx, %rax");
+                    self.line(&format!("jnc {done}"));
+                    self.line("xorl %eax, %eax");
+                    self.label(&done);
+                }
+                BinaryOp::AddOverflowsSigned
+                | BinaryOp::SubtractOverflowsSigned
+                | BinaryOp::MultiplyOverflowsSigned => {
+                    let mnemonic = match op {
+                        BinaryOp::AddOverflowsSigned => "addq",
+                        BinaryOp::SubtractOverflowsSigned => "subq",
+                        _ => "imulq",
+                    };
+                    self.load_signed(left, "rax", bits);
+                    self.load_signed(right, "rcx", bits);
+                    self.line(&format!("{mnemonic} %rcx, %rax"));
+                    if wide {
+                        self.line("seto %al");
+                    } else {
+                        self.line("movq %rax, %rdx");
+                        self.sign_extend_register("rdx", bits);
+                        self.line("cmpq %rdx, %rax");
+                        self.line("setne %al");
+                    }
+                    self.line("movzbl %al, %eax");
+                }
+                BinaryOp::AddOverflowsUnsigned | BinaryOp::MultiplyOverflowsUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    if wide {
+                        if op == BinaryOp::AddOverflowsUnsigned {
+                            self.line("addq %rcx, %rax");
+                            self.line("setc %al");
+                        } else {
+                            self.line("mulq %rcx");
+                            self.line("seto %al");
+                        }
+                    } else {
+                        if op == BinaryOp::AddOverflowsUnsigned {
+                            self.line("addq %rcx, %rax");
+                        } else {
+                            self.line("imulq %rcx, %rax");
+                        }
+                        self.line(&format!("shrq ${bits}, %rax"));
+                        self.line("setne %al");
+                    }
+                    self.line("movzbl %al, %eax");
+                }
+                BinaryOp::SubtractOverflowsUnsigned => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    self.line("cmpq %rcx, %rax");
+                    self.line("setb %al");
+                    self.line("movzbl %al, %eax");
+                }
+                BinaryOp::MultiplyHighSigned | BinaryOp::MultiplyHighUnsigned => {
+                    let signed = op == BinaryOp::MultiplyHighSigned;
+                    if signed {
+                        self.load_signed(left, "rax", bits);
+                        self.load_signed(right, "rcx", bits);
+                    } else {
+                        self.load(left, "rax");
+                        self.load(right, "rcx");
+                    }
+                    if wide {
+                        self.line(if signed { "imulq %rcx" } else { "mulq %rcx" });
+                        self.line("movq %rdx, %rax");
+                    } else {
+                        self.line("imulq %rcx, %rax");
+                        self.line(&format!(
+                            "{} ${bits}, %rax",
+                            if signed { "sarq" } else { "shrq" }
+                        ));
+                        self.mask("rax", bits);
+                    }
+                }
+                _ => {}
+            }
+            self.store_result("rax", result);
+        }
+
+        fn integer_unary(&mut self, op: UnaryOp, bits: u32, value: Value, result: Option<Value>) {
+            match op {
+                UnaryOp::Negate => {
+                    self.load(value, "rax");
+                    self.line("negq %rax");
+                    self.mask("rax", bits);
+                }
+                UnaryOp::Not => {
+                    self.load(value, "rax");
+                    self.line("notq %rax");
+                    self.mask("rax", bits);
+                }
+                UnaryOp::PopulationCount => {
+                    self.load(value, "rax");
+                    self.line("popcntq %rax, %rax");
+                }
+                UnaryOp::LeadingZeros => {
+                    let done = self.fresh();
+                    self.load(value, "rax");
+                    self.line("bsrq %rax, %rcx");
+                    self.line(&format!("movl ${bits}, %eax"));
+                    self.line(&format!("je {done}"));
+                    self.line(&format!("movl ${}, %eax", bits - 1));
+                    self.line("subl %ecx, %eax");
+                    self.label(&done);
+                }
+                UnaryOp::TrailingZeros => {
+                    let done = self.fresh();
+                    self.load(value, "rcx");
+                    self.line(&format!("movl ${bits}, %eax"));
+                    self.line("bsfq %rcx, %rcx");
+                    self.line(&format!("je {done}"));
+                    self.line("movq %rcx, %rax");
+                    self.label(&done);
+                }
+                UnaryOp::ByteSwap => {
+                    self.load(value, "rax");
+                    match bits {
+                        16 => self.line("rolw $8, %ax"),
+                        32 => self.line("bswapl %eax"),
+                        64 => self.line("bswapq %rax"),
+                        _ => {}
+                    }
+                }
+                UnaryOp::BitReverse => {
+                    self.load(value, "rax");
+                    for (shift, pattern) in [
+                        (1, 0x5555_5555_5555_5555u64),
+                        (2, 0x3333_3333_3333_3333),
+                        (4, 0x0f0f_0f0f_0f0f_0f0f),
+                    ] {
+                        self.line("movq %rax, %rcx");
+                        self.line(&format!("shrq ${shift}, %rcx"));
+                        self.line(&format!("movabsq ${}, %rdx", pattern as i64));
+                        self.line("andq %rdx, %rcx");
+                        self.line("andq %rdx, %rax");
+                        self.line(&format!("shlq ${shift}, %rax"));
+                        self.line("orq %rcx, %rax");
+                    }
+                    self.line("bswapq %rax");
+                    if bits < 64 {
+                        self.line(&format!("shrq ${}, %rax", 64 - bits));
+                    }
+                }
+                UnaryOp::AbsoluteSigned => {
+                    let done = self.fresh();
+                    self.load_signed(value, "rax", bits);
+                    self.line("testq %rax, %rax");
+                    self.line(&format!("jns {done}"));
+                    self.line("negq %rax");
+                    self.label(&done);
+                    self.mask("rax", bits);
+                }
+                _ => self.load(value, "rax"),
+            }
+            self.store_result("rax", result);
+        }
+
+        fn float_binary(
+            &mut self,
+            op: BinaryOp,
+            ty: Type,
+            left: Value,
+            right: Value,
+            result: Option<Value>,
+        ) {
+            let s = suffix(ty);
+            let Some(result) = result else {
+                return;
+            };
+            match op {
+                BinaryOp::FloatAdd
+                | BinaryOp::FloatSubtract
+                | BinaryOp::FloatMultiply
+                | BinaryOp::FloatDivide => {
+                    self.load_float(left, "xmm0", ty);
+                    self.load_float(right, "xmm1", ty);
+                    let mnemonic = match op {
+                        BinaryOp::FloatAdd => "add",
+                        BinaryOp::FloatSubtract => "sub",
+                        BinaryOp::FloatMultiply => "mul",
+                        _ => "div",
+                    };
+                    self.line(&format!("{mnemonic}{s} %xmm1, %xmm0"));
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                BinaryOp::FloatRemainder => {
+                    let again = self.fresh();
+                    let width = if single(ty) { "s" } else { "l" };
+                    self.line(&format!("fld{width} {}(%rbp)", Self::slot(right)));
+                    self.line(&format!("fld{width} {}(%rbp)", Self::slot(left)));
+                    self.label(&again);
+                    self.line("fprem");
+                    self.line("fnstsw %ax");
+                    self.line("testw $1024, %ax");
+                    self.line(&format!("jne {again}"));
+                    self.line(&format!("fstp{width} {}(%rbp)", Self::slot(result)));
+                    self.line("fstp %st(0)");
+                    self.load_float(result, "xmm0", ty);
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                BinaryOp::FloatMinimum
+                | BinaryOp::FloatMaximum
+                | BinaryOp::FloatMinimumNumber
+                | BinaryOp::FloatMaximumNumber => {
+                    let lower = matches!(op, BinaryOp::FloatMinimum | BinaryOp::FloatMinimumNumber);
+                    let number = matches!(
+                        op,
+                        BinaryOp::FloatMinimumNumber | BinaryOp::FloatMaximumNumber
+                    );
+                    let nan = self.fresh();
+                    let differ = self.fresh();
+                    let done = self.fresh();
+                    let take_left = self.fresh();
+                    let take_right = self.fresh();
+                    self.load_float(left, "xmm0", ty);
+                    self.load_float(right, "xmm1", ty);
+                    self.line(&format!("ucomi{s} %xmm1, %xmm0"));
+                    self.line(&format!("jp {nan}"));
+                    self.line(&format!("jne {differ}"));
+                    self.line("movq %xmm0, %rax");
+                    self.line("movq %xmm1, %rcx");
+                    self.line(if lower {
+                        "orq %rcx, %rax"
+                    } else {
+                        "andq %rcx, %rax"
+                    });
+                    self.line("movq %rax, %xmm0");
+                    self.line(&format!("jmp {done}"));
+                    self.label(&differ);
+                    self.line(&format!(
+                        "{}{s} %xmm1, %xmm0",
+                        if lower { "min" } else { "max" }
+                    ));
+                    self.line(&format!("jmp {done}"));
+                    self.label(&nan);
+                    if number {
+                        self.line(&format!("ucomi{s} %xmm0, %xmm0"));
+                        self.line(&format!("jnp {take_left}"));
+                        self.line(&format!("ucomi{s} %xmm1, %xmm1"));
+                        self.line(&format!("jnp {take_right}"));
+                    }
+                    self.canonical_nan_forced("xmm0", ty);
+                    self.line(&format!("jmp {done}"));
+                    self.label(&take_right);
+                    self.line(&format!(
+                        "movap{} %xmm1, %xmm0",
+                        if single(ty) { "s" } else { "d" }
+                    ));
+                    self.label(&take_left);
+                    self.label(&done);
+                    self.store_float("xmm0", result, ty);
+                }
+                BinaryOp::CopySign => {
+                    self.load(left, "rax");
+                    self.load(right, "rcx");
+                    if single(ty) {
+                        self.line("andl $0x7fffffff, %eax");
+                        self.line("andl $0x80000000, %ecx");
+                        self.line("orl %ecx, %eax");
+                    } else {
+                        self.line("movabsq $0x7fffffffffffffff, %rdx");
+                        self.line("andq %rdx, %rax");
+                        self.line("notq %rdx");
+                        self.line("andq %rdx, %rcx");
+                        self.line("orq %rcx, %rax");
+                    }
+                    self.store("rax", result);
+                }
+                _ => {}
+            }
+        }
+
+        fn canonical_nan_forced(&mut self, register: &str, ty: Type) {
+            if single(ty) {
+                self.line("movl $0x7fc00000, %r11d");
+                self.line(&format!("movd %r11d, %{register}"));
+            } else {
+                self.line("movabsq $0x7ff8000000000000, %r11");
+                self.line(&format!("movq %r11, %{register}"));
+            }
+        }
+
+        fn float_unary(&mut self, op: UnaryOp, ty: Type, value: Value, result: Option<Value>) {
+            let Some(result) = result else {
+                return;
+            };
+            let s = suffix(ty);
+            match op {
+                UnaryOp::FloatNegate | UnaryOp::FloatAbsolute => {
+                    self.load(value, "rax");
+                    let negate = op == UnaryOp::FloatNegate;
+                    if single(ty) {
+                        self.line(if negate {
+                            "xorl $0x80000000, %eax"
+                        } else {
+                            "andl $0x7fffffff, %eax"
+                        });
+                    } else if negate {
+                        self.line("btcq $63, %rax");
+                    } else {
+                        self.line("btrq $63, %rax");
+                    }
+                    self.store("rax", result);
+                }
+                UnaryOp::SquareRoot => {
+                    self.load_float(value, "xmm0", ty);
+                    self.line(&format!("sqrt{s} %xmm0, %xmm0"));
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                UnaryOp::Floor
+                | UnaryOp::Ceiling
+                | UnaryOp::TruncateFloat
+                | UnaryOp::RoundNearestEven => {
+                    let mode = match op {
+                        UnaryOp::Floor => 9,
+                        UnaryOp::Ceiling => 10,
+                        UnaryOp::TruncateFloat => 11,
+                        _ => 8,
+                    };
+                    self.load_float(value, "xmm0", ty);
+                    self.line(&format!("round{s} ${mode}, %xmm0, %xmm0"));
+                    self.canonical_nan("xmm0", ty);
+                    self.store_float("xmm0", result, ty);
+                }
+                _ => {
+                    self.load(value, "rax");
+                    self.store("rax", result);
+                }
+            }
+        }
+
+        fn float_compare(
+            &mut self,
+            comparison: FloatComparison,
+            ty: Type,
+            arguments: &[Value],
+            result: Option<Value>,
+        ) {
+            let s = suffix(ty);
+            self.load_float(arguments[0], "xmm0", ty);
+            self.load_float(arguments[1], "xmm1", ty);
+            let normal = format!("ucomi{s} %xmm1, %xmm0");
+            let swapped = format!("ucomi{s} %xmm0, %xmm1");
+            match comparison {
+                FloatComparison::OrderedEqual => {
+                    self.line(&normal);
+                    self.line("sete %al");
+                    self.line("setnp %cl");
+                    self.line("andb %cl, %al");
+                }
+                FloatComparison::UnorderedNotEqual => {
+                    self.line(&normal);
+                    self.line("setne %al");
+                    self.line("setp %cl");
+                    self.line("orb %cl, %al");
+                }
+                other => {
+                    let (order, condition) = match other {
+                        FloatComparison::OrderedNotEqual => (&normal, "ne"),
+                        FloatComparison::OrderedLess => (&swapped, "a"),
+                        FloatComparison::OrderedLessEqual => (&swapped, "ae"),
+                        FloatComparison::OrderedGreater => (&normal, "a"),
+                        FloatComparison::OrderedGreaterEqual => (&normal, "ae"),
+                        FloatComparison::Ordered => (&normal, "np"),
+                        FloatComparison::Unordered => (&normal, "p"),
+                        FloatComparison::UnorderedEqual => (&normal, "e"),
+                        FloatComparison::UnorderedLess => (&normal, "b"),
+                        FloatComparison::UnorderedLessEqual => (&normal, "be"),
+                        FloatComparison::UnorderedGreater => (&swapped, "b"),
+                        _ => (&swapped, "be"),
+                    };
+                    let order = order.clone();
+                    self.line(&order);
+                    self.line(&format!("set{condition} %al"));
+                }
+            }
+            self.line("movzbl %al, %eax");
+            self.store_result("rax", result);
+        }
+
+        fn convert(
+            &mut self,
+            conversion: Conversion,
+            value: Value,
+            from: Type,
+            to: Type,
+            result: Option<Value>,
+        ) {
+            let Some(result) = result else {
+                return;
+            };
+            let from_bits = type_bits(from);
+            let to_bits = type_bits(to);
+            match conversion {
+                Conversion::ZeroExtend | Conversion::IntegerToPointer => {
+                    self.load(value, "rax");
+                    self.store("rax", result);
+                }
+                Conversion::SignExtend => {
+                    self.load_signed(value, "rax", from_bits);
+                    self.mask("rax", to_bits);
+                    self.store("rax", result);
+                }
+                Conversion::Truncate | Conversion::PointerToInteger => {
+                    self.load(value, "rax");
+                    self.mask("rax", to_bits);
+                    self.store("rax", result);
+                }
+                Conversion::Bitcast => {
+                    let size = self.layout.size_of(from).min(self.layout.size_of(to));
+                    self.line(&format!("leaq {}(%rbp), %rcx", Self::slot(value)));
+                    let carrier = match size {
+                        1 => Type::I8,
+                        2 => Type::I16,
+                        4 => Type::I32,
+                        _ => Type::I64,
+                    };
+                    self.memory_load(carrier, "rcx", 0, "rax");
+                    self.store("rax", result);
+                }
+                Conversion::FloatExtend | Conversion::FloatTruncate => {
+                    if from == to {
+                        self.load(value, "rax");
+                        self.store("rax", result);
+                        return;
+                    }
+                    self.load_float(value, "xmm0", from);
+                    if single(from) {
+                        self.line("cvtss2sd %xmm0, %xmm0");
+                    } else {
+                        self.line("cvtsd2ss %xmm0, %xmm0");
+                    }
+                    self.canonical_nan("xmm0", to);
+                    self.store_float("xmm0", result, to);
+                }
+                Conversion::SignedToFloat => {
+                    self.load_signed(value, "rax", from_bits);
+                    self.line(&format!("cvtsi2{}q %rax, %xmm0", suffix(to)));
+                    self.store_float("xmm0", result, to);
+                }
+                Conversion::UnsignedToFloat => {
+                    self.load(value, "rax");
+                    let s = suffix(to);
+                    if from_bits < 64 {
+                        self.line(&format!("cvtsi2{s}q %rax, %xmm0"));
+                    } else {
+                        let large = self.fresh();
+                        let done = self.fresh();
+                        self.line("testq %rax, %rax");
+                        self.line(&format!("js {large}"));
+                        self.line(&format!("cvtsi2{s}q %rax, %xmm0"));
+                        self.line(&format!("jmp {done}"));
+                        self.label(&large);
+                        self.line("movq %rax, %rcx");
+                        self.line("shrq $1, %rcx");
+                        self.line("andl $1, %eax");
+                        self.line("orq %rax, %rcx");
+                        self.line(&format!("cvtsi2{s}q %rcx, %xmm0"));
+                        self.line(&format!("add{s} %xmm0, %xmm0"));
+                        self.label(&done);
+                    }
+                    self.store_float("xmm0", result, to);
+                }
+                Conversion::FloatToSigned
+                | Conversion::FloatToUnsigned
+                | Conversion::FloatToSignedSaturating
+                | Conversion::FloatToUnsignedSaturating => {
+                    let signed = matches!(
+                        conversion,
+                        Conversion::FloatToSigned | Conversion::FloatToSignedSaturating
+                    );
+                    let saturating = matches!(
+                        conversion,
+                        Conversion::FloatToSignedSaturating | Conversion::FloatToUnsignedSaturating
+                    );
+                    let bits = to_bits;
+                    let (lowest, limit) = if signed {
+                        (-(2f64.powi(bits as i32 - 1)), 2f64.powi(bits as i32 - 1))
+                    } else {
+                        (0.0, 2f64.powi(bits as i32))
+                    };
+                    let nan = self.fresh();
+                    let low = self.fresh();
+                    let high = self.fresh();
+                    let done = self.fresh();
+                    self.load_float(value, "xmm0", from);
+                    if single(from) {
+                        self.line("cvtss2sd %xmm0, %xmm0");
+                    }
+                    self.line("ucomisd %xmm0, %xmm0");
+                    self.line(&format!("jp {nan}"));
+                    self.line("roundsd $11, %xmm0, %xmm1");
+                    self.line(&format!("movabsq ${}, %rax", lowest.to_bits() as i64));
+                    self.line("movq %rax, %xmm2");
+                    self.line("ucomisd %xmm2, %xmm1");
+                    self.line(&format!("jb {low}"));
+                    self.line(&format!("movabsq ${}, %rax", limit.to_bits() as i64));
+                    self.line("movq %rax, %xmm2");
+                    self.line("ucomisd %xmm2, %xmm1");
+                    self.line(&format!("jae {high}"));
+                    if !signed && bits >= 64 {
+                        let small = self.fresh();
+                        let joined = self.fresh();
+                        self.line(&format!(
+                            "movabsq ${}, %rax",
+                            (2f64.powi(63)).to_bits() as i64
+                        ));
+                        self.line("movq %rax, %xmm2");
+                        self.line("ucomisd %xmm2, %xmm1");
+                        self.line(&format!("jb {small}"));
+                        self.line("subsd %xmm2, %xmm1");
+                        self.line("cvttsd2siq %xmm1, %rax");
+                        self.line("btcq $63, %rax");
+                        self.line(&format!("jmp {joined}"));
+                        self.label(&small);
+                        self.line("cvttsd2siq %xmm1, %rax");
+                        self.label(&joined);
+                    } else {
+                        self.line("cvttsd2siq %xmm1, %rax");
+                    }
+                    self.mask("rax", bits);
+                    self.line(&format!("jmp {done}"));
+                    self.label(&nan);
+                    if saturating {
+                        self.line("xorl %eax, %eax");
+                        self.line(&format!("jmp {done}"));
+                    } else {
+                        self.trap(TRAP_CONVERSION_RANGE);
+                    }
+                    self.label(&low);
+                    if saturating {
+                        let floor = if signed { 1u64 << (bits - 1) } else { 0 };
+                        self.constant(floor & all_ones(bits), "rax");
+                        self.line(&format!("jmp {done}"));
+                    } else {
+                        self.trap(TRAP_CONVERSION_RANGE);
+                    }
+                    self.label(&high);
+                    if saturating {
+                        let ceiling = if signed {
+                            all_ones(bits - 1)
+                        } else {
+                            all_ones(bits)
+                        };
+                        self.constant(ceiling, "rax");
+                    } else {
+                        self.trap(TRAP_CONVERSION_RANGE);
+                    }
+                    self.label(&done);
+                    self.store("rax", result);
+                }
+            }
+        }
+    }
+
+    pub fn emit_assembly(module: &Module) -> Result<String, Diagnostic> {
+        let mut emitter = Emitter {
+            module,
+            layout: module.layout.data(),
+            out: String::new(),
+            labels: 0,
+            fields: BTreeMap::new(),
+        };
+        emitter.emit_module()?;
+        Ok(emitter.out)
+    }
+
+    pub fn start_assembly(entry: &str) -> String {
+        format!(
+            "\t.text\n\t.globl _start\n\t.type _start, @function\n_start:\n\txorl %ebp, %ebp\n\tandq $-16, %rsp\n\tcall {entry}\n\tcmpq $0, __omni_pending(%rip)\n\tje .Lstart_exit\n\tcall __omni_uncaught\n.Lstart_exit:\n\tmovl %eax, %edi\n\tmovl $231, %eax\n\tsyscall\n\thlt\n"
+        )
+    }
+
+    pub fn assemble(text: &str) -> Result<Vec<u8>, Diagnostic> {
+        assemble_for("x86_64-unknown-linux-gnu", text)
+    }
+
+    pub(super) fn assemble_for(triple: &str, text: &str) -> Result<Vec<u8>, Diagnostic> {
+        let mut options = AssemblerOptions::new(triple);
+        options.output = OutputKind::Object;
+        let result = assemble_source(&options, text.as_bytes(), None)?;
+        if let Some(message) = result
+            .messages
+            .iter()
+            .find(|message| message.kind == MessageKind::Error)
+        {
+            let place = message
+                .location
+                .map(|location| {
+                    let start = result.buffers[location.buffer]
+                        .text
+                        .get(..location.position)
+                        .map(|before| before.iter().filter(|byte| **byte == b'\n').count() + 1)
+                        .unwrap_or(0);
+                    format!(" at line {start}")
+                })
+                .unwrap_or_default();
+            return Err(assembly_failed(&format!("{}{place}", message.text)));
+        }
+        Ok(result.output)
+    }
+
+    pub fn runtime_module() -> Result<Module, Diagnostic> {
+        Module::from_text(RUNTIME)
+    }
+
+    pub fn runtime_names() -> BTreeSet<String> {
+        let mut names: BTreeSet<String> =
+            [INTRINSIC_SYSCALL, INTRINSIC_ADDRESS, INTRINSIC_REFERENCE]
+                .iter()
+                .map(|name| name.to_string())
+                .collect();
+        if let Ok(runtime) = runtime_module() {
+            for function in &runtime.functions {
+                if !function.is_declaration() && function.linkage != Linkage::Internal {
+                    names.insert(function.name.clone());
+                }
+            }
+        }
+        names
+    }
+
+    pub fn build_executable(module: &Module, entry: &str) -> Result<Vec<u8>, Diagnostic> {
+        let stubs = missing_stubs(module);
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let start = assemble(&format!("{}{stubs}", start_assembly(entry)))?;
+        link_program(user, support, start)
+    }
+
+    pub fn build_shared_library(module: &Module) -> Result<Vec<u8>, Diagnostic> {
+        let stubs = missing_stubs(module);
+        let runtime = runtime_module()?;
+        let user = assemble(&emit_assembly(module)?)?;
+        let support = assemble(&emit_assembly(&runtime)?)?;
+        let extra = assemble(&stubs)?;
+        link_library(user, support, extra)
+    }
+
+    fn missing_stubs(module: &Module) -> String {
+        let provided = runtime_names();
+        let defined: BTreeSet<&str> = module
+            .functions
+            .iter()
+            .filter(|function| !function.is_declaration())
+            .map(|function| function.name.as_str())
+            .collect();
+        let mut stubs = String::new();
+        for (index, function) in module.functions.iter().enumerate() {
+            if function.is_declaration()
+                && !provided.contains(&function.name)
+                && !defined.contains(function.name.as_str())
+            {
+                let symbol = function_symbol(module, FunctionId(index as u32));
+                stubs.push_str(&format!(
+                    "\t.text\n\t.globl {symbol}\n{symbol}:\n\tleaq .Lmissing{index}(%rip), %rdi\n\tmovl ${}, %esi\n\tcall __omni_missing\n\t.section .rodata\n.Lmissing{index}:\n",
+                    function.name.len()
+                ));
+                for chunk in function.name.as_bytes().chunks(16) {
+                    let listed: Vec<String> = chunk.iter().map(|byte| byte.to_string()).collect();
+                    stubs.push_str(&format!("\t.byte {}\n", listed.join(", ")));
+                }
+            }
+        }
+        stubs
+    }
+
+    pub(super) fn link_program(
+        user: Vec<u8>,
+        support: Vec<u8>,
+        start: Vec<u8>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        link_objects(
+            &["-o", "program", "program.o", "runtime.o", "start.o"],
+            user,
+            support,
+            start,
+        )
+    }
+
+    pub(super) fn link_library(
+        user: Vec<u8>,
+        support: Vec<u8>,
+        extra: Vec<u8>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        link_objects(
+            &[
+                "-shared",
+                "-Bsymbolic",
+                "-soname=libomni.so",
+                "-o",
+                "program",
+                "program.o",
+                "runtime.o",
+                "start.o",
+            ],
+            user,
+            support,
+            extra,
+        )
+    }
+
+    fn link_objects(
+        words: &[&str],
+        user: Vec<u8>,
+        support: Vec<u8>,
+        start: Vec<u8>,
+    ) -> Result<Vec<u8>, Diagnostic> {
+        let objects = [
+            ("program.o", user),
+            ("runtime.o", support),
+            ("start.o", start),
+        ];
+        let arguments: Vec<String> = words.iter().map(|word| word.to_string()).collect();
+        let reader = |path: &str| {
+            objects
+                .iter()
+                .find(|(name, _)| *name == path)
+                .map(|(_, bytes)| bytes.clone())
+        };
+        let outcome = crate::compilers::linker::link(&arguments, &reader);
+        if !outcome.succeeded() {
+            let cause = outcome
+                .diagnostics
+                .iter()
+                .map(|diagnostic| {
+                    let mut text = diagnostic.message.clone();
+                    for line in &diagnostic.context {
+                        text.push_str("; ");
+                        text.push_str(line);
+                    }
+                    text
+                })
+                .chain(outcome.messages.iter().cloned())
+                .collect::<Vec<String>>()
+                .join(" | ");
+            return Err(link_failed(&cause));
+        }
+        outcome
+            .outputs
+            .into_iter()
+            .find(|(name, _)| name == "program")
+            .map(|(_, bytes)| bytes)
+            .ok_or_else(|| link_failed("the linker wrote no program"))
+    }
+
+    pub const RUNTIME: &str = r#"omni 1
+module "omni.runtime"
+layout lp64
+global @__omni_pending size 8 align 8 mutable export zero
+global @__omni_heap_next size 8 align 8 mutable internal zero
+global @__omni_heap_end size 8 align 8 mutable internal zero
+global @__omni_identity size 8 align 8 mutable internal zero
+global @__omni_text_descriptor size 56 align 8 export bytes "ffffffffffffffff000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000000"
+global @__omni_trap_text size 11 align 1 internal bytes "6f6d6e693a207472617020"
+global @__omni_uncaught_text size 25 align 1 internal bytes "6f6d6e693a20756e63617567687420657863657074696f6e0a"
+global @__omni_missing_text size 23 align 1 internal bytes "6f6d6e693a206d697373696e672066756e6374696f6e20"
+function @omni.machine.syscall(i64, i64, i64, i64, i64, i64, i64) -> i64 import
+function @omni.machine.address(ref) -> ptr import
+function @omni.machine.reference(ptr) -> ref import
+function @__omni_exit(i64) internal noreturn {
+block0(%code: i64):
+    %number: i64 = const 231
+    %zero: i64 = const 0
+    %ignored: i64 = call @omni.machine.syscall(%number, %code, %zero, %zero, %zero, %zero, %zero)
+    unreachable
+}
+function @__omni_write(i64, ptr, i64) -> i64 internal {
+block0(%descriptor: i64, %start: ptr, %length: i64):
+    %zero: i64 = const 0
+    jump block1(%start, %length)
+block1(%at: ptr, %left: i64):
+    %done: bool = icmp eq %left, %zero
+    branch %done, block5, block2
+block2:
+    %number: i64 = const 1
+    %address: i64 = ptrtoint %at
+    %wrote: i64 = call @omni.machine.syscall(%number, %descriptor, %address, %left, %zero, %zero, %zero)
+    %failed: bool = icmp sle %wrote, %zero
+    branch %failed, block4, block3
+block3:
+    %next: ptr = offset %at, %wrote
+    %rest: i64 = sub %left, %wrote
+    jump block1(%next, %rest)
+block4:
+    %minus: i64 = const -1
+    return %minus
+block5:
+    return %length
+}
+function @__omni_write_number(i64, i64) internal {
+block0(%descriptor: i64, %value: i64):
+    %buffer: ptr = stack_slot size 32 align 8
+    %ten: i64 = const 10
+    %end: i64 = const 31
+    %last: ptr = offset %buffer, %end
+    %newline: i8 = const 10
+    store align 1 %newline, %last
+    jump block1(%value, %end)
+block1(%rest: i64, %position: i64):
+    %digit: i64 = urem %rest, %ten
+    %higher: i64 = udiv %rest, %ten
+    %one: i64 = const 1
+    %at: i64 = sub %position, %one
+    %place: ptr = offset %buffer, %at
+    %base: i64 = const 48
+    %character: i64 = add %digit, %base
+    %byte: i8 = trunc %character
+    store align 1 %byte, %place
+    %zero: i64 = const 0
+    %more: bool = icmp ne %higher, %zero
+    branch %more, block1(%higher, %at), block2(%at)
+block2(%first: i64):
+    %start: ptr = offset %buffer, %first
+    %size: i64 = const 32
+    %count: i64 = sub %size, %first
+    %wrote: i64 = call @__omni_write(%descriptor, %start, %count)
+    return
+}
+function @__omni_trap(i64, i64) export noreturn {
+block0(%kind: i64, %value: i64):
+    %error: i64 = const 2
+    %text: ptr = global_address @__omni_trap_text
+    %length: i64 = const 11
+    %wrote: i64 = call @__omni_write(%error, %text, %length)
+    call @__omni_write_number(%error, %kind)
+    %code: i64 = const 134
+    call @__omni_exit(%code)
+    unreachable
+}
+function @__omni_missing(ptr, i64) export noreturn {
+block0(%name: ptr, %length: i64):
+    %error: i64 = const 2
+    %text: ptr = global_address @__omni_missing_text
+    %size: i64 = const 23
+    %wrote: i64 = call @__omni_write(%error, %text, %size)
+    %named: i64 = call @__omni_write(%error, %name, %length)
+    %newline: ptr = stack_slot size 8 align 8
+    %ten: i8 = const 10
+    store align 1 %ten, %newline
+    %one: i64 = const 1
+    %ended: i64 = call @__omni_write(%error, %newline, %one)
+    %code: i64 = const 135
+    call @__omni_exit(%code)
+    unreachable
+}
+function @__omni_uncaught() -> i32 export {
+block0:
+    %error: i64 = const 2
+    %text: ptr = global_address @__omni_uncaught_text
+    %length: i64 = const 25
+    %wrote: i64 = call @__omni_write(%error, %text, %length)
+    %code: i64 = const 1
+    call @__omni_exit(%code)
+    unreachable
+}
+function @__omni_heap(i64) -> ptr internal {
+block0(%size: i64):
+    %fifteen: i64 = const 15
+    %mask: i64 = const -16
+    %padded: i64 = add %size, %fifteen
+    %rounded: i64 = and %padded, %mask
+    %next_slot: ptr = global_address @__omni_heap_next
+    %end_slot: ptr = global_address @__omni_heap_end
+    %next: i64 = load align 8 %next_slot
+    %end: i64 = load align 8 %end_slot
+    %wanted: i64 = add %next, %rounded
+    %zero: i64 = const 0
+    %started: bool = icmp ne %next, %zero
+    %room: bool = icmp ule %wanted, %end
+    %fits: bool = and %started, %room
+    branch %fits, block1, block2
+block1:
+    store align 8 %wanted, %next_slot
+    %found: ptr = inttoptr %next
+    return %found
+block2:
+    %least: i64 = const 268435456
+    %large: bool = icmp ugt %rounded, %least
+    %chunk: i64 = select %large, %rounded, %least
+    %number: i64 = const 9
+    %protection: i64 = const 3
+    %flags: i64 = const 16418
+    %none: i64 = const -1
+    %mapped: i64 = call @omni.machine.syscall(%number, %zero, %chunk, %protection, %flags, %none, %zero)
+    %limit: i64 = const -4096
+    %bad: bool = icmp ugt %mapped, %limit
+    branch %bad, block3, block4
+block3:
+    %exhausted: i64 = const 6
+    call @__omni_trap(%exhausted, %zero)
+    unreachable
+block4:
+    %fresh_next: i64 = add %mapped, %rounded
+    %fresh_end: i64 = add %mapped, %chunk
+    store align 8 %fresh_next, %next_slot
+    store align 8 %fresh_end, %end_slot
+    %memory: ptr = inttoptr %mapped
+    return %memory
+}
+function @__omni_allocate(i64, ptr) -> ref export {
+block0(%size: i64, %descriptor: ptr):
+    %memory: ptr = call @__omni_heap(%size)
+    store align 8 %descriptor, %memory
+    %counter: ptr = global_address @__omni_identity
+    %last: i64 = load align 8 %counter
+    %one: i64 = const 1
+    %next: i64 = add %last, %one
+    store align 8 %next, %counter
+    %eight: i64 = const 8
+    %slot: ptr = offset %memory, %eight
+    store align 8 %next, %slot
+    %object: ref = call @omni.machine.reference(%memory)
+    return %object
+}
+function @__omni_allocate_array(i64, i64, ptr) -> ref export {
+block0(%length: i64, %size: i64, %descriptor: ptr):
+    %zero: i64 = const 0
+    %negative: bool = icmp slt %length, %zero
+    branch %negative, block1, block2
+block1:
+    %code: i64 = const 5
+    call @__omni_trap(%code, %zero)
+    unreachable
+block2:
+    %limit: i64 = const 1099511627776
+    %huge: bool = icmp ugt %length, %limit
+    branch %huge, block3, block4
+block3:
+    %exhausted: i64 = const 6
+    call @__omni_trap(%exhausted, %zero)
+    unreachable
+block4:
+    %bytes: i64 = mul %length, %size
+    %header: i64 = const 24
+    %total: i64 = add %bytes, %header
+    %object: ref = call @__omni_allocate(%total, %descriptor)
+    %memory: ptr = call @omni.machine.address(%object)
+    %sixteen: i64 = const 16
+    %slot: ptr = offset %memory, %sixteen
+    store align 8 %length, %slot
+    return %object
+}
+function @exit(i32) export noreturn {
+block0(%code: i32):
+    %wide: i64 = zext %code
+    call @__omni_exit(%wide)
+    unreachable
+}
+function @abort() export noreturn {
+block0:
+    %code: i64 = const 12
+    %zero: i64 = const 0
+    call @__omni_trap(%code, %zero)
+    unreachable
+}
+function @write(i32, ptr, i64) -> i64 export {
+block0(%descriptor: i32, %start: ptr, %length: i64):
+    %wide: i64 = zext %descriptor
+    %wrote: i64 = call @__omni_write(%wide, %start, %length)
+    return %wrote
+}
+function @putchar(i32) -> i32 export {
+block0(%character: i32):
+    %buffer: ptr = stack_slot size 8 align 8
+    %byte: i8 = trunc %character
+    store align 1 %byte, %buffer
+    %out: i64 = const 1
+    %one: i64 = const 1
+    %wrote: i64 = call @__omni_write(%out, %buffer, %one)
+    %answer: i32 = zext %byte
+    return %answer
+}
+function @strlen(ptr) -> i64 export {
+block0(%text: ptr):
+    %zero: i64 = const 0
+    jump block1(%zero)
+block1(%count: i64):
+    %at: ptr = offset %text, %count
+    %byte: i8 = load align 1 %at
+    %nothing: i8 = const 0
+    %ended: bool = icmp eq %byte, %nothing
+    branch %ended, block3, block2
+block2:
+    %one: i64 = const 1
+    %next: i64 = add %count, %one
+    jump block1(%next)
+block3:
+    return %count
+}
+function @puts(ptr) -> i32 export {
+block0(%text: ptr):
+    %length: i64 = call @strlen(%text)
+    %out: i64 = const 1
+    %wrote: i64 = call @__omni_write(%out, %text, %length)
+    %newline: i32 = const 10
+    %again: i32 = call @putchar(%newline)
+    %answer: i32 = const 1
+    return %answer
+}
+function @memcpy(ptr, ptr, i64) -> ptr export {
+block0(%target: ptr, %source: ptr, %length: i64):
+    memory_copy %target, %source, %length
+    return %target
+}
+function @memmove(ptr, ptr, i64) -> ptr export {
+block0(%target: ptr, %source: ptr, %length: i64):
+    memory_move %target, %source, %length
+    return %target
+}
+function @memset(ptr, i32, i64) -> ptr export {
+block0(%target: ptr, %value: i32, %length: i64):
+    %byte: i8 = trunc %value
+    memory_fill %target, %byte, %length
+    return %target
+}
+function @malloc(i64) -> ptr export {
+block0(%size: i64):
+    %header: i64 = const 16
+    %total: i64 = add %size, %header
+    %memory: ptr = call @__omni_heap(%total)
+    store align 8 %size, %memory
+    %user: ptr = offset %memory, %header
+    return %user
+}
+function @calloc(i64, i64) -> ptr export {
+block0(%count: i64, %size: i64):
+    %over: bool = umul_overflows %count, %size
+    branch %over, block1, block2
+block1:
+    %none: ptr = null
+    return %none
+block2:
+    %total: i64 = mul %count, %size
+    %memory: ptr = call @malloc(%total)
+    return %memory
+}
+function @free(ptr) export {
+block0(%memory: ptr):
+    return
+}
+function @realloc(ptr, i64) -> ptr export {
+block0(%old: ptr, %size: i64):
+    %fresh: ptr = call @malloc(%size)
+    %start: i64 = ptrtoint %old
+    %zero: i64 = const 0
+    %empty: bool = icmp eq %start, %zero
+    branch %empty, block1, block2
+block1:
+    return %fresh
+block2:
+    %back: i64 = const -16
+    %header: ptr = offset %old, %back
+    %held: i64 = load align 8 %header
+    %fewer: bool = icmp ult %held, %size
+    %copied: i64 = select %fewer, %held, %size
+    memory_copy %fresh, %old, %copied
+    return %fresh
+}
+function @omni.identity(ref) -> i64 export {
+block0(%object: ref):
+    %memory: ptr = call @omni.machine.address(%object)
+    %eight: i64 = const 8
+    %slot: ptr = offset %memory, %eight
+    %identity: i64 = load align 8 %slot
+    return %identity
+}
+function @omni.clock() -> i64 export {
+block0:
+    %time: ptr = stack_slot size 16 align 8
+    %number: i64 = const 228
+    %zero: i64 = const 0
+    %address: i64 = ptrtoint %time
+    %status: i64 = call @omni.machine.syscall(%number, %zero, %address, %zero, %zero, %zero, %zero)
+    %seconds: i64 = load align 8 %time
+    %eight: i64 = const 8
+    %rest: ptr = offset %time, %eight
+    %nanoseconds: i64 = load align 8 %rest
+    %billion: i64 = const 1000000000
+    %scaled: i64 = mul %seconds, %billion
+    %total: i64 = add %scaled, %nanoseconds
+    return %total
+}
+function @omni.print(ref) export {
+block0(%text: ref):
+    %memory: ptr = call @omni.machine.address(%text)
+    %sixteen: i64 = const 16
+    %size_slot: ptr = offset %memory, %sixteen
+    %length: i64 = load align 8 %size_slot
+    %header: i64 = const 24
+    %bytes: ptr = offset %memory, %header
+    %out: i64 = const 1
+    %wrote: i64 = call @__omni_write(%out, %bytes, %length)
+    return
+}
+function @omni.print_line(ref) export {
+block0(%text: ref):
+    call @omni.print(%text)
+    %newline: i32 = const 10
+    %again: i32 = call @putchar(%newline)
+    return
+}
+function @omni.write_chars(i32, ref, i32, i32) export {
+block0(%descriptor: i32, %array: ref, %from: i32, %count: i32):
+    %fd: i64 = zext %descriptor
+    %memory: ptr = call @omni.machine.address(%array)
+    %sixteen: i64 = const 16
+    %size_slot: ptr = offset %memory, %sixteen
+    %length: i64 = load align 8 %size_slot
+    %start: i64 = sext %from
+    %amount: i64 = sext %count
+    %finish: i64 = add %start, %amount
+    %zero: i64 = const 0
+    %before: bool = icmp slt %start, %zero
+    %backwards: bool = icmp slt %amount, %zero
+    %beyond: bool = icmp ugt %finish, %length
+    %bad_start: bool = or %before, %backwards
+    %bad: bool = or %bad_start, %beyond
+    branch %bad, block1, block2
+block1:
+    %code: i64 = const 2
+    call @__omni_trap(%code, %zero)
+    unreachable
+block2:
+    %buffer: ptr = stack_slot size 1040 align 8
+    %header: i64 = const 24
+    %units: ptr = offset %memory, %header
+    jump block3(%start, %zero)
+block3(%index: i64, %filled: i64):
+    %limit: i64 = const 1024
+    %full: bool = icmp uge %filled, %limit
+    branch %full, block4, block5(%filled)
+block4:
+    %flushed: i64 = call @__omni_write(%fd, %buffer, %filled)
+    jump block5(%zero)
+block5(%used: i64):
+    %ended: bool = icmp uge %index, %finish
+    branch %ended, block18, block6
+block6:
+    %unit_at: ptr = element_address i16 %units, %index
+    %unit16: i16 = load align 2 %unit_at
+    %unit: i64 = zext %unit16
+    %one: i64 = const 1
+    %after: i64 = add %index, %one
+    %high_start: i64 = const 55296
+    %low_start: i64 = const 56320
+    %low_end: i64 = const 57344
+    %is_surrogate_low: bool = icmp uge %unit, %high_start
+    %is_surrogate_high: bool = icmp ult %unit, %low_end
+    %surrogate: bool = and %is_surrogate_low, %is_surrogate_high
+    branch %surrogate, block7, block11(%unit, %after)
+block7:
+    %leading: bool = icmp ult %unit, %low_start
+    %more: bool = icmp ult %after, %finish
+    %pairable: bool = and %leading, %more
+    branch %pairable, block8, block10
+block8:
+    %next_at: ptr = element_address i16 %units, %after
+    %next16: i16 = load align 2 %next_at
+    %next: i64 = zext %next16
+    %trailing_low: bool = icmp uge %next, %low_start
+    %trailing_high: bool = icmp ult %next, %low_end
+    %trailing: bool = and %trailing_low, %trailing_high
+    branch %trailing, block9, block10
+block9:
+    %high_part: i64 = sub %unit, %high_start
+    %low_part: i64 = sub %next, %low_start
+    %ten: i64 = const 10
+    %shifted: i64 = shl %high_part, %ten
+    %joined: i64 = or %shifted, %low_part
+    %plane: i64 = const 65536
+    %point: i64 = add %joined, %plane
+    %two: i64 = const 2
+    %skip: i64 = add %index, %two
+    jump block11(%point, %skip)
+block10:
+    %question: i64 = const 63
+    jump block11(%question, %after)
+block11(%code_point: i64, %continue: i64):
+    %place: ptr = offset %buffer, %used
+    %one_limit: i64 = const 128
+    %two_limit: i64 = const 2048
+    %three_limit: i64 = const 65536
+    %small: bool = icmp ult %code_point, %one_limit
+    branch %small, block12, block13
+block12:
+    %ascii: i8 = trunc %code_point
+    store align 1 %ascii, %place
+    %used1: i64 = add %used, %one
+    jump block3(%continue, %used1)
+block13:
+    %six: i64 = const 6
+    %twelve: i64 = const 12
+    %eighteen: i64 = const 18
+    %continuation: i64 = const 128
+    %low_bits: i64 = const 63
+    %medium: bool = icmp ult %code_point, %two_limit
+    branch %medium, block14, block15
+block14:
+    %lead2_bits: i64 = lshr %code_point, %six
+    %lead2_mark: i64 = const 192
+    %lead2: i64 = or %lead2_bits, %lead2_mark
+    %tail2_bits: i64 = and %code_point, %low_bits
+    %tail2: i64 = or %tail2_bits, %continuation
+    %lead2_byte: i8 = trunc %lead2
+    %tail2_byte: i8 = trunc %tail2
+    store align 1 %lead2_byte, %place
+    %place2: ptr = offset %place, %one
+    store align 1 %tail2_byte, %place2
+    %two_bytes: i64 = const 2
+    %used2: i64 = add %used, %two_bytes
+    jump block3(%continue, %used2)
+block15:
+    %large: bool = icmp ult %code_point, %three_limit
+    branch %large, block16, block17
+block16:
+    %lead3_bits: i64 = lshr %code_point, %twelve
+    %lead3_mark: i64 = const 224
+    %lead3: i64 = or %lead3_bits, %lead3_mark
+    %middle3_shift: i64 = lshr %code_point, %six
+    %middle3_bits: i64 = and %middle3_shift, %low_bits
+    %middle3: i64 = or %middle3_bits, %continuation
+    %tail3_bits: i64 = and %code_point, %low_bits
+    %tail3: i64 = or %tail3_bits, %continuation
+    %lead3_byte: i8 = trunc %lead3
+    %middle3_byte: i8 = trunc %middle3
+    %tail3_byte: i8 = trunc %tail3
+    store align 1 %lead3_byte, %place
+    %place3a: ptr = offset %place, %one
+    store align 1 %middle3_byte, %place3a
+    %two3: i64 = const 2
+    %place3b: ptr = offset %place, %two3
+    store align 1 %tail3_byte, %place3b
+    %three_bytes: i64 = const 3
+    %used3: i64 = add %used, %three_bytes
+    jump block3(%continue, %used3)
+block17:
+    %lead4_bits: i64 = lshr %code_point, %eighteen
+    %lead4_mark: i64 = const 240
+    %lead4: i64 = or %lead4_bits, %lead4_mark
+    %second4_shift: i64 = lshr %code_point, %twelve
+    %second4_bits: i64 = and %second4_shift, %low_bits
+    %second4: i64 = or %second4_bits, %continuation
+    %third4_shift: i64 = lshr %code_point, %six
+    %third4_bits: i64 = and %third4_shift, %low_bits
+    %third4: i64 = or %third4_bits, %continuation
+    %tail4_bits: i64 = and %code_point, %low_bits
+    %tail4: i64 = or %tail4_bits, %continuation
+    %lead4_byte: i8 = trunc %lead4
+    %second4_byte: i8 = trunc %second4
+    %third4_byte: i8 = trunc %third4
+    %tail4_byte: i8 = trunc %tail4
+    store align 1 %lead4_byte, %place
+    %place4a: ptr = offset %place, %one
+    store align 1 %second4_byte, %place4a
+    %two4: i64 = const 2
+    %place4b: ptr = offset %place, %two4
+    store align 1 %third4_byte, %place4b
+    %three4: i64 = const 3
+    %place4c: ptr = offset %place, %three4
+    store align 1 %tail4_byte, %place4c
+    %four_bytes: i64 = const 4
+    %used4: i64 = add %used, %four_bytes
+    jump block3(%continue, %used4)
+block18:
+    %last: i64 = call @__omni_write(%fd, %buffer, %used)
+    return
+}
+"#;
 }
