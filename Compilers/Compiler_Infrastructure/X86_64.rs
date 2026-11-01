@@ -29375,7 +29375,7 @@ pub mod object {
             let Some(evaluated) = context.evaluate_relocatable(&value, Some(self), true) else {
                 let mut mentioned = Vec::new();
                 expression_symbols(&value, &mut mentioned);
-                if mentioned.iter().any(|name| *name == own_name) {
+                if mentioned.contains(&own_name) {
                     context.report(
                         MessageKind::Error,
                         at,
