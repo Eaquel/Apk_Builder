@@ -71850,6 +71850,11 @@ mod x86_assembly {
             }
         }
         let parsed = TargetTriple::parse(&triple);
+        if (triple.contains("darwin") || triple.contains("apple") || triple.contains("macos"))
+            && !disassemble
+        {
+            unsupported.get_or_insert("llvm-mc Mach-O triple".to_string());
+        }
         if parsed.format == ObjectFormat::MachObject && !disassemble {
             unsupported.get_or_insert("llvm-mc Mach-O triple".to_string());
         }
@@ -76092,7 +76097,9 @@ mod armv8_assembly {
         let triple =
             std::env::var("APK_BUILDER_TRIPLE").unwrap_or_else(|_| "armv7a-linux-gnueabihf".into());
         let mut options = AssemblerOptions::new(&triple);
-        options.show_encoding = true;
+        options.show_encoding = std::env::var("APK_BUILDER_PRESERVE").is_err();
+        options.preserve_comments = std::env::var("APK_BUILDER_PRESERVE").is_ok();
+        options.no_initial_text_section = std::env::var("APK_BUILDER_PRESERVE").is_ok();
         if std::env::var("APK_BUILDER_OBJECT").is_ok() {
             options.output = crate::compilers::x86_64::OutputKind::Object;
         }

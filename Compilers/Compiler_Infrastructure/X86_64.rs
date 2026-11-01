@@ -8827,6 +8827,7 @@ pub struct Lexer {
     end_statement_at_end: bool,
     pub masm_integers: bool,
     pub hash_token: bool,
+    pub label_comment: bool,
     pub at_comment: bool,
     consumed_end_of_statement: bool,
 }
@@ -8907,6 +8908,7 @@ impl Lexer {
             end_statement_at_end: true,
             masm_integers: false,
             hash_token: false,
+            label_comment: false,
             at_comment: false,
             consumed_end_of_statement: false,
         }
@@ -8954,6 +8956,14 @@ impl Lexer {
 
     fn at_end(&self) -> bool {
         self.state.position >= self.buffers[self.state.buffer].text.len()
+    }
+
+    fn hash_follows(&self) -> bool {
+        let mut at = self.state.position;
+        while matches!(self.byte(at), b' ' | b'\t') {
+            at += 1;
+        }
+        self.byte(at) == b'#'
     }
 
     fn next_character(&mut self) -> Option<u8> {
@@ -9222,7 +9232,8 @@ impl Lexer {
             self.state.position += 1;
         }
         self.state.at_start_of_line = true;
-        if self.state.at_start_of_statement {
+        let label_comment = std::mem::take(&mut self.label_comment);
+        if self.state.at_start_of_statement && !label_comment {
             return self.make(TokenKind::EndOfStatement, start, self.state.position);
         }
         self.state.at_start_of_statement = true;
@@ -12059,6 +12070,10 @@ impl<'s> Assembler<'s> {
         if self.is(TokenKind::Colon) && identifier != "{" {
             if self.check_for_valid_section() {
                 return true;
+            }
+            if self.lexer.hash_token && self.lexer.hash_follows() {
+                self.lexer.state.at_start_of_statement = true;
+                self.lexer.label_comment = true;
             }
             self.lex();
             if identifier == "." {
@@ -20192,21 +20207,29 @@ impl Streamer for TextStreamer {
         if text == ";" {
             return;
         }
+        let comment = match self.target.isa {
+            Isa::Armv8 => "//",
+            Isa::Armv7 => "@",
+            Isa::X86 => "#",
+        };
         if let Some(rest) = text.strip_prefix("//") {
-            self.explicit_comments.push_str(&format!("\t#{rest}"));
+            self.explicit_comments
+                .push_str(&format!("\t{comment}{rest}"));
         } else if text.starts_with("/*") {
             let body = &text[2..text.len().saturating_sub(2).max(2)];
             let lines: Vec<&str> = body.split(['\r', '\n']).collect();
             for (index, line) in lines.iter().enumerate() {
-                self.explicit_comments.push_str(&format!("\t#{line}"));
+                self.explicit_comments
+                    .push_str(&format!("\t{comment}{line}"));
                 if index + 1 < lines.len() {
                     self.explicit_comments.push('\n');
                 }
             }
-        } else if text.starts_with('#') {
+        } else if text.starts_with('#') || text.starts_with(comment) {
             self.explicit_comments.push('\t');
+            self.explicit_comments.push_str(comment);
             self.explicit_comments
-                .push_str(text.trim_end_matches(['\n', '\r']));
+                .push_str(text[1..].trim_end_matches(['\n', '\r']));
         }
         if text.ends_with('\n') {
             let comments = std::mem::take(&mut self.explicit_comments);

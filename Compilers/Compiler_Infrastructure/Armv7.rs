@@ -9122,21 +9122,22 @@ impl<'s> Assembler<'s> {
                 Some(false)
             }
             ".code" => {
-                let at = self.location();
                 let Ok((expression, _)) = self.parse_expression() else {
                     return Some(true);
                 };
                 let value = match expression {
                     Expression::Constant(16) => true,
                     Expression::Constant(32) => false,
-                    _ => {
-                        return Some(
-                            self.error(at, "invalid operand to .code directive, expected 16 or 32"),
-                        )
-                    }
+                    _ => return Some(self.error(location, "invalid operand to .code directive")),
                 };
                 if self.parse_end_of_line() {
                     return Some(true);
+                }
+                if value && !self.arm32_has_thumb() {
+                    return Some(self.error(location, "target does not support Thumb mode"));
+                }
+                if !value && !self.arm32_has_arm() {
+                    return Some(self.error(location, "target does not support ARM mode"));
                 }
                 self.arm_thumb = value;
                 self.arm32_switch_mode();
@@ -16962,7 +16963,7 @@ impl<'a> Assembler<'a> {
                 return self.error(at, "malformed offset expression");
             };
             let Expression::Constant(value) = expression else {
-                return self.error(at, "offset must be an immediate");
+                return self.error(at, "offset must be an immediate constant");
             };
             offset = value;
         }
