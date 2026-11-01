@@ -6188,6 +6188,14 @@ impl<'s> Assembler<'s> {
     }
 
     fn arm32_parse_register_list(&mut self, operands: &mut Vec<ParsedOperand>) -> bool {
+        self.arm32_parse_register_list_with(operands, false)
+    }
+
+    fn arm32_parse_register_list_with(
+        &mut self,
+        operands: &mut Vec<ParsedOperand>,
+        allow_authentication: bool,
+    ) -> bool {
         let start = self.lexer.token.start;
         let scrub = operands
             .first()
@@ -6202,6 +6210,26 @@ impl<'s> Assembler<'s> {
         let Some(mut register) = self.arm32_try_register_bound(loose) else {
             return self.error(location, "register expected");
         };
+        let authentication = register_named(self.target, "ra_auth_code");
+        if !allow_authentication && Some(register) == authentication {
+            return self.error(location, "pseudo-register not allowed");
+        }
+        let mut register_location = location;
+        let to_double = |target: &Target, held: RegisterId, odd: u32| -> Option<RegisterId> {
+            in_class(target, "QPR", held)
+                .then(|| {
+                    register_named(
+                        target,
+                        &format!("d{}", register_encoding(target, held) * 2 + odd),
+                    )
+                })
+                .flatten()
+        };
+        let mut leading: Option<RegisterId> = None;
+        if let Some(low) = to_double(self.target, register, 0) {
+            leading = to_double(self.target, register, 1);
+            register = low;
+        }
         let vpr = register_named(self.target, "vpr").unwrap_or(NO_REGISTER);
         let mut family = if in_class(self.target, "DPR", register) {
             "DPR"
@@ -6214,7 +6242,9 @@ impl<'s> Assembler<'s> {
         };
         let belongs = |target: &Target, family: &str, held: RegisterId| -> bool {
             if family == "GPR" {
-                in_class(target, "GPR", held) || in_class(target, "GPRwithAPSRnosp", held)
+                in_class(target, "GPR", held)
+                    || in_class(target, "GPRwithAPSRnosp", held)
+                    || Some(held) == authentication
             } else if family == "FPV" {
                 in_class(target, "SPR", held) || in_class(target, "DPR", held) || held == vpr
             } else {
@@ -6225,15 +6255,28 @@ impl<'s> Assembler<'s> {
             return self.error(location, "invalid register in register list");
         }
         let mut registers: Vec<RegisterId> = vec![register];
+        if let Some(high) = leading {
+            registers.push(high);
+            register = high;
+        }
         let mut adjust = false;
         let mut previous = register_encoding(self.target, register);
         while self.is(TokenKind::Comma) || self.is(TokenKind::Minus) {
             if self.is(TokenKind::Minus) {
                 self.lex();
                 let after = self.location();
-                let Some(end) = self.arm32_try_register_bound(loose) else {
+                let Some(mut end) = self.arm32_try_register_bound(loose) else {
                     return self.error(after, "register expected");
                 };
+                if Some(register) == authentication {
+                    return self.error(register_location, "pseudo-register not allowed");
+                }
+                if Some(end) == authentication {
+                    return self.error(after, "pseudo-register not allowed");
+                }
+                if let Some(high) = to_double(self.target, end, 1) {
+                    end = high;
+                }
                 if register == end {
                     continue;
                 }
@@ -6262,7 +6305,10 @@ impl<'s> Assembler<'s> {
                     let Some(next) = register_named(self.target, &name) else {
                         return self.error(after, "invalid register in register list");
                     };
-                    if registers.contains(&next) {
+                    if registers.iter().any(|held| {
+                        register_encoding(self.target, *held)
+                            == register_encoding(self.target, next)
+                    }) {
                         self.message(
                             MessageKind::Warning,
                             after,
@@ -6280,9 +6326,18 @@ impl<'s> Assembler<'s> {
             self.lex();
             let location = self.location();
             let written = self.lexer.token.text.clone();
-            let Some(next) = self.arm32_try_register_bound(loose) else {
+            let Some(mut next) = self.arm32_try_register_bound(loose) else {
                 return self.error(location, "register expected");
             };
+            if !allow_authentication && Some(next) == authentication {
+                return self.error(location, "pseudo-register not allowed");
+            }
+            register_location = location;
+            let mut trailing: Option<RegisterId> = None;
+            if let Some(low) = to_double(self.target, next, 0) {
+                trailing = to_double(self.target, next, 1);
+                next = low;
+            }
             if next == vpr && matches!(family, "SPR" | "DPR" | "FPV") {
                 family = "FPV";
                 if registers.contains(&next) {
@@ -6325,7 +6380,15 @@ impl<'s> Assembler<'s> {
             if family != "GPR" && encoding != previous + 1 {
                 return self.error(location, "non-contiguous register range");
             }
-            if registers.contains(&next) {
+            if registers.iter().any(|held| {
+                register_encoding(self.target, *held)
+                    + if adjust && in_class(self.target, "DPR", *held) {
+                        16
+                    } else {
+                        0
+                    }
+                    == encoding
+            }) {
                 self.message(
                     MessageKind::Warning,
                     location,
@@ -6337,6 +6400,11 @@ impl<'s> Assembler<'s> {
             }
             register = next;
             previous = encoding;
+            if let Some(high) = trailing {
+                registers.push(high);
+                register = high;
+                previous = register_encoding(self.target, high);
+            }
         }
         if !self.is(TokenKind::RightBrace) {
             return self.token_error("'}' expected");
@@ -7060,6 +7128,12 @@ impl<'s> Assembler<'s> {
             let Some(value) = value else {
                 return Parse::NoMatch;
             };
+            if !instruction
+                && !self.arm_features.contains("HasV8Ops")
+                && matches!(value, 9 | 1 | 5 | 13)
+            {
+                return Parse::NoMatch;
+            }
             self.lex();
             value
         } else if self.is(TokenKind::Hash)
@@ -10456,7 +10530,15 @@ impl<'s> Assembler<'s> {
                 group.output
                     && (0..group.count)
                         .any(|offset| instruction.register_at(group.first + offset) == counter)
-            });
+            }) || (held.is_some_and(|held| table_bit(held, "variadicOpsAreDefs"))
+                && (description
+                    .groups
+                    .iter()
+                    .map(|group| group.first + group.count)
+                    .max()
+                    .unwrap_or(1)
+                    - 1..instruction.operands.len())
+                    .any(|index| instruction.register_at(index) == counter));
             if terminator {
                 return self.error(
                     location,
@@ -16781,7 +16863,7 @@ impl<'a> Assembler<'a> {
         if !self.is(TokenKind::LeftBrace) {
             return self.token_error("register list expected");
         }
-        if self.arm32_parse_register_list(&mut operands) {
+        if self.arm32_parse_register_list_with(&mut operands, true) {
             return true;
         }
         if self.parse_end_of_line() {
@@ -16811,22 +16893,32 @@ impl<'a> Assembler<'a> {
             if vector { "vsave" } else { "save" },
             names.join(", ")
         ));
-        let mut mask = 0u32;
-        let mut count = 0i64;
-        for held in &list {
-            let encoding = register_encoding(self.target, *held);
-            if mask & (1 << encoding) == 0 {
-                mask |= 1 << encoding;
-                count += 1;
+        let authentication = register_named(self.target, "ra_auth_code");
+        let mut index = list.len();
+        while index > 0 {
+            let mut mask = 0u32;
+            let mut count = 0i64;
+            while index > 0 && Some(list[index - 1]) != authentication {
+                let encoding = register_encoding(self.target, list[index - 1]);
+                if mask & (1 << encoding) == 0 {
+                    mask |= 1 << encoding;
+                    count += 1;
+                }
+                index -= 1;
             }
-        }
-        if count > 0 {
-            self.arm_unwind.stack_offset -= count * if vector { 8 } else { 4 };
-            self.arm32_flush_pending_offset();
-            if vector {
-                self.arm_unwind.assembler.vfp_register_save(mask);
-            } else {
-                self.arm_unwind.assembler.register_save(mask);
+            if count > 0 {
+                self.arm_unwind.stack_offset -= count * if vector { 8 } else { 4 };
+                self.arm32_flush_pending_offset();
+                if vector {
+                    self.arm_unwind.assembler.vfp_register_save(mask);
+                } else {
+                    self.arm_unwind.assembler.register_save(mask);
+                }
+            } else if index > 0 {
+                index -= 1;
+                self.arm_unwind.stack_offset -= 4;
+                self.arm32_flush_pending_offset();
+                self.arm_unwind.assembler.register_save(0);
             }
         }
         false

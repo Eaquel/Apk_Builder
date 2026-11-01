@@ -1033,7 +1033,7 @@ impl Target {
                 let mut sub_names = Vec::new();
                 let operand = match &argument {
                     TableValue::Record(operand) => operand.clone(),
-                    TableValue::Dag { arguments, .. } if self.isa == Isa::Armv8 => {
+                    TableValue::Dag { arguments, .. } if self.isa != Isa::X86 => {
                         sub_names = arguments
                             .iter()
                             .map(|(_, label)| label.clone().unwrap_or_default())
