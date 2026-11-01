@@ -675,6 +675,7 @@ pub enum Operand {
     CoprocessorOption(u32),
     SystemMask(u32),
     BankedRegister(u32),
+    ProcessorFlags(u32),
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -5173,6 +5174,7 @@ pub fn predicate(target: &Target, name: &str, operand: &Operand, thumb: bool) ->
         "isCoprocOption" => matches!(operand, Operand::CoprocessorOption(_)),
         "isMSRMask" => matches!(operand, Operand::SystemMask(_)),
         "isBankedReg" => matches!(operand, Operand::BankedRegister(_)),
+        "isProcIFlags" => matches!(operand, Operand::ProcessorFlags(_)),
         "isConstPoolAsmImm" | "isConstantPoolImm" => matches!(operand, Operand::ConstantPool(_)),
         _ => false,
     }
@@ -5829,7 +5831,14 @@ impl<'s> Assembler<'s> {
                     let Some(next) = register_named(self.target, &name) else {
                         return self.error(after, "invalid register in register list");
                     };
-                    if !registers.contains(&next) {
+                    if registers.contains(&next) {
+                        self.message(
+                            MessageKind::Warning,
+                            after,
+                            &format!("duplicated register ({name}) in register list"),
+                            None,
+                        );
+                    } else {
                         registers.push(next);
                     }
                     register = next;
@@ -5838,6 +5847,7 @@ impl<'s> Assembler<'s> {
             }
             self.lex();
             let location = self.location();
+            let written = self.lexer.token.text.clone();
             let Some(next) = self.arm32_try_register() else {
                 return self.error(location, "register expected");
             };
@@ -5859,7 +5869,7 @@ impl<'s> Assembler<'s> {
                 self.message(
                     MessageKind::Warning,
                     location,
-                    "duplicated register in register list",
+                    &format!("duplicated register ({written}) in register list"),
                     None,
                 );
             } else {
@@ -6347,6 +6357,33 @@ impl<'s> Assembler<'s> {
         Parse::Success
     }
 
+    fn arm32_parse_processor_flags(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
+        if !self.is(TokenKind::Identifier) {
+            return Parse::NoMatch;
+        }
+        let text = self.lexer.token.text.clone();
+        let mut flags = 0u32;
+        if text != "none" {
+            for letter in text.chars() {
+                let flag = match letter.to_ascii_lowercase() {
+                    'a' => 4,
+                    'i' => 2,
+                    'f' => 1,
+                    _ => return Parse::NoMatch,
+                };
+                if flags & flag != 0 {
+                    return Parse::NoMatch;
+                }
+                flags |= flag;
+            }
+        }
+        let start = self.lexer.token.start;
+        let end = self.lexer.token.end;
+        self.lex();
+        operands.push(parsed(Operand::ProcessorFlags(flags), start, end));
+        Parse::Success
+    }
+
     fn arm32_parse_banked_register(&mut self, operands: &mut Vec<ParsedOperand>) -> Parse {
         if !self.is(TokenKind::Identifier) {
             return Parse::NoMatch;
@@ -6534,7 +6571,7 @@ impl<'s> Assembler<'s> {
             }
             let mut predicates = self.target.instructions[entry.result].predicates.clone();
             if let Some(alias) = entry.alias {
-                predicates.extend(self.target.aliases[alias].predicates.clone());
+                predicates = self.target.aliases[alias].predicates.clone();
             }
             if !armv8::predicates_hold(self.target, &predicates, &self.arm_features) {
                 continue;
@@ -6588,6 +6625,7 @@ impl<'s> Assembler<'s> {
                 "CoprocOption" => self.arm32_parse_coprocessor_option(operands),
                 "MSRMask" => self.arm32_parse_system_mask(operands),
                 "BankedReg" => self.arm32_parse_banked_register(operands),
+                "ProcIFlags" => self.arm32_parse_processor_flags(operands),
                 "PostIdxReg" => self.arm32_parse_post_index(operands, false),
                 "PostIdxRegShifted" => self.arm32_parse_post_index(operands, true),
                 _ => Parse::NoMatch,
@@ -7170,7 +7208,8 @@ impl<'s> Assembler<'s> {
             }
             next = end;
         }
-        let prefix = operands.len() - usize::from(split.it_mask.is_some());
+        let prefix = operands.len()
+            - usize::from(split.it_mask.is_some() || split.interrupt_modification != 0);
         if !self.is(TokenKind::EndOfStatement) {
             if self.arm32_parse_operand(&mut operands, &mnemonic, prefix) {
                 return Err(());
@@ -7426,8 +7465,10 @@ impl<'s> Assembler<'s> {
                 | "addCoprocRegOperands"
                 | "addCoprocOptionOperands"
                 | "addMSRMaskOperands"
-                | "addBankedRegOperands",
+                | "addBankedRegOperands"
+                | "addProcIFlagsOperands",
                 Operand::CoprocessorNumber(value)
+                | Operand::ProcessorFlags(value)
                 | Operand::CoprocessorRegister(value)
                 | Operand::CoprocessorOption(value)
                 | Operand::SystemMask(value)
@@ -7823,7 +7864,7 @@ impl<'s> Assembler<'s> {
             }
             let mut predicates = target.instructions[entry.result].predicates.clone();
             if let Some(alias) = entry.alias {
-                predicates.extend(target.aliases[alias].predicates.clone());
+                predicates = target.aliases[alias].predicates.clone();
             }
             if mnemonic == "nop"
                 && target.instructions[entry.result].record == "tMOVr"

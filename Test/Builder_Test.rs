@@ -75180,6 +75180,9 @@ mod armv8_assembly {
             "add r0, pc, #123",
             "ldrd r0, [r10, #32]!",
             "ldrexd r2, r3, [r0]",
+            "cpsie if",
+            "cpsid a, #5",
+            "mul r0, r1, r2",
             "add r0, r1, r2",
             "add r0, r1, #1",
             "adds r0, r1, r2",
@@ -75783,6 +75786,9 @@ mod armv8_assembly {
     #[test]
     fn the_armv7_assembler_matches_llvm_mc_on_thumb_instructions() {
         let cases: &[&str] = &[
+            "cpsie f",
+            "cpsid aif",
+            "cpsie i, #3",
             "vld3.8 {d16, d17, d18}, [r0:64]",
             "vst3.16 {d16, d17, d18}, [r0]!",
             "vld4.32 {d0[1], d1[1], d2[1], d3[1]}, [r1]",
